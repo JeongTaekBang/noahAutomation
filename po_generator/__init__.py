@@ -1,0 +1,25 @@
+"""
+NOAH Purchase Order Auto-Generator Package
+==========================================
+
+RCK Order No.를 입력하면 NOAH_PO_Lists.xlsx에서 해당 데이터를 읽어
+자동으로 발주서(Purchase Order + Description)를 생성합니다.
+"""
+
+from po_generator.config import BASE_DIR, OUTPUT_DIR, HISTORY_FILE
+from po_generator.utils import load_noah_po_lists, find_order_data, get_safe_value
+from po_generator.validators import validate_order_data
+from po_generator.history import check_duplicate_order, save_to_history
+from po_generator.excel_generator import create_purchase_order, create_description_sheet
+
+__version__ = "2.0.0"
+__all__ = [
+    "load_noah_po_lists",
+    "find_order_data",
+    "get_safe_value",
+    "validate_order_data",
+    "check_duplicate_order",
+    "save_to_history",
+    "create_purchase_order",
+    "create_description_sheet",
+]
