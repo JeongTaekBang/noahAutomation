@@ -37,8 +37,15 @@ def get_safe_value(
         해당 키의 값 또는 기본값
     """
     value = order_data.get(key, default)
-    if pd.isna(value) or str(value) == 'nan':
+
+    # None 또는 pandas NaN/NA 체크
+    if value is None or pd.isna(value):
         return default
+
+    # 문자열 'nan' 체크 (대소문자 무관) - pandas가 가끔 이런 문자열을 반환
+    if isinstance(value, str) and value.strip().lower() == 'nan':
+        return default
+
     return value
 
 

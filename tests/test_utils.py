@@ -33,9 +33,25 @@ class TestGetSafeValue:
         assert get_safe_value(data, 'qty') == ''
 
     def test_nan_string_value(self):
-        """문자열 'nan'"""
-        data = pd.Series({'value': 'nan'})
-        assert get_safe_value(data, 'value') == ''
+        """문자열 'nan' (대소문자 무관)"""
+        data = pd.Series({'lower': 'nan', 'upper': 'NaN', 'all_upper': 'NAN'})
+        assert get_safe_value(data, 'lower') == ''
+        assert get_safe_value(data, 'upper') == ''
+        assert get_safe_value(data, 'all_upper') == ''
+
+    def test_nan_like_string_not_filtered(self):
+        """'nan'을 포함하지만 실제 값인 문자열은 유지"""
+        data = pd.Series({
+            'name1': 'Banana',
+            'name2': 'Ferdinand',
+            'name3': 'nano',
+            'name4': 'ANNAN',
+        })
+        # 이 값들은 'nan' 문자열이 아니므로 그대로 반환되어야 함
+        assert get_safe_value(data, 'name1') == 'Banana'
+        assert get_safe_value(data, 'name2') == 'Ferdinand'
+        assert get_safe_value(data, 'name3') == 'nano'
+        assert get_safe_value(data, 'name4') == 'ANNAN'
 
     def test_none_value(self):
         """None 값"""

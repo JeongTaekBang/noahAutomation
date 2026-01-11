@@ -46,10 +46,12 @@ from po_generator.validators import validate_order_data, validate_multiple_items
 from po_generator.history import check_duplicate_order, save_to_history, get_all_history, get_history_count, get_current_month_info, sanitize_filename
 from po_generator.excel_generator import create_purchase_order, create_description_sheet
 
-# 경고 필터링
+# 경고 필터링 (openpyxl/pandas 관련 경고만 선택적으로 무시)
 import warnings
-warnings.filterwarnings('ignore', category=UserWarning)
-warnings.filterwarnings('ignore', category=FutureWarning)
+# openpyxl의 스타일 관련 UserWarning 무시 (예: 알 수 없는 확장 기능)
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
+# pandas의 FutureWarning 무시 (버전 호환성 관련)
+warnings.filterwarnings('ignore', category=FutureWarning, module='pandas')
 
 
 def setup_logging(verbose: bool = False) -> None:
