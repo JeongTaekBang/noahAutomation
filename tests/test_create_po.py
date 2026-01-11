@@ -214,35 +214,60 @@ class TestPrintAvailableOrders:
 
 
 class TestCLIArguments:
-    """CLI 인자 파싱 테스트"""
+    """CLI 인자 파싱 테스트 (argparse 기반)"""
 
     def test_force_flag_parsing(self):
         """--force 플래그 파싱 테스트"""
-        test_args = ['create_po.py', 'ND-0001', '--force']
-        with patch.object(sys, 'argv', test_args):
-            force = '--force' in sys.argv
-            assert force is True
+        from create_po import create_argument_parser
+        parser = create_argument_parser()
+        args = parser.parse_args(['ND-0001', '--force'])
+        assert args.force is True
+        assert args.order_numbers == ['ND-0001']
+
+    def test_force_short_flag(self):
+        """-f 단축 플래그 테스트"""
+        from create_po import create_argument_parser
+        parser = create_argument_parser()
+        args = parser.parse_args(['ND-0001', '-f'])
+        assert args.force is True
 
     def test_history_flag_parsing(self):
         """--history 플래그 파싱 테스트"""
-        test_args = ['create_po.py', '--history']
-        with patch.object(sys, 'argv', test_args):
-            show_hist = '--history' in sys.argv
-            assert show_hist is True
+        from create_po import create_argument_parser
+        parser = create_argument_parser()
+        args = parser.parse_args(['--history'])
+        assert args.history is True
+        assert args.order_numbers == []
 
     def test_verbose_flag_parsing(self):
         """--verbose 플래그 파싱 테스트"""
-        test_args = ['create_po.py', 'ND-0001', '--verbose']
-        with patch.object(sys, 'argv', test_args):
-            verbose = '--verbose' in sys.argv or '-v' in sys.argv
-            assert verbose is True
+        from create_po import create_argument_parser
+        parser = create_argument_parser()
+        args = parser.parse_args(['ND-0001', '--verbose'])
+        assert args.verbose is True
+
+    def test_verbose_short_flag(self):
+        """-v 단축 플래그 테스트"""
+        from create_po import create_argument_parser
+        parser = create_argument_parser()
+        args = parser.parse_args(['ND-0001', '-v'])
+        assert args.verbose is True
 
     def test_export_flag_parsing(self):
         """--export 플래그 파싱 테스트"""
-        test_args = ['create_po.py', '--history', '--export']
-        with patch.object(sys, 'argv', test_args):
-            export = '--export' in sys.argv
-            assert export is True
+        from create_po import create_argument_parser
+        parser = create_argument_parser()
+        args = parser.parse_args(['--history', '--export'])
+        assert args.history is True
+        assert args.export is True
+
+    def test_multiple_order_numbers(self):
+        """여러 주문번호 파싱 테스트"""
+        from create_po import create_argument_parser
+        parser = create_argument_parser()
+        args = parser.parse_args(['ND-0001', 'ND-0002', 'ND-0003'])
+        assert args.order_numbers == ['ND-0001', 'ND-0002', 'ND-0003']
+        assert args.force is False
 
 
 class TestConfigConstants:

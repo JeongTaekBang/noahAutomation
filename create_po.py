@@ -21,6 +21,7 @@ RCK Order No.를 입력하면 NOAH_PO_Lists.xlsx에서 해당 데이터를 읽�
 
 from __future__ import annotations
 
+import argparse
 import sys
 import logging
 from datetime import datetime
@@ -169,26 +170,44 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
     customer_name_safe = sanitize_filename(customer_name_raw)[:CUSTOMER_NAME_MAX_LENGTH]
     output_file = OUTPUT_DIR / f"PO_{order_no}_{customer_name_safe}_{today}.xlsx"
 
-    # 8. 워크북 생성
-    wb = Workbook()
+    # 8. 워크북 생성 및 저장 (트랜잭션)
+    try:
+        wb = Workbook()
 
-    # Purchase Order 시트
-    ws_po = wb.active
-    ws_po.title = "Purchase Order"
-    create_purchase_order(ws_po, order_data, items_df)
+        # Purchase Order 시트
+        ws_po = wb.active
+        ws_po.title = "Purchase Order"
+        create_purchase_order(ws_po, order_data, items_df)
 
-    # Description 시트
-    ws_desc = wb.create_sheet("Description")
-    create_description_sheet(ws_desc, order_data, items_df)
+        # Description 시트
+        ws_desc = wb.create_sheet("Description")
+        create_description_sheet(ws_desc, order_data, items_df)
 
-    # 9. 저장
-    wb.save(output_file)
-    print(f"  -> 발주서 생성 완료: {output_file.name}")
+        # 9. 저장
+        wb.save(output_file)
+        print(f"  -> 발주서 생성 완료: {output_file.name}")
 
-    # 10. 이력 저장 (발주서 파일 복사)
+    except PermissionError:
+        print(f"  [오류] 파일 저장 실패: {output_file.name} (파일이 열려있거나 권한 없음)")
+        return False
+    except Exception as e:
+        print(f"  [오류] 발주서 생성 실패: {e}")
+        # 롤백: 부분적으로 생성된 파일 삭제
+        if output_file.exists():
+            try:
+                output_file.unlink()
+                print("  -> 생성된 파일 롤백 완료")
+            except Exception:
+                pass
+        return False
+
+    # 10. 이력 저장 (발주서 파일에서 데이터 추출)
     order_no_val = get_safe_value(order_data, 'RCK Order no.')
     customer_name_val = get_safe_value(order_data, 'Customer name')
-    save_to_history(output_file, order_no_val, customer_name_val)
+    history_saved = save_to_history(output_file, order_no_val, customer_name_val)
+
+    if not history_saved:
+        print("  [주의] 이력 저장 실패 - 발주서는 정상 생성됨")
 
     return True
 
@@ -266,32 +285,72 @@ def print_available_orders(df: pd.DataFrame, limit: int = ORDER_LIST_DISPLAY_LIM
         print(f"  ... 외 {len(orders) - limit}건")
 
 
+def create_argument_parser() -> argparse.ArgumentParser:
+    """CLI 인자 파서 생성
+
+    Returns:
+        설정된 ArgumentParser
+    """
+    parser = argparse.ArgumentParser(
+        prog='create_po',
+        description='NOAH Purchase Order Auto-Generator - RCK Order No.로 발주서 자동 생성',
+        epilog='예시: python create_po.py ND-0001 ND-0002 --force',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument(
+        'order_numbers',
+        nargs='*',
+        metavar='ORDER_NO',
+        help='생성할 RCK Order No. (여러 개 가능)',
+    )
+
+    parser.add_argument(
+        '-f', '--force',
+        action='store_true',
+        help='중복 발주 및 검증 오류 무시하고 강제 생성',
+    )
+
+    parser.add_argument(
+        '-v', '--verbose',
+        action='store_true',
+        help='상세 로그 출력',
+    )
+
+    parser.add_argument(
+        '--history',
+        action='store_true',
+        help='현재 월 발주 이력 조회',
+    )
+
+    parser.add_argument(
+        '--export',
+        action='store_true',
+        help='이력을 Excel 파일로 내보내기 (--history와 함께 사용)',
+    )
+
+    return parser
+
+
 def main() -> int:
     """메인 함수
 
     Returns:
         종료 코드 (0: 성공, 1: 실패)
     """
+    parser = create_argument_parser()
+    args = parser.parse_args()
+
     # 로깅 설정
-    setup_logging(verbose='--verbose' in sys.argv or '-v' in sys.argv)
-
-    # 옵션 파싱
-    force = '--force' in sys.argv
-    show_hist = '--history' in sys.argv
-    export_hist = '--export' in sys.argv
-
-    args = [
-        arg for arg in sys.argv[1:]
-        if arg not in ('--force', '--verbose', '-v', '--history', '--export')
-    ]
+    setup_logging(verbose=args.verbose)
 
     # 이력 조회 모드
-    if show_hist:
-        return show_history(export=export_hist)
+    if args.history:
+        return show_history(export=args.export)
 
-    # 인자 없으면 도움말 출력
-    if len(args) < 1:
-        print(__doc__)
+    # 인자 없으면 도움말 + 사용 가능한 주문번호 출력
+    if not args.order_numbers:
+        parser.print_help()
 
         try:
             df = load_noah_po_lists()
@@ -314,17 +373,17 @@ def main() -> int:
 
     # 각 Order No.에 대해 발주서 생성
     success_count = 0
-    for order_no in args:
-        if generate_po(order_no, df, force):
+    for order_no in args.order_numbers:
+        if generate_po(order_no, df, args.force):
             success_count += 1
 
     # 결과 출력
     print(f"\n{'=' * 50}")
-    print(f"완료: {success_count}/{len(args)}건 발주서 생성")
+    print(f"완료: {success_count}/{len(args.order_numbers)}건 발주서 생성")
     print(f"출력 폴더: {OUTPUT_DIR}")
     print('=' * 50)
 
-    return 0 if success_count == len(args) else 1
+    return 0 if success_count == len(args.order_numbers) else 1
 
 
 if __name__ == "__main__":

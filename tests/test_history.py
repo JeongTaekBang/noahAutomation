@@ -113,7 +113,8 @@ class TestCheckDuplicateOrder:
         month_dir = tmp_path / 'po_history' / '2026' / '1월'
 
         with patch('po_generator.history._get_current_month_dir', return_value=month_dir):
-            result = check_duplicate_order('ND-0001')
+            # check_all_months=False로 현재 월만 검색
+            result = check_duplicate_order('ND-0001', check_all_months=False)
             assert result is None
 
     def test_order_in_folder(self, tmp_path: Path):
@@ -131,7 +132,8 @@ class TestCheckDuplicateOrder:
         df.to_excel(test_file, index=False)
 
         with patch('po_generator.history._get_current_month_dir', return_value=month_dir):
-            result = check_duplicate_order('ND-0001')
+            # check_all_months=False로 현재 월만 검색
+            result = check_duplicate_order('ND-0001', check_all_months=False)
             assert result is not None
             assert result['생성일시'] == '2026-01-01 10:00:00'
 
@@ -146,8 +148,28 @@ class TestCheckDuplicateOrder:
         df.to_excel(test_file, index=False)
 
         with patch('po_generator.history._get_current_month_dir', return_value=month_dir):
-            result = check_duplicate_order('ND-9999')
+            result = check_duplicate_order('ND-9999', check_all_months=False)
             assert result is None
+
+    def test_check_all_months(self, tmp_path: Path):
+        """전체 월 검색 테스트"""
+        history_dir = tmp_path / 'po_history'
+        # 이전 월 폴더에 이력 생성
+        prev_month_dir = history_dir / '2025' / '12월'
+        prev_month_dir.mkdir(parents=True)
+
+        test_file = prev_month_dir / '20251215_ND-0001_TestCustomer.xlsx'
+        df = pd.DataFrame([{
+            '생성일시': '2025-12-15 10:00:00',
+            'RCK Order no.': 'ND-0001',
+        }])
+        df.to_excel(test_file, index=False)
+
+        with patch('po_generator.history.HISTORY_DIR', history_dir):
+            # 전체 검색 시 이전 월에서도 찾아야 함
+            result = check_duplicate_order('ND-0001', check_all_months=True)
+            assert result is not None
+            assert '2025-12-15' in result['생성일시']
 
 
 class TestSaveToHistory:

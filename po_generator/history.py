@@ -172,25 +172,38 @@ def _extract_data_from_po_file(po_file: Path) -> dict:
     return record
 
 
-def check_duplicate_order(order_no: str) -> Optional[DuplicateInfo]:
-    """중복 발주 체크 (현재 월 폴더만)
+def check_duplicate_order(order_no: str, check_all_months: bool = True) -> Optional[DuplicateInfo]:
+    """중복 발주 체크
 
     Args:
         order_no: RCK Order No.
+        check_all_months: True면 전체 이력 검색, False면 현재 월만
 
     Returns:
         중복인 경우 이전 발주 정보, 아니면 None
     """
-    month_dir = _get_current_month_dir()
+    safe_order_no = _sanitize_filename(order_no)
 
-    if month_dir.exists():
+    # 검색할 폴더 목록 결정
+    if check_all_months and HISTORY_DIR.exists():
+        # 전체 이력 폴더에서 검색 (po_history/**/*)
+        search_dirs = list(HISTORY_DIR.rglob("*월"))
+    else:
+        # 현재 월만 검색
+        month_dir = _get_current_month_dir()
+        search_dirs = [month_dir] if month_dir.exists() else []
+
+    for month_dir in search_dirs:
+        if not month_dir.is_dir():
+            continue
+
         for history_file in month_dir.glob("*.xlsx"):
             # 파일명에서 주문번호 추출 (YYYYMMDD_주문번호_고객명.xlsx)
             filename = history_file.stem
             parts = filename.split('_', 2)  # 최대 3개로 분리
             if len(parts) >= 2:
                 file_order_no = parts[1]
-                if file_order_no == _sanitize_filename(order_no):
+                if file_order_no == safe_order_no:
                     logger.warning(f"중복 발주 감지: {order_no}")
                     # 파일에서 생성일시 읽기
                     try:
