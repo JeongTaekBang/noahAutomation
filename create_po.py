@@ -10,6 +10,8 @@ RCK Order No.를 입력하면 NOAH_PO_Lists.xlsx에서 해당 데이터를 읽�
     python create_po.py ND-0001
     python create_po.py ND-0001 ND-0002 ND-0003  # 여러 건 동시 생성
     python create_po.py ND-0001 --force          # 중복 발주/검증 오류 무시
+    python create_po.py --history                # 발주 이력 조회
+    python create_po.py --history --export       # 이력을 Excel로 내보내기
 
 검증 항목:
     - 필수 필드: Customer name, Customer PO, Item qty, Model, ICO Unit
@@ -27,14 +29,21 @@ from pathlib import Path
 import pandas as pd
 from openpyxl import Workbook
 
-from po_generator.config import OUTPUT_DIR
+from po_generator.config import (
+    OUTPUT_DIR,
+    CUSTOMER_NAME_MAX_LENGTH,
+    ORDER_LIST_DISPLAY_LIMIT,
+    HISTORY_CUSTOMER_DISPLAY_LENGTH,
+    HISTORY_DESC_DISPLAY_LENGTH,
+    HISTORY_DATE_DISPLAY_LENGTH,
+)
 from po_generator.utils import (
     load_noah_po_lists,
     find_order_data,
     get_safe_value,
 )
 from po_generator.validators import validate_order_data, validate_multiple_items
-from po_generator.history import check_duplicate_order, save_to_history
+from po_generator.history import check_duplicate_order, save_to_history, get_all_history, get_history_count, get_current_month_info, sanitize_filename
 from po_generator.excel_generator import create_purchase_order, create_description_sheet
 
 # 경고 필터링
@@ -154,8 +163,8 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
 
     # 7. 파일명 생성
     today = datetime.now().strftime("%y%m%d")
-    customer_name_safe = get_safe_value(order_data, 'Customer name', 'Unknown')[:10]
-    customer_name_safe = customer_name_safe.replace(' ', '_')
+    customer_name_raw = get_safe_value(order_data, 'Customer name', 'Unknown')
+    customer_name_safe = sanitize_filename(customer_name_raw)[:CUSTOMER_NAME_MAX_LENGTH]
     output_file = OUTPUT_DIR / f"PO_{order_no}_{customer_name_safe}_{today}.xlsx"
 
     # 8. 워크북 생성
@@ -174,18 +183,78 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
     wb.save(output_file)
     print(f"  -> 발주서 생성 완료: {output_file.name}")
 
-    # 10. 이력 저장
-    save_to_history(order_data, output_file)
+    # 10. 이력 저장 (발주서 파일 복사)
+    order_no_val = get_safe_value(order_data, 'RCK Order no.')
+    customer_name_val = get_safe_value(order_data, 'Customer name')
+    save_to_history(output_file, order_no_val, customer_name_val)
 
     return True
 
 
-def print_available_orders(df: pd.DataFrame, limit: int = 20) -> None:
+def show_history(export: bool = False) -> int:
+    """발주 이력 조회 및 내보내기 (현재 월만)
+
+    Args:
+        export: Excel 파일로 내보내기 여부
+
+    Returns:
+        종료 코드 (0: 성공, 1: 실패)
+    """
+    month_str, month_dir = get_current_month_info()
+
+    print("\n" + "=" * 60)
+    print(f"  발주 이력 조회 ({month_str})")
+    print("=" * 60)
+
+    count = get_history_count()
+    if count == 0:
+        print(f"\n  {month_str} 발주 이력이 없습니다.")
+        print(f"  폴더: {month_dir}")
+        return 0
+
+    print(f"\n  {month_str}: 총 {count}건의 발주 이력")
+
+    df = get_all_history()
+    if df.empty:
+        print("  이력 데이터를 불러올 수 없습니다.")
+        return 1
+
+    print("\n  이력 목록:")
+    print("-" * 60)
+
+    # 전체 표시 (월별이므로 건수가 적음)
+    for idx, row in df.iterrows():
+        order_no = row.get('RCK Order no.', 'N/A')
+        customer = str(row.get('Customer name', 'N/A'))[:HISTORY_CUSTOMER_DISPLAY_LENGTH]
+        desc = str(row.get('Description', row.get('Model', 'N/A')))[:HISTORY_DESC_DISPLAY_LENGTH]
+        created = str(row.get('생성일시', 'N/A'))[:HISTORY_DATE_DISPLAY_LENGTH]
+        total = row.get('Total net amount', row.get('Order Total', ''))
+        total_str = f"{int(total):,}" if pd.notna(total) and total != '' else ''
+        print(f"  {created} | {order_no} | {customer} | {desc} | {total_str}")
+
+    print("-" * 60)
+
+    # Excel 내보내기 (po_history 루트에 저장)
+    if export:
+        from po_generator.config import HISTORY_DIR
+        HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+        today = datetime.now().strftime("%Y%m%d_%H%M%S")
+        export_file = HISTORY_DIR / f"발주이력_{month_str.replace(' ', '')}_{today}.xlsx"
+        df.to_excel(export_file, index=False)
+        print(f"\n  -> Excel 내보내기 완료: {export_file.name}")
+        print(f"     저장 위치: {HISTORY_DIR}")
+        print(f"     저장된 컬럼: {len(df.columns)}개")
+        print(f"     저장된 행: {len(df)}건")
+
+    return 0
+
+
+def print_available_orders(df: pd.DataFrame, limit: int = ORDER_LIST_DISPLAY_LIMIT) -> None:
     """사용 가능한 주문번호 목록 출력
 
     Args:
         df: 주문 데이터
-        limit: 출력 제한 수
+        limit: 출력 제한 수 (기본값: ORDER_LIST_DISPLAY_LIMIT)
     """
     orders = df['RCK Order no.'].dropna().unique().tolist()
     print("\n사용 가능한 RCK Order No. 목록:")
@@ -206,10 +275,17 @@ def main() -> int:
 
     # 옵션 파싱
     force = '--force' in sys.argv
+    show_hist = '--history' in sys.argv
+    export_hist = '--export' in sys.argv
+
     args = [
         arg for arg in sys.argv[1:]
-        if arg not in ('--force', '--verbose', '-v')
+        if arg not in ('--force', '--verbose', '-v', '--history', '--export')
     ]
+
+    # 이력 조회 모드
+    if show_hist:
+        return show_history(export=export_hist)
 
     # 인자 없으면 도움말 출력
     if len(args) < 1:

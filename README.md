@@ -42,6 +42,15 @@ python create_po.py ND-0001
 
 # 여러 건 동시 생성
 python create_po.py ND-0001 ND-0002 ND-0003
+
+# 강제 생성 (중복 및 검증 오류 무시)
+python create_po.py ND-0001 --force
+
+# 이력 조회 (현재 월)
+python create_po.py --history
+
+# 이력을 Excel로 내보내기
+python create_po.py --history --export
 ```
 
 ### 3단계: 결과 확인
@@ -86,8 +95,12 @@ purchaseOrderAutomation/
 ├── NOAH_PO_Lists.xlsx   ← 여기에 주문 정보 입력
 ├── create_po.bat        ← 더블클릭으로 실행
 ├── create_po.py         ← 메인 프로그램
+├── po_generator/        ← 핵심 패키지
 ├── generated_po/        ← 생성된 발주서 저장 폴더
-└── po_history.xlsx      ← 발주 이력 (자동 생성)
+└── po_history/          ← 발주 이력 (월별 폴더)
+    └── YYYY/
+        └── M월/
+            └── YYYYMMDD_주문번호_고객명.xlsx
 ```
 
 ---
@@ -119,7 +132,8 @@ purchaseOrderAutomation/
 - 숫자 형식인지 확인 (텍스트로 입력되면 인식 안 됨)
 
 ### "이미 발주된 건입니다"
-- `po_history.xlsx`에서 이전 발주 기록 확인
+- `po_history/` 폴더에서 이전 발주 기록 확인
+- 현재 월 이력: `python create_po.py --history`
 - 재발주가 필요하면 Y 입력하여 진행
 
 ---

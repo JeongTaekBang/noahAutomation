@@ -16,7 +16,7 @@ NOAH Purchase Order Auto-Generator - RCK(Rotork Korea Sales Office)에서 NOAH(I
 ### Workflow
 1. 고객 발주 접수 → NOAH_PO_Lists.xlsx에 정보 입력
 2. RCK Order No. 입력 → 발주서(Purchase Order + Description) 자동 생성
-3. 생성 이력 po_history.xlsx에 기록 (중복 발주 방지)
+3. 생성 이력 po_history/ 폴더에 건별 파일로 기록 (중복 발주 방지, 데이터 스냅샷)
 
 ## Commands
 
@@ -35,6 +35,12 @@ C:/Users/since/anaconda3/envs/po-automate/python.exe create_po.py ND-0001 ND-000
 
 # Force create (skip duplicate warning and validation errors)
 C:/Users/since/anaconda3/envs/po-automate/python.exe create_po.py ND-0001 --force
+
+# View PO history
+C:/Users/since/anaconda3/envs/po-automate/python.exe create_po.py --history
+
+# Export history to Excel (전체 데이터 스냅샷 포함)
+C:/Users/since/anaconda3/envs/po-automate/python.exe create_po.py --history --export
 ```
 
 ### Validation
@@ -68,7 +74,9 @@ purchaseOrderAutomation/
 ├── create_po.py            # CLI 진입점
 ├── create_po.bat           # Windows 배치 파일
 ├── NOAH_PO_Lists.xlsx      # 소스 데이터 (국내/해외)
-├── po_history.xlsx         # 발주 이력
+├── po_history/             # 발주 이력 (월별 폴더)
+│   └── YYYY/M월/           # 연/월별 폴더
+│       └── YYYYMMDD_주문번호_고객명.xlsx
 ├── generated_po/           # 생성된 발주서 폴더
 ├── requirements.txt
 └── .gitignore
@@ -79,7 +87,7 @@ purchaseOrderAutomation/
 2. `create_po.py` - CLI that orchestrates the generation process
 3. `po_generator/` - Core package with modular components
 4. `generated_po/` - Output directory for generated Excel files
-5. `po_history.xlsx` - Tracks previously generated POs to detect duplicates
+5. `po_history/` - 건별 이력 파일 (발주서에서 추출한 DB 형식 스냅샷, 중복 방지)
 
 ### Key Modules
 | Module | Responsibility |
@@ -87,7 +95,7 @@ purchaseOrderAutomation/
 | `config.py` | 경로, 색상, 필드 정의, 상수 |
 | `utils.py` | get_safe_value, load_noah_po_lists, find_order_data |
 | `validators.py` | ValidationResult, validate_order_data, validate_multiple_items |
-| `history.py` | check_duplicate_order, save_to_history |
+| `history.py` | check_duplicate_order, save_to_history (발주서→DB 형식), get_all_history |
 | `excel_generator.py` | create_purchase_order, create_description_sheet |
 
 ### Excel Template Structure
@@ -124,8 +132,13 @@ C:/Users/since/anaconda3/envs/po-automate/python.exe -m pytest tests/ --cov=po_g
   ├── po_history.xlsx       (이력 - 공유)
   └── generated_po/         (생성된 발주서 - 공유)
   ```
-- [ ] po_history 개별 파일 방식으로 변경 (동시 사용 충돌 방지)
-  - 기존: `po_history.xlsx` 단일 파일
-  - 변경: `po_history/` 폴더에 건별 Excel 파일 생성
-  - 파일명: `YYYYMMDD_주문번호_고객명.xlsx`
-  - 담당자가 Power Query로 폴더 내 파일 합쳐서 전체 이력 관리
+- [x] po_history 월별 폴더 방식으로 변경 ✓
+  - 구조: `po_history/YYYY/M월/YYYYMMDD_주문번호_고객명.xlsx`
+  - **월별로 독립 관리** - 누적은 사용자가 수동으로 합침
+  - **발주서에서 데이터 추출 → DB 형식(한 행)으로 저장**
+    - 메타: 생성일시, RCK Order no., Customer name, 원본파일
+    - Purchase Order 시트: 고객명, 금액, 납기일, Incoterms 등
+    - Description 시트: 사양 필드, 옵션 필드 전체
+  - 현재 월 이력 조회: `python create_po.py --history`
+  - 현재 월 Excel 내보내기: `python create_po.py --history --export`
+  - 수동 발주서도 같은 폴더에 넣으면 집계됨

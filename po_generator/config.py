@@ -14,7 +14,8 @@ from typing import Final
 BASE_DIR: Final[Path] = Path(__file__).parent.parent
 NOAH_PO_LISTS_FILE: Final[Path] = BASE_DIR / "NOAH_PO_Lists.xlsx"
 OUTPUT_DIR: Final[Path] = BASE_DIR / "generated_po"
-HISTORY_FILE: Final[Path] = BASE_DIR / "po_history.xlsx"
+HISTORY_FILE: Final[Path] = BASE_DIR / "po_history.xlsx"  # Legacy (하위 호환)
+HISTORY_DIR: Final[Path] = BASE_DIR / "po_history"  # 새로운 폴더 방식
 
 
 # === 시트 설정 ===
@@ -33,6 +34,14 @@ ITEM_END_ROW: Final[int] = 19
 MIN_LEAD_TIME_DAYS: Final[int] = 7
 
 
+# === 파일명/출력 설정 ===
+CUSTOMER_NAME_MAX_LENGTH: Final[int] = 10  # 파일명에 사용할 고객명 최대 길이
+ORDER_LIST_DISPLAY_LIMIT: Final[int] = 20  # 주문 목록 출력 제한
+HISTORY_CUSTOMER_DISPLAY_LENGTH: Final[int] = 15  # 이력 조회 시 고객명 표시 길이
+HISTORY_DESC_DISPLAY_LENGTH: Final[int] = 20  # 이력 조회 시 설명 표시 길이
+HISTORY_DATE_DISPLAY_LENGTH: Final[int] = 10  # 이력 조회 시 날짜 표시 길이
+
+
 # === 필수 필드 ===
 REQUIRED_FIELDS: Final[tuple[str, ...]] = (
     'Customer name',
@@ -49,7 +58,7 @@ SPEC_FIELDS: Final[tuple[str, ...]] = (
     'Handwheel', 'RPM', 'Turns', 'Bushing', 'MOV', 'Gearbox model',
     'Gearbox Flange', 'Gearbox ratio', 'Gearbox position', 'Operating mode',
     'Fail action', 'Enclosure', 'Cable entry', 'Paint', 'Cover tube(mm)',
-    'WD code', 'Test report', 'Version', 'Remark2',
+    'WD code', 'Test report', 'Version', 'Note',
 )
 
 
