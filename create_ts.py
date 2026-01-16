@@ -15,23 +15,20 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import datetime
-from pathlib import Path
 
 import pandas as pd
 
 from po_generator.config import (
     TS_OUTPUT_DIR,
     TS_TEMPLATE_FILE,
-    ORDER_LIST_DISPLAY_LIMIT,
 )
 from po_generator.utils import (
     load_noah_po_lists,
     find_order_data,
     get_safe_value,
 )
-from po_generator.history import sanitize_filename
 from po_generator.ts_generator import create_ts_xlwings
+from po_generator.cli_common import print_available_orders, validate_output_path, generate_output_filename
 
 
 def generate_ts(order_no: str, df: pd.DataFrame) -> bool:
@@ -84,22 +81,12 @@ def generate_ts(order_no: str, df: pd.DataFrame) -> bool:
     # 5. 출력 디렉토리 생성
     TS_OUTPUT_DIR.mkdir(exist_ok=True)
 
-    # 6. 파일명 생성
-    today = datetime.now().strftime("%y%m%d")
+    # 6. 파일명 생성 및 경로 검증
     customer_name_raw = get_safe_value(order_data, 'Customer name', 'Unknown')
-    customer_name_safe = sanitize_filename(customer_name_raw)
-    order_no_safe = sanitize_filename(order_no)
-    output_file = TS_OUTPUT_DIR / f"TS_{order_no_safe}_{customer_name_safe}_{today}.xlsx"
+    output_file = generate_output_filename("TS", order_no, customer_name_raw, TS_OUTPUT_DIR)
 
-    # Path Traversal 방지
-    try:
-        if not output_file.resolve().is_relative_to(TS_OUTPUT_DIR.resolve()):
-            print(f"  [오류] 잘못된 파일 경로: {output_file}")
-            return False
-    except ValueError:
-        if str(TS_OUTPUT_DIR.resolve()) not in str(output_file.resolve()):
-            print(f"  [오류] 잘못된 파일 경로: {output_file}")
-            return False
+    if not validate_output_path(output_file, TS_OUTPUT_DIR):
+        return False
 
     # 7. 거래명세표 생성 (xlwings)
     try:
@@ -122,21 +109,6 @@ def generate_ts(order_no: str, df: pd.DataFrame) -> bool:
         return False
 
     return True
-
-
-def print_available_orders(df: pd.DataFrame, limit: int = ORDER_LIST_DISPLAY_LIMIT) -> None:
-    """사용 가능한 주문번호 목록 출력
-
-    Args:
-        df: 주문 데이터
-        limit: 출력 제한 수
-    """
-    orders = df['RCK Order no.'].dropna().unique().tolist()
-    print("\n사용 가능한 RCK Order No. 목록:")
-    for order in orders[:limit]:
-        print(f"  - {order}")
-    if len(orders) > limit:
-        print(f"  ... 외 {len(orders) - limit}건")
 
 
 def create_argument_parser() -> argparse.ArgumentParser:

@@ -42,8 +42,9 @@ from po_generator.utils import (
     get_safe_value,
 )
 from po_generator.validators import validate_order_data, validate_multiple_items
-from po_generator.history import check_duplicate_order, save_to_history, get_all_history, get_history_count, get_current_month_info, sanitize_filename
+from po_generator.history import check_duplicate_order, save_to_history, get_all_history, get_history_count, get_current_month_info
 from po_generator.excel_generator import create_po_workbook
+from po_generator.cli_common import print_available_orders, validate_output_path, generate_output_filename
 
 # 경고 필터링 (openpyxl/pandas 관련 경고만 선택적으로 무시)
 import warnings
@@ -162,23 +163,12 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
     # 6. 출력 디렉토리 생성
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    # 7. 파일명 생성
-    today = datetime.now().strftime("%y%m%d")
+    # 7. 파일명 생성 및 경로 검증
     customer_name_raw = get_safe_value(order_data, 'Customer name', 'Unknown')
-    customer_name_safe = sanitize_filename(customer_name_raw)
-    order_no_safe = sanitize_filename(order_no)
-    output_file = OUTPUT_DIR / f"PO_{order_no_safe}_{customer_name_safe}_{today}.xlsx"
+    output_file = generate_output_filename("PO", order_no, customer_name_raw, OUTPUT_DIR)
 
-    # Path Traversal 방지: 출력 파일이 OUTPUT_DIR 내에 있는지 검증
-    try:
-        if not output_file.resolve().is_relative_to(OUTPUT_DIR.resolve()):
-            print(f"  [오류] 잘못된 파일 경로: {output_file}")
-            return False
-    except ValueError:
-        # Python 3.9+ is_relative_to() 지원 확인용 fallback
-        if str(OUTPUT_DIR.resolve()) not in str(output_file.resolve()):
-            print(f"  [오류] 잘못된 파일 경로: {output_file}")
-            return False
+    if not validate_output_path(output_file, OUTPUT_DIR):
+        return False
 
     # 8. 워크북 생성 및 저장 (트랜잭션, 템플릿 기반)
     try:
@@ -269,21 +259,6 @@ def show_history(export: bool = False) -> int:
         print(f"     저장된 행: {len(df)}건")
 
     return 0
-
-
-def print_available_orders(df: pd.DataFrame, limit: int = ORDER_LIST_DISPLAY_LIMIT) -> None:
-    """사용 가능한 주문번호 목록 출력
-
-    Args:
-        df: 주문 데이터
-        limit: 출력 제한 수 (기본값: ORDER_LIST_DISPLAY_LIMIT)
-    """
-    orders = df['RCK Order no.'].dropna().unique().tolist()
-    print("\n사용 가능한 RCK Order No. 목록:")
-    for order in orders[:limit]:
-        print(f"  - {order}")
-    if len(orders) > limit:
-        print(f"  ... 외 {len(orders) - limit}건")
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
