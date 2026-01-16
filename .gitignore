@@ -42,9 +42,15 @@ logs/
 
 # Generated files (keep folder, ignore contents)
 generated_po/*.xlsx
+generated_ts/*.xlsx
 
-# History file (운영 데이터 - 제외)
+# History files (운영 데이터 - 제외)
 po_history.xlsx
+po_history/
+
+# Claude Code temp files
+tmpclaude-*
+.claude/
 
 # OS
 .DS_Store
