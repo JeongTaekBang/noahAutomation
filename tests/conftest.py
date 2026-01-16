@@ -3,9 +3,45 @@ Pytest fixtures for NOAH PO Generator tests
 """
 
 from datetime import datetime, timedelta
+from pathlib import Path
+import shutil
 
 import pandas as pd
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def protect_templates(tmp_path, monkeypatch):
+    """템플릿을 테스트로부터 보호
+
+    테스트 중 템플릿이 생성/덮어쓰기 되지 않도록
+    임시 폴더를 사용합니다.
+    """
+    import po_generator.config as config
+    import po_generator.template_engine as template_engine
+
+    # 원본 템플릿 경로 저장
+    original_template_dir = config.TEMPLATE_DIR
+
+    # 임시 템플릿 디렉토리 설정
+    test_template_dir = tmp_path / "templates"
+    test_template_dir.mkdir(exist_ok=True)
+
+    # 원본 PO 템플릿이 있으면 복사
+    if config.PO_TEMPLATE_FILE.exists():
+        shutil.copy(config.PO_TEMPLATE_FILE, test_template_dir / "purchase_order.xlsx")
+
+    # config 모듈의 경로를 임시 경로로 변경
+    monkeypatch.setattr(config, 'TEMPLATE_DIR', test_template_dir)
+    monkeypatch.setattr(config, 'PO_TEMPLATE_FILE', test_template_dir / "purchase_order.xlsx")
+
+    # template_engine도 업데이트
+    monkeypatch.setattr(template_engine, 'TEMPLATE_DIR', test_template_dir)
+    monkeypatch.setattr(template_engine, 'PO_TEMPLATE_FILE', test_template_dir / "purchase_order.xlsx")
+
+    yield
+
+    # 테스트 후 정리는 pytest의 tmp_path가 자동 처리
 
 
 @pytest.fixture
@@ -19,6 +55,7 @@ def valid_order_data() -> pd.Series:
         'Item qty': 2,
         'Model': 'NA-100',
         'ICO Unit': 1000000,
+        'Sales Unit Price': 1000000,  # 거래명세표용 판매단가
         'Total ICO': 2000000,
         'Power supply': 'AC220V-1Ph-50Hz',
         'ALS': 'Y',
@@ -97,10 +134,12 @@ def multiple_items_df(valid_order_data: pd.Series) -> pd.DataFrame:
     item1['Item name'] = 'Actuator A'
     item1['Item qty'] = 1
     item1['ICO Unit'] = 500000
+    item1['Sales Unit Price'] = 500000
 
     item2 = valid_order_data.copy()
     item2['Item name'] = 'Actuator B'
     item2['Item qty'] = 3
     item2['ICO Unit'] = 750000
+    item2['Sales Unit Price'] = 750000
 
     return pd.DataFrame([item1, item2])

@@ -28,11 +28,9 @@ from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
-from openpyxl import Workbook
 
 from po_generator.config import (
     OUTPUT_DIR,
-    CUSTOMER_NAME_MAX_LENGTH,
     ORDER_LIST_DISPLAY_LIMIT,
     HISTORY_CUSTOMER_DISPLAY_LENGTH,
     HISTORY_DESC_DISPLAY_LENGTH,
@@ -45,7 +43,7 @@ from po_generator.utils import (
 )
 from po_generator.validators import validate_order_data, validate_multiple_items
 from po_generator.history import check_duplicate_order, save_to_history, get_all_history, get_history_count, get_current_month_info, sanitize_filename
-from po_generator.excel_generator import create_purchase_order, create_description_sheet
+from po_generator.excel_generator import create_po_workbook
 
 # 경고 필터링 (openpyxl/pandas 관련 경고만 선택적으로 무시)
 import warnings
@@ -167,21 +165,24 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
     # 7. 파일명 생성
     today = datetime.now().strftime("%y%m%d")
     customer_name_raw = get_safe_value(order_data, 'Customer name', 'Unknown')
-    customer_name_safe = sanitize_filename(customer_name_raw)[:CUSTOMER_NAME_MAX_LENGTH]
-    output_file = OUTPUT_DIR / f"PO_{order_no}_{customer_name_safe}_{today}.xlsx"
+    customer_name_safe = sanitize_filename(customer_name_raw)
+    order_no_safe = sanitize_filename(order_no)
+    output_file = OUTPUT_DIR / f"PO_{order_no_safe}_{customer_name_safe}_{today}.xlsx"
 
-    # 8. 워크북 생성 및 저장 (트랜잭션)
+    # Path Traversal 방지: 출력 파일이 OUTPUT_DIR 내에 있는지 검증
     try:
-        wb = Workbook()
+        if not output_file.resolve().is_relative_to(OUTPUT_DIR.resolve()):
+            print(f"  [오류] 잘못된 파일 경로: {output_file}")
+            return False
+    except ValueError:
+        # Python 3.9+ is_relative_to() 지원 확인용 fallback
+        if str(OUTPUT_DIR.resolve()) not in str(output_file.resolve()):
+            print(f"  [오류] 잘못된 파일 경로: {output_file}")
+            return False
 
-        # Purchase Order 시트
-        ws_po = wb.active
-        ws_po.title = "Purchase Order"
-        create_purchase_order(ws_po, order_data, items_df)
-
-        # Description 시트
-        ws_desc = wb.create_sheet("Description")
-        create_description_sheet(ws_desc, order_data, items_df)
+    # 8. 워크북 생성 및 저장 (트랜잭션, 템플릿 기반)
+    try:
+        wb = create_po_workbook(order_data, items_df)
 
         # 9. 저장
         wb.save(output_file)
@@ -197,8 +198,8 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
             try:
                 output_file.unlink()
                 print("  -> 생성된 파일 롤백 완료")
-            except Exception:
-                pass
+            except (IOError, OSError, PermissionError) as rollback_error:
+                logger.warning(f"롤백 실패: {rollback_error}")
         return False
 
     # 10. 이력 저장 (발주서 파일에서 데이터 추출)

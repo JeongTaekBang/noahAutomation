@@ -16,9 +16,30 @@ from po_generator.config import (
     NOAH_PO_LISTS_FILE,
     DOMESTIC_SHEET_INDEX,
     EXPORT_SHEET_INDEX,
+    COLUMN_ALIASES,
 )
 
 logger = logging.getLogger(__name__)
+
+# Excel 수식 인젝션 방지용 문자
+FORMULA_ESCAPE_CHARS: tuple[str, ...] = ('=', '+', '-', '@')
+
+
+def escape_excel_formula(value: Any) -> Any:
+    """Excel 수식 인젝션 방지
+
+    사용자 입력이 =, +, -, @로 시작하면 Excel에서 수식으로 해석될 수 있음.
+    이를 방지하기 위해 앞에 작은따옴표(')를 추가.
+
+    Args:
+        value: 원본 값
+
+    Returns:
+        이스케이프된 값 (문자열인 경우만 처리)
+    """
+    if isinstance(value, str) and value and value[0] in FORMULA_ESCAPE_CHARS:
+        return "'" + value
+    return value
 
 
 def get_safe_value(
@@ -47,6 +68,63 @@ def get_safe_value(
         return default
 
     return value
+
+
+def resolve_column(
+    columns: Union[pd.Index, list[str]],
+    key: str,
+) -> str | None:
+    """별칭에서 실제 컬럼명 찾기
+
+    Args:
+        columns: DataFrame의 컬럼 목록 (df.columns)
+        key: 내부 키 (예: 'customer_name') 또는 실제 컬럼명
+
+    Returns:
+        실제 컬럼명 또는 None (찾지 못한 경우)
+    """
+    # 1. key가 이미 실제 컬럼명인 경우
+    if key in columns:
+        return key
+
+    # 2. key가 내부 키인 경우, 별칭에서 찾기
+    aliases = COLUMN_ALIASES.get(key)
+    if aliases:
+        for alias in aliases:
+            if alias in columns:
+                return alias
+
+    # 3. 대소문자 무시 검색 (fallback)
+    key_lower = key.lower()
+    for col in columns:
+        if col.lower() == key_lower:
+            return col
+
+    return None
+
+
+def get_value(
+    order_data: pd.Series,
+    key: str,
+    default: Any = '',
+) -> Any:
+    """내부 키로 값 가져오기 (별칭 지원)
+
+    Args:
+        order_data: 주문 데이터 Series
+        key: 내부 키 (예: 'customer_name') 또는 실제 컬럼명
+        default: 기본값 (값이 없거나 NaN인 경우)
+
+    Returns:
+        해당 키의 값 또는 기본값
+    """
+    # 실제 컬럼명 찾기
+    actual_col = resolve_column(order_data.index, key)
+
+    if actual_col is None:
+        return default
+
+    return get_safe_value(order_data, actual_col, default)
 
 
 def load_noah_po_lists() -> pd.DataFrame:
@@ -104,7 +182,13 @@ def find_order_data(
         - 다중 아이템: pd.DataFrame
         - 없음: None
     """
-    mask = df['RCK Order no.'] == order_no
+    # 컬럼 별칭으로 실제 컬럼명 찾기
+    order_no_col = resolve_column(df.columns, 'order_no')
+    if order_no_col is None:
+        logger.error("주문번호 컬럼을 찾을 수 없습니다.")
+        return None
+
+    mask = df[order_no_col] == order_no
     match_count = mask.sum()
 
     if match_count == 0:
@@ -124,10 +208,10 @@ def format_currency(value: float, currency: str = 'KRW') -> str:
 
     Args:
         value: 금액
-        currency: 통화 코드
+        currency: 통화 코드 (KRW 또는 USD)
 
     Returns:
-        포맷팅된 문자열
+        포맷팅된 통화 문자열 (예: "₩1,000,000" 또는 "$1,000.00")
     """
     if currency == 'KRW':
         return f"₩{value:,.0f}"

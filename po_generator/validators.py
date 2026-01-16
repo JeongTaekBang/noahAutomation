@@ -16,8 +16,8 @@ from typing import NamedTuple
 
 import pandas as pd
 
-from po_generator.config import REQUIRED_FIELDS, MIN_LEAD_TIME_DAYS
-from po_generator.utils import get_safe_value
+from po_generator.config import REQUIRED_FIELDS, MIN_LEAD_TIME_DAYS, COLUMN_ALIASES
+from po_generator.utils import get_value
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,14 @@ class ValidationResult(NamedTuple):
         return not self.has_errors
 
 
+def _get_display_name(field_key: str) -> str:
+    """내부 키에서 표시용 이름 가져오기"""
+    aliases = COLUMN_ALIASES.get(field_key)
+    if aliases:
+        return aliases[0]  # 첫 번째 별칭 = 기본 표시 이름
+    return field_key
+
+
 def validate_required_fields(order_data: pd.Series) -> list[str]:
     """필수 필드 검증
 
@@ -50,11 +58,12 @@ def validate_required_fields(order_data: pd.Series) -> list[str]:
         오류 메시지 목록
     """
     errors = []
-    for field in REQUIRED_FIELDS:
-        value = get_safe_value(order_data, field)
+    for field_key in REQUIRED_FIELDS:
+        value = get_value(order_data, field_key)
         if not value:
-            errors.append(f"필수 필드 누락: {field}")
-            logger.error(f"필수 필드 누락: {field}")
+            display_name = _get_display_name(field_key)
+            errors.append(f"필수 필드 누락: {display_name}")
+            logger.error(f"필수 필드 누락: {display_name}")
     return errors
 
 
@@ -68,7 +77,7 @@ def validate_ico_unit(order_data: pd.Series) -> list[str]:
         오류 메시지 목록
     """
     errors = []
-    ico_unit = get_safe_value(order_data, 'ICO Unit', 0)
+    ico_unit = get_value(order_data, 'ico_unit', 0)
 
     try:
         ico_unit = float(ico_unit)
@@ -95,7 +104,7 @@ def validate_quantity(order_data: pd.Series) -> list[str]:
         오류 메시지 목록
     """
     errors = []
-    qty = get_safe_value(order_data, 'Item qty', 0)
+    qty = get_value(order_data, 'item_qty', 0)
 
     try:
         qty = int(float(qty))
@@ -121,10 +130,11 @@ def validate_delivery_date(order_data: pd.Series) -> tuple[list[str], list[str]]
     warnings_list: list[str] = []
     errors_list: list[str] = []
 
-    requested_date = get_safe_value(order_data, 'Requested delivery date')
+    requested_date = get_value(order_data, 'delivery_date')
 
     if not requested_date:
-        warnings_list.append("납기일(Requested delivery date)이 입력되지 않았습니다.")
+        display_name = _get_display_name('delivery_date')
+        warnings_list.append(f"납기일({display_name})이 입력되지 않았습니다.")
         logger.warning("납기일이 입력되지 않았습니다.")
         return warnings_list, errors_list
 
@@ -134,18 +144,20 @@ def validate_delivery_date(order_data: pd.Series) -> tuple[list[str], list[str]]
         else:
             delivery_date = pd.to_datetime(requested_date)
 
-        today = datetime.now()
-        days_until_delivery = (delivery_date - today).days
+        # 시간 정규화: 날짜만 비교 (시간 부분 제거)
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        delivery_date_normalized = delivery_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        days_until_delivery = (delivery_date_normalized - today).days
 
         if days_until_delivery < 0:
             errors_list.append(
-                f"납기일이 과거입니다: {delivery_date.strftime('%Y-%m-%d')}"
+                f"납기일이 과거입니다: {delivery_date_normalized.strftime('%Y-%m-%d')}"
             )
-            logger.error(f"납기일이 과거입니다: {delivery_date}")
+            logger.error(f"납기일이 과거입니다: {delivery_date_normalized}")
         elif days_until_delivery < MIN_LEAD_TIME_DAYS:
             warnings_list.append(
                 f"납기일이 촉박합니다: {days_until_delivery}일 후 "
-                f"({delivery_date.strftime('%Y-%m-%d')})"
+                f"({delivery_date_normalized.strftime('%Y-%m-%d')})"
             )
             logger.warning(f"납기일이 촉박합니다: {days_until_delivery}일 후")
     except (ValueError, TypeError) as e:

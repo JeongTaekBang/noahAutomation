@@ -14,7 +14,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, TypedDict
+from typing import Any, Optional, TypedDict
 
 import pandas as pd
 from openpyxl import load_workbook
@@ -69,18 +69,27 @@ def _ensure_history_dir() -> Path:
 
 
 def _get_history_filename(order_no: str, customer_name: str) -> str:
-    """이력 파일명 생성: YYYYMMDD_주문번호_고객명.xlsx"""
+    """이력 파일명 생성: YYYYMMDD_주문번호_고객명.xlsx
+
+    Args:
+        order_no: RCK Order No.
+        customer_name: 고객명
+
+    Returns:
+        생성된 파일명 (예: "20260116_ND-0001_고객명.xlsx")
+    """
     date_str = datetime.now().strftime("%Y%m%d")
     safe_order = _sanitize_filename(order_no)
     safe_customer = _sanitize_filename(customer_name)
     return f"{date_str}_{safe_order}_{safe_customer}.xlsx"
 
 
-def _extract_data_from_po_file(po_file: Path) -> dict:
+def _extract_data_from_po_file(po_file: Path) -> dict[str, Any]:
     """발주서 파일에서 데이터 추출 (DB 형식)
 
     Purchase Order 시트와 Description 시트에서 데이터를 추출하여
     한 행의 딕셔너리로 반환합니다.
+    아이템 수에 따라 동적으로 셀 위치를 계산합니다.
 
     Args:
         po_file: 발주서 파일 경로
@@ -88,7 +97,9 @@ def _extract_data_from_po_file(po_file: Path) -> dict:
     Returns:
         추출된 데이터 딕셔너리
     """
-    record = {}
+    from po_generator.config import ITEM_START_ROW
+
+    record: dict[str, Any] = {}
 
     try:
         wb = load_workbook(po_file, data_only=True)
@@ -97,6 +108,7 @@ def _extract_data_from_po_file(po_file: Path) -> dict:
         if "Purchase Order" in wb.sheetnames:
             ws_po = wb["Purchase Order"]
 
+            # 고정 위치 셀 (헤더 영역)
             # A1: "Purchase Order - ND-0001" 형식에서 주문번호 추출
             title = ws_po['A1'].value or ''
             if ' - ' in str(title):
@@ -110,27 +122,32 @@ def _extract_data_from_po_file(po_file: Path) -> dict:
             if 'Date:' in str(date_cell):
                 record['PO Date'] = date_cell.replace('Date:', '').strip()
 
-            # B28: Incoterms
-            record['Incoterms'] = ws_po['B28'].value
-
-            # B27: Currency
-            record['Currency'] = ws_po['B27'].value
-
-            # 아이템 정보 (Row 13-19)
+            # 아이템 정보 동적 추출 (Row 13부터 빈 셀까지)
             items_data = []
-            for row in range(13, 20):
+            row = ITEM_START_ROW  # 기본 13
+            max_search_rows = 100  # 무한 루프 방지
+            searched = 0
+
+            while searched < max_search_rows:
                 desc = ws_po[f'B{row}'].value
+                if not desc:  # 빈 셀이면 아이템 끝
+                    break
+
                 qty = ws_po[f'F{row}'].value
                 unit_price = ws_po[f'H{row}'].value
                 delivery_date = ws_po[f'I{row}'].value
 
-                if desc:  # 데이터가 있는 행만
-                    items_data.append({
-                        'Description': desc,
-                        'Item qty': qty,
-                        'ICO Unit': unit_price,
-                        'Requested delivery date': delivery_date,
-                    })
+                items_data.append({
+                    'Description': desc,
+                    'Item qty': qty,
+                    'ICO Unit': unit_price,
+                    'Requested delivery date': delivery_date,
+                })
+                row += 1
+                searched += 1
+
+            # 아이템 마지막 행 (동적 계산)
+            item_last_row = ITEM_START_ROW + len(items_data) - 1 if items_data else ITEM_START_ROW
 
             # 첫 번째 아이템 정보를 메인 레코드에
             if items_data:
@@ -140,11 +157,27 @@ def _extract_data_from_po_file(po_file: Path) -> dict:
                 record['ICO Unit'] = items_data[0].get('ICO Unit')
                 record['Requested delivery date'] = items_data[0].get('Requested delivery date')
 
-            # J20: Total net amount
-            record['Total net amount'] = ws_po['J20'].value
+            # 합계 행 동적 계산 (아이템 마지막 행 + 1)
+            totals_start_row = item_last_row + 1
+            row_total_net = totals_start_row
+            row_order_total = totals_start_row + 2
 
-            # J22: Order Total (VAT 포함)
-            record['Order Total'] = ws_po['J22'].value
+            # J{row}: Total net amount (동적 위치)
+            record['Total net amount'] = ws_po[f'J{row_total_net}'].value
+
+            # J{row+2}: Order Total (VAT 포함, 동적 위치)
+            record['Order Total'] = ws_po[f'J{row_order_total}'].value
+
+            # 푸터 행 동적 계산 (합계 행 + 4에서 시작)
+            footer_start_row = row_order_total + 1
+            currency_row = footer_start_row + 4
+            incoterms_row = footer_start_row + 5
+
+            # B{row}: Currency (동적 위치)
+            record['Currency'] = ws_po[f'B{currency_row}'].value
+
+            # B{row}: Incoterms (동적 위치)
+            record['Incoterms'] = ws_po[f'B{incoterms_row}'].value
 
         # === Description 시트에서 추출 ===
         if "Description" in wb.sheetnames:
@@ -279,8 +312,11 @@ def save_to_history(output_file: Path, order_no: str, customer_name: str) -> boo
         logger.info(f"이력 저장 완료: {history_file.name}")
         return True
 
-    except Exception as e:
-        logger.error(f"이력 저장 실패: {e}")
+    except (IOError, OSError, PermissionError) as e:
+        logger.error(f"이력 저장 실패 (파일 접근 오류): {e}")
+        return False
+    except ValueError as e:
+        logger.error(f"이력 저장 실패 (데이터 형식 오류): {e}")
         return False
 
 
@@ -314,8 +350,10 @@ def get_all_history() -> pd.DataFrame:
             try:
                 df = pd.read_excel(history_file)
                 all_records.append(df)
-            except Exception as e:
-                logger.warning(f"이력 파일 읽기 실패: {history_file.name} - {e}")
+            except (InvalidFileException, BadZipFile, PermissionError) as e:
+                logger.warning(f"이력 파일 읽기 실패 (파일 손상/권한): {history_file.name} - {e}")
+            except ValueError as e:
+                logger.warning(f"이력 파일 읽기 실패 (데이터 형식): {history_file.name} - {e}")
 
     if all_records:
         return pd.concat(all_records, ignore_index=True)
@@ -337,7 +375,7 @@ def clear_history() -> bool:
             logger.info(f"이력 폴더 내 파일 삭제됨: {month_dir}")
 
         return True
-    except Exception as e:
+    except (IOError, OSError, PermissionError) as e:
         logger.error(f"이력 삭제 실패: {e}")
         return False
 

@@ -273,15 +273,6 @@ class TestCLIArguments:
 class TestConfigConstants:
     """config.py 상수 사용 테스트"""
 
-    def test_customer_name_max_length_applied(self):
-        """고객명 최대 길이 상수 적용 테스트"""
-        from po_generator.config import CUSTOMER_NAME_MAX_LENGTH
-
-        long_name = "Very Long Customer Name That Exceeds Limit"
-        truncated = sanitize_filename(long_name)[:CUSTOMER_NAME_MAX_LENGTH]
-
-        assert len(truncated) <= CUSTOMER_NAME_MAX_LENGTH
-
     def test_order_list_display_limit(self):
         """주문 목록 표시 제한 상수 테스트"""
         from po_generator.config import ORDER_LIST_DISPLAY_LIMIT
