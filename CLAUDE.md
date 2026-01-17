@@ -18,6 +18,39 @@ NOAH Purchase Order Auto-Generator - RCK(Rotork Korea Sales Office)에서 NOAH(I
 2. RCK Order No. 입력 → 발주서(Purchase Order + Description) 자동 생성
 3. 생성 이력 po_history/ 폴더에 건별 파일로 기록 (중복 발주 방지, 데이터 스냅샷)
 
+## Setup (user_settings.py)
+
+프로젝트 루트에 `user_settings.py` 파일을 생성하고 아래 설정을 입력:
+
+```python
+# 필수: 데이터 파일 경로
+DATA_FOLDER = r"C:\Users\본인이름\OneDrive - Rotork plc\바탕 화면\업무\NOAH ACTUATION"
+
+# 선택: 출력 폴더 (None이면 프로젝트 폴더)
+OUTPUT_BASE_DIR = None
+
+# 선택: 공급자 정보 (거래명세표용)
+SUPPLIER_INFO = {
+    'name': '로토크 콘트롤즈 코리아㈜',
+    'rep_name': '이민수',
+    'business_no': '220-81-21175',
+    'address': '경기도 성남시 분당구 장미로 42',
+    'address2': '야탑리더스빌딩 515',
+    'business_type': '도매업, 제조, 도매',
+    'business_item': '기타운수및기계장비, 밸브류, 무역',
+}
+
+# 선택: 비즈니스 규칙
+MIN_LEAD_TIME_DAYS = 7      # 납기일 경고 기준
+VAT_RATE_DOMESTIC = 0.1     # 부가세율
+
+# 선택: 이력 표시
+HISTORY_CUSTOMER_DISPLAY_LENGTH = 15
+HISTORY_DESC_DISPLAY_LENGTH = 20
+```
+
+**참고**: `user_settings.py`는 `.gitignore`에 포함되어 Git에 올라가지 않음
+
 ## Commands
 
 Run the PO generator using the conda environment:
@@ -155,7 +188,7 @@ python -m pytest tests/ --cov=po_generator
 ### OneDrive 공유 폴더 연동
 - [x] 회사 랩탑에서 OneDrive 공유 폴더 경로 확인 ✓
   - 경로: `C:\Users\Jeongtaek.Bang\OneDrive - Rotork plc\바탕 화면\업무\NOAH ACTUATION\purchaseOrderAutomation`
-- [ ] `config.py`에서 경로 설정 외부화 (환경변수 또는 설정 파일)
+- [x] `config.py`에서 경로 설정 외부화 → `user_settings.py` ✓
 - [x] 파일 구조 변경 ✓
   ```
   OneDrive - Rotork plc/바탕 화면/업무/NOAH ACTUATION/
@@ -185,10 +218,19 @@ python -m pytest tests/ --cov=po_generator
   - `templates/transaction_statement.xlsx` 템플릿 파일
   - `ts_generator.py` 모듈 (xlwings로 이미지/서식 완벽 보존)
   - `create_ts.py` CLI 진입점
-- [ ] 추후 확장 예정 (xlwings 사용):
+- [ ] 추후 확장 예정 (xlwings 사용, 해외 오더):
+  - Packing List 템플릿
   - Proforma Invoice 템플릿
   - Commercial Invoice 템플릿
-  - Packing List 템플릿
+
+### 템플릿 동작 방식
+- 템플릿 파일의 **데이터는 무시됨** - 코드에서 초기화 후 새로 채움
+- 템플릿의 **구조/서식만 유지됨**:
+  - 레이아웃 (행/열 위치)
+  - 서식 (폰트, 테두리, 색상)
+  - 이미지 (로고, 도장)
+  - 수식 (소계 SUM 등)
+- 새 템플릿 추가 시: `templates/` 폴더에 양식 파일 추가 후 코드에서 셀 매핑 정의
 
 ### 라이브러리 선택 기준
 | 문서 | 라이브러리 | 이유 |
