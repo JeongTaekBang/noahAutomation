@@ -296,9 +296,9 @@ def _fill_shipping_mark(ws: xw.Sheet, order_data: pd.Series) -> None:
     customer_country = get_safe_value(order_data, 'Customer country', '')
     customer_po = get_safe_value(order_data, 'Customer PO', '')
 
-    # 검색 범위
-    search_start = 40
-    search_end = 150
+    # 검색 범위 (아이템 행 삭제로 위치가 변할 수 있으므로 넓게 검색)
+    search_start = 20
+    search_end = 100
 
     # 1. Shipping Mark 헤더 찾아서 +1행에 Customer name
     for row in range(search_start, search_end):

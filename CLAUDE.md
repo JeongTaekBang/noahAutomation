@@ -14,16 +14,54 @@ NOAH Purchase Order Auto-Generator - RCK(Rotork Korea Sales Office)에서 NOAH(I
 - ERP 미통합으로 RCK→NOAH 발주는 엑셀 양식으로 처리
 
 ### Workflow
-1. 고객 발주 접수 → NOAH_PO_Lists.xlsx에 정보 입력
-2. RCK Order No. 입력 → 발주서(Purchase Order + Description) 자동 생성
+1. 고객 발주 접수 → NOAH_SO_PO_DN.xlsx에 정보 입력
+2. 문서 ID 입력 → 해당 문서 자동 생성
 3. 생성 이력 po_history/ 폴더에 건별 파일로 기록 (중복 발주 방지, 데이터 스냅샷)
 
-## Setup (user_settings.py)
+### Data Source & Documents
+`NOAH_SO_PO_DN.xlsx` 파일이 데이터베이스 역할 (ERP 통합 전까지)
 
-프로젝트 루트에 `user_settings.py` 파일을 생성하고 아래 설정을 입력:
+```
+NOAH_SO_PO_DN.xlsx (데이터 소스)
+       │
+       ├── 국내 시트 ─→ PO, 거래명세표
+       │
+       └── 해외 시트 ─→ PO, PI, CI, PL
+```
 
+| 문서 | 용도 | 상태 |
+|------|------|------|
+| PO (Purchase Order) | RCK→NOAH 발주서 | 완료 |
+| 거래명세표 | 국내 납품/선수금 | 완료 |
+| PI (Proforma Invoice) | 해외 견적서 | 완료 |
+| CI (Commercial Invoice) | 해외 상업송장 | 예정 |
+| PL (Packing List) | 해외 포장명세서 | 예정 |
+
+## Installation (최초 1회)
+
+### 1. Miniconda 설치
+- 다운로드: https://docs.conda.io/en/latest/miniconda.html
+- Windows 64-bit 버전 설치
+
+### 2. Conda 가상환경 생성
+```bash
+# 명령 프롬프트(cmd) 또는 Anaconda Prompt에서 실행
+conda create -n po-automate python=3.11
+conda activate po-automate
+pip install -r requirements.txt
+```
+
+### 3. 설정 파일 생성
+처음 사용 시 아래 2개 파일을 설정해야 합니다.
+
+### 설정 방법 (Sublime Text 사용)
+1. `user_settings.example.py` 열기 → **다른 이름으로 저장** → `user_settings.py`
+2. `local_config.example.bat` 열기 → **다른 이름으로 저장** → `local_config.bat`
+3. 각 파일에서 본인 경로로 수정
+
+### user_settings.py (Python용)
 ```python
-# 필수: 데이터 파일 경로
+# 필수: 데이터 파일 경로 (본인 OneDrive 경로로 수정)
 DATA_FOLDER = r"C:\Users\본인이름\OneDrive - Rotork plc\바탕 화면\업무\NOAH ACTUATION"
 
 # 선택: 출력 폴더 (None이면 프로젝트 폴더)
@@ -49,7 +87,14 @@ HISTORY_CUSTOMER_DISPLAY_LENGTH = 15
 HISTORY_DESC_DISPLAY_LENGTH = 20
 ```
 
-**참고**: `user_settings.py`는 `.gitignore`에 포함되어 Git에 올라가지 않음
+### local_config.bat (배치 파일용)
+```batch
+@echo off
+REM 본인 Python 경로로 수정
+set PYTHON_PATH=%LOCALAPPDATA%\miniconda3\envs\po-automate\python.exe
+```
+
+**참고**: 두 파일 모두 `.gitignore`에 포함되어 Git에 올라가지 않음
 
 ## Commands
 
@@ -107,10 +152,12 @@ purchaseOrderAutomation/
 │   ├── history.py          # 이력 관리 (중복 체크, 저장)
 │   ├── excel_generator.py  # PO Excel 생성 (openpyxl 기반)
 │   ├── template_engine.py  # PO 템플릿 처리 (행 복제, 공식 조정)
-│   └── ts_generator.py     # 거래명세표 생성 (xlwings 기반)
+│   ├── ts_generator.py     # 거래명세표 생성 (xlwings 기반)
+│   └── pi_generator.py     # Proforma Invoice 생성 (xlwings 기반)
 ├── templates/              # 템플릿 파일
 │   ├── purchase_order.xlsx        # PO 템플릿
-│   └── transaction_statement.xlsx # 거래명세표 템플릿
+│   ├── transaction_statement.xlsx # 거래명세표 템플릿
+│   └── proforma_invoice.xlsx      # PI 템플릿
 ├── tests/                  # pytest 테스트
 │   ├── conftest.py
 │   ├── test_validators.py
@@ -119,6 +166,7 @@ purchaseOrderAutomation/
 │   └── test_excel_generator.py
 ├── create_po.py            # PO CLI 진입점
 ├── create_ts.py            # 거래명세표 CLI 진입점
+├── create_pi.py            # Proforma Invoice CLI 진입점
 ├── create_po.bat           # Windows 배치 파일
 ├── NOAH_PO_Lists.xlsx      # 소스 데이터 (국내/해외)
 ├── po_history/             # 발주 이력 (월별 폴더)
@@ -126,6 +174,7 @@ purchaseOrderAutomation/
 │       └── YYYYMMDD_주문번호_고객명.xlsx
 ├── generated_po/           # 생성된 발주서 폴더
 ├── generated_ts/           # 생성된 거래명세표 폴더
+├── generated_pi/           # 생성된 Proforma Invoice 폴더
 ├── requirements.txt
 └── .gitignore
 ```
@@ -147,6 +196,7 @@ purchaseOrderAutomation/
 | `template_engine.py` | load_template, clone_row, generate_po_template (openpyxl 템플릿 처리) |
 | `excel_generator.py` | create_po_workbook (openpyxl 기반 PO 생성) |
 | `ts_generator.py` | create_ts_xlwings (xlwings 기반 거래명세표 생성) |
+| `pi_generator.py` | create_pi_xlwings (xlwings 기반 Proforma Invoice 생성) |
 
 ### Excel Template Structure
 템플릿 기반으로 발주서를 생성합니다:
@@ -218,9 +268,15 @@ python -m pytest tests/ --cov=po_generator
   - `templates/transaction_statement.xlsx` 템플릿 파일
   - `ts_generator.py` 모듈 (xlwings로 이미지/서식 완벽 보존)
   - `create_ts.py` CLI 진입점
+- [x] PI (Proforma Invoice) - xlwings 기반 ✓
+  - `templates/proforma_invoice.xlsx` 템플릿 파일
+  - `pi_generator.py` 모듈 (xlwings로 이미지/서식 완벽 보존)
+  - `create_pi.py` CLI 진입점
+  - **버그 수정 (2026-01-19)**:
+    - 템플릿 예시 아이템이 삭제되지 않던 문제 해결 (실제 아이템 < 템플릿 예시 시 초과 행 삭제)
+    - Shipping Mark 영역 검색 범위 수정 (40→20 시작) - 행 삭제 후 위치 변경 대응
 - [ ] 추후 확장 예정 (xlwings 사용, 해외 오더):
   - Packing List 템플릿
-  - Proforma Invoice 템플릿
   - Commercial Invoice 템플릿
 
 ### 템플릿 동작 방식
