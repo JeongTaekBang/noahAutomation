@@ -185,6 +185,34 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series, today_str: str) -> None:
 
 
 
+def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
+    """행 삭제 후 아이템 영역 테두리 복원
+
+    Args:
+        ws: xlwings Sheet 객체
+        num_items: 실제 아이템 수
+    """
+    # xlwings 상수
+    xlEdgeTop = 8
+    xlEdgeBottom = 9
+    xlContinuous = 1
+    xlThin = 2
+
+    # 마지막 아이템 행 (Total 바로 위)
+    last_item_row = ITEM_START_ROW + num_items - 1
+
+    # 헤더 아래 행 (첫 번째 아이템 행 바로 위 = Row 17)의 아래 테두리
+    header_bottom_row = ITEM_START_ROW - 1
+    ws.range(f'A{header_bottom_row}:I{header_bottom_row}').api.Borders(xlEdgeBottom).LineStyle = xlContinuous
+    ws.range(f'A{header_bottom_row}:I{header_bottom_row}').api.Borders(xlEdgeBottom).Weight = xlThin
+
+    # 마지막 아이템 행의 아래 테두리
+    ws.range(f'A{last_item_row}:I{last_item_row}').api.Borders(xlEdgeBottom).LineStyle = xlContinuous
+    ws.range(f'A{last_item_row}:I{last_item_row}').api.Borders(xlEdgeBottom).Weight = xlThin
+
+    logger.debug(f"테두리 복원: Row {header_bottom_row} 하단, Row {last_item_row} 하단")
+
+
 def _find_total_row(ws: xw.Sheet, start_row: int, max_search: int = 20) -> int:
     """'Total' 텍스트가 있는 행 찾기
 
@@ -236,6 +264,9 @@ def _fill_items(
             delete_row = ITEM_START_ROW + num_items
             ws.range(f'{delete_row}:{delete_row}').api.Delete(Shift=-4162)  # xlUp
         logger.debug(f"{rows_to_delete}개 초과 행 삭제")
+
+        # 테두리 복원: 행 삭제로 사라진 테두리 다시 그리기
+        _restore_item_borders(ws, num_items)
 
     # 행 수 조정: 템플릿 예시보다 실제 아이템이 많으면 행 삽입
     elif num_items > template_item_count:

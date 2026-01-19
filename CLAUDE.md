@@ -275,6 +275,7 @@ python -m pytest tests/ --cov=po_generator
   - **버그 수정 (2026-01-19)**:
     - 템플릿 예시 아이템이 삭제되지 않던 문제 해결 (실제 아이템 < 템플릿 예시 시 초과 행 삭제)
     - Shipping Mark 영역 검색 범위 수정 (40→20 시작) - 행 삭제 후 위치 변경 대응
+    - 행 삭제 후 테두리 복원 (`_restore_item_borders`) - 헤더 하단/마지막 아이템 하단 테두리
 - [ ] 추후 확장 예정 (xlwings 사용, 해외 오더):
   - Packing List 템플릿
   - Commercial Invoice 템플릿
