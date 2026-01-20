@@ -25,6 +25,10 @@ from po_generator.config import (
     HISTORY_DIR,
     ITEM_START_ROW_FALLBACK,
 )
+from po_generator.excel_helpers import (
+    find_item_start_row_openpyxl,
+    PO_HEADER_LABELS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +45,14 @@ HISTORY_MAX_SEARCH_ROWS: int = 100
 
 def _find_item_start_row(
     ws,
-    search_labels: tuple[str, ...] = ('No.', 'Item Number', 'Item\nNumber', '품명', 'Item'),
+    search_labels: tuple[str, ...] = PO_HEADER_LABELS,
     max_search_rows: int = 30,
     fallback_row: int = ITEM_START_ROW_FALLBACK,
 ) -> int:
     """템플릿에서 아이템 시작 행을 동적으로 찾기 (openpyxl 버전)
 
-    헤더 레이블을 찾아서 그 다음 행이 아이템 시작 위치입니다.
+    excel_helpers.find_item_start_row_openpyxl의 래퍼입니다.
+    하위 호환성을 위해 유지됩니다.
 
     Args:
         ws: openpyxl Worksheet 객체
@@ -58,17 +63,12 @@ def _find_item_start_row(
     Returns:
         아이템 시작 행 번호
     """
-    for row in range(1, max_search_rows + 1):
-        for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']:
-            cell_value = ws[f'{col}{row}'].value
-            if cell_value and any(
-                label in str(cell_value) for label in search_labels
-            ):
-                logger.debug(f"헤더 발견: Row {row}, 값='{cell_value}' -> 아이템 시작 Row {row + 1}")
-                return row + 1
-
-    logger.debug(f"헤더를 찾지 못함 -> 기본값 Row {fallback_row} 사용")
-    return fallback_row
+    return find_item_start_row_openpyxl(
+        ws,
+        search_labels=search_labels,
+        max_search_rows=max_search_rows,
+        fallback_row=fallback_row,
+    )
 
 
 class DuplicateInfo(TypedDict):

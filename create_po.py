@@ -36,16 +36,13 @@ from po_generator.config import (
     HISTORY_DESC_DISPLAY_LENGTH,
     HISTORY_DATE_DISPLAY_LENGTH,
 )
-from po_generator.utils import (
-    load_noah_po_lists,
-    find_order_data,
-    get_value,
-)
+from po_generator.utils import get_value
 from po_generator.validators import validate_order_data, validate_multiple_items
 from po_generator.history import check_duplicate_order, save_to_history, get_all_history, get_history_count, get_current_month_info
 from po_generator.excel_generator import create_po_workbook
 from po_generator.cli_common import print_available_orders, validate_output_path, generate_output_filename
 from po_generator.logging_config import setup_logging
+from po_generator.services import DocumentService, GenerationStatus
 
 # 경고 필터링 (openpyxl/pandas 관련 경고만 선택적으로 무시)
 import warnings
@@ -60,9 +57,12 @@ logger = logging.getLogger(__name__)
 def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
     """발주서 생성 메인 함수
 
+    DocumentService를 사용하여 발주서를 생성합니다.
+    사용자 상호작용(중복 확인, 검증 오류 확인)은 CLI에서 처리합니다.
+
     Args:
         order_no: RCK Order No.
-        df: 전체 주문 데이터
+        df: 전체 주문 데이터 (하위 호환용, 실제로는 사용하지 않음)
         force: 강제 생성 여부
 
     Returns:
@@ -72,7 +72,9 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
     print(f"발주서 생성: {order_no}")
     print('=' * 50)
 
-    # 1. 중복 발주 체크
+    service = DocumentService()
+
+    # 1. 중복 발주 체크 (CLI에서 사용자 상호작용 필요)
     if not force:
         dup_info = check_duplicate_order(order_no)
         if dup_info:
@@ -85,39 +87,31 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
                 print("  -> 발주 취소됨")
                 return False
 
-    # 2. 주문 데이터 검색
-    order_result = find_order_data(df, order_no)
-    if order_result is None:
+    # 2. 데이터 검색 및 정보 출력
+    order_data = service.finder.find_po(order_no)
+    if order_data is None:
         print(f"  [오류] '{order_no}'를 찾을 수 없습니다.")
         return False
 
-    # 3. 다중/단일 아이템 처리
-    if isinstance(order_result, pd.DataFrame):
-        items_df = order_result
-        order_data = items_df.iloc[0]
-        num_items = len(items_df)
-        print(f"  [다중 아이템] {num_items}개 아이템 발견")
-        for idx, (_, item) in enumerate(items_df.iterrows()):
+    # 3. 기본 정보 출력
+    if order_data.is_multi_item:
+        print(f"  [다중 아이템] {order_data.item_count}개 아이템 발견")
+        for idx, (_, item) in enumerate(order_data.items_df.iterrows()):
             item_name = get_value(item, 'item_name', 'N/A')
             item_qty = get_value(item, 'item_qty', 'N/A')
             print(f"    {idx + 1}. {item_name} x {item_qty}")
-    else:
-        items_df = None
-        order_data = order_result
-        num_items = 1
 
-    # 4. 기본 정보 출력
-    print(f"  고객: {get_value(order_data, 'customer_name', 'N/A')}")
-    if num_items == 1:
-        print(f"  품목: {get_value(order_data, 'item_name', 'N/A')}")
-        print(f"  수량: {get_value(order_data, 'item_qty', 'N/A')}")
-    print(f"  시트: {get_value(order_data, 'sheet_type', 'N/A')}")
+    print(f"  고객: {order_data.get_value('customer_name', 'N/A')}")
+    if not order_data.is_multi_item:
+        print(f"  품목: {order_data.get_value('item_name', 'N/A')}")
+        print(f"  수량: {order_data.get_value('item_qty', 'N/A')}")
+    print(f"  시트: {order_data.get_value('sheet_type', 'N/A')}")
 
-    # 5. 데이터 검증
-    if items_df is not None:
-        validation = validate_multiple_items(items_df)
+    # 4. 데이터 검증 (CLI에서 사용자 상호작용 필요)
+    if order_data.is_multi_item:
+        validation = validate_multiple_items(order_data.items_df)
     else:
-        validation = validate_order_data(order_data)
+        validation = validate_order_data(order_data.first_item)
 
     # 경고 출력
     for warn in validation.warnings:
@@ -136,47 +130,24 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
         else:
             print("  -> --force 옵션으로 오류 무시하고 진행")
 
-    # 6. 출력 디렉토리 생성
-    OUTPUT_DIR.mkdir(exist_ok=True)
+    # 5. 문서 생성 (서비스 사용, 중복 체크/검증은 이미 완료)
+    result = service.generate_po(order_no, force=True, skip_history=False)
 
-    # 7. 파일명 생성 및 경로 검증
-    customer_name_raw = get_value(order_data, 'customer_name', 'Unknown')
-    output_file = generate_output_filename("PO", order_no, customer_name_raw, OUTPUT_DIR)
+    # 6. 결과 처리
+    if result.success:
+        print(f"  -> 발주서 생성 완료: {result.output_file.name}")
 
-    if not validate_output_path(output_file, OUTPUT_DIR):
+        # 경고 출력 (이미 위에서 출력했으므로 중복 방지)
+        # for warn in result.warnings:
+        #     print(f"  [주의] {warn}")
+
+        return True
+    else:
+        if result.status == GenerationStatus.FILE_ERROR:
+            print(f"  [오류] 파일 저장 실패: {result.errors[0] if result.errors else '알 수 없는 오류'}")
+        else:
+            print(f"  [오류] {result.message}")
         return False
-
-    # 8. 워크북 생성 및 저장 (트랜잭션, 템플릿 기반)
-    try:
-        wb = create_po_workbook(order_data, items_df)
-
-        # 9. 저장
-        wb.save(output_file)
-        print(f"  -> 발주서 생성 완료: {output_file.name}")
-
-    except PermissionError:
-        print(f"  [오류] 파일 저장 실패: {output_file.name} (파일이 열려있거나 권한 없음)")
-        return False
-    except Exception as e:
-        print(f"  [오류] 발주서 생성 실패: {e}")
-        # 롤백: 부분적으로 생성된 파일 삭제
-        if output_file.exists():
-            try:
-                output_file.unlink()
-                print("  -> 생성된 파일 롤백 완료")
-            except (IOError, OSError, PermissionError) as rollback_error:
-                logger.warning(f"롤백 실패: {rollback_error}")
-        return False
-
-    # 10. 이력 저장 (발주서 파일에서 데이터 추출)
-    order_no_val = get_value(order_data, 'order_no')
-    customer_name_val = get_value(order_data, 'customer_name')
-    history_saved = save_to_history(output_file, order_no_val, customer_name_val)
-
-    if not history_saved:
-        print("  [주의] 이력 저장 실패 - 발주서는 정상 생성됨")
-
-    return True
 
 
 def show_history(export: bool = False) -> int:
@@ -305,7 +276,8 @@ def main() -> int:
         parser.print_help()
 
         try:
-            df = load_noah_po_lists()
+            service = DocumentService()
+            df = service.finder.load_po_data()
             print_available_orders(df)
         except FileNotFoundError as e:
             print(f"\n[오류] {e}")
@@ -313,10 +285,11 @@ def main() -> int:
 
         return 0
 
-    # 데이터 로드
+    # 데이터 로드 (서비스에서 자동 로드하므로 메시지만 출력)
     print("NOAH_PO_Lists.xlsx 로딩 중...")
     try:
-        df = load_noah_po_lists()
+        service = DocumentService()
+        df = service.finder.load_po_data()
     except FileNotFoundError as e:
         print(f"[오류] {e}")
         return 1

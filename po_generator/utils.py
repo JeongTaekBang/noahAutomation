@@ -24,6 +24,10 @@ from po_generator.config import (
     PO_EXPORT_SHEET,
     COLUMN_ALIASES,
 )
+from po_generator.excel_helpers import (
+    find_item_start_row_openpyxl,
+    DEFAULT_HEADER_LABELS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,12 +37,13 @@ FORMULA_ESCAPE_CHARS: tuple[str, ...] = ('=', '+', '-', '@')
 
 def find_item_start_row(
     ws: Worksheet,
-    search_labels: tuple[str, ...] = ('No.', 'Item Number', 'Item\nNumber', '품명', 'Item'),
+    search_labels: tuple[str, ...] = DEFAULT_HEADER_LABELS,
     max_search_rows: int = 30,
     fallback_row: int = 13,
 ) -> int:
     """템플릿에서 아이템 시작 행을 동적으로 찾기
 
+    excel_helpers.find_item_start_row_openpyxl의 래퍼입니다.
     헤더 레이블을 찾아서 그 다음 행이 아이템 시작 위치입니다.
     Purchase Order와 거래명세표 모두에서 사용 가능합니다.
 
@@ -51,17 +56,12 @@ def find_item_start_row(
     Returns:
         아이템 시작 행 번호
     """
-    for row in range(1, max_search_rows + 1):
-        for col in range(1, 10):  # A~I 열까지 검색
-            cell_value = ws.cell(row=row, column=col).value
-            if cell_value and any(
-                label in str(cell_value) for label in search_labels
-            ):
-                logger.debug(f"헤더 발견: Row {row}, 값='{cell_value}' -> 아이템 시작 Row {row + 1}")
-                return row + 1  # 레이블 다음 행이 데이터 시작
-
-    logger.debug(f"헤더를 찾지 못함 -> 기본값 Row {fallback_row} 사용")
-    return fallback_row
+    return find_item_start_row_openpyxl(
+        ws,
+        search_labels=search_labels,
+        max_search_rows=max_search_rows,
+        fallback_row=fallback_row,
+    )
 
 
 def escape_excel_formula(value: Any) -> Any:

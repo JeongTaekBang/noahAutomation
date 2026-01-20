@@ -259,7 +259,7 @@ def _fill_items(
     # 행 수 조정: 템플릿 예시보다 실제 아이템이 적으면 초과 행 삭제
     if num_items < template_item_count:
         rows_to_delete = template_item_count - num_items
-        # 뒤에서부터 삭제 (Total 행 바로 위부터)
+        # 같은 위치에서 반복 삭제 - xlUp으로 아래 행이 올라오므로 연속 행 삭제됨
         for _ in range(rows_to_delete):
             delete_row = ITEM_START_ROW + num_items
             ws.range(f'{delete_row}:{delete_row}').api.Delete(Shift=-4162)  # xlUp

@@ -29,6 +29,10 @@ from po_generator.utils import (
     get_value,
     escape_excel_formula,
 )
+from po_generator.excel_helpers import (
+    find_item_start_row_xlwings,
+    PO_HEADER_LABELS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +47,14 @@ CELL_CUSTOMER_NAME = 'A10'
 
 def _find_item_start_row_xlwings(
     ws: xw.Sheet,
-    search_labels: tuple[str, ...] = ('No.', 'Item Number', 'Item\nNumber', '품명', 'Item'),
+    search_labels: tuple[str, ...] = PO_HEADER_LABELS,
     max_search_rows: int = 30,
     fallback_row: int = ITEM_START_ROW_FALLBACK,
 ) -> int:
     """템플릿에서 아이템 시작 행을 동적으로 찾기 (xlwings 버전)
+
+    excel_helpers.find_item_start_row_xlwings의 래퍼입니다.
+    하위 호환성을 위해 유지됩니다.
 
     Args:
         ws: xlwings Sheet 객체
@@ -58,17 +65,12 @@ def _find_item_start_row_xlwings(
     Returns:
         아이템 시작 행 번호
     """
-    for row in range(1, max_search_rows + 1):
-        for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']:
-            cell_value = ws.range(f'{col}{row}').value
-            if cell_value and any(
-                label in str(cell_value) for label in search_labels
-            ):
-                logger.debug(f"헤더 발견: Row {row}, 값='{cell_value}' -> 아이템 시작 Row {row + 1}")
-                return row + 1
-
-    logger.debug(f"헤더를 찾지 못함 -> 기본값 Row {fallback_row} 사용")
-    return fallback_row
+    return find_item_start_row_xlwings(
+        ws,
+        search_labels=search_labels,
+        max_search_rows=max_search_rows,
+        fallback_row=fallback_row,
+    )
 
 
 def _ensure_template_exists() -> None:

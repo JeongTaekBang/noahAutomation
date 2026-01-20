@@ -27,6 +27,10 @@ from po_generator.config import (
     VAT_RATE_DOMESTIC,
 )
 from po_generator.utils import get_value
+from po_generator.excel_helpers import (
+    find_item_start_row_xlwings,
+    TS_HEADER_LABELS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,10 +51,13 @@ BASE_TOTAL_ROW = 25        # 합계 행 (폴백값)
 
 def _find_ts_item_start_row(
     ws: xw.Sheet,
-    search_labels: tuple[str, ...] = ('월/일', '품명', 'DESCRIPTION'),
+    search_labels: tuple[str, ...] = TS_HEADER_LABELS,
     max_search_rows: int = 30,
 ) -> int:
     """거래명세표 템플릿에서 아이템 시작 행을 동적으로 찾기 (xlwings)
+
+    excel_helpers.find_item_start_row_xlwings의 래퍼입니다.
+    거래명세표 전용 헤더 라벨과 검색 열을 사용합니다.
 
     Args:
         ws: xlwings Sheet 객체
@@ -60,17 +67,13 @@ def _find_ts_item_start_row(
     Returns:
         아이템 시작 행 번호
     """
-    for row in range(1, max_search_rows + 1):
-        for col in ['A', 'B', 'C', 'D']:  # 헤더는 보통 앞쪽 열에 위치
-            cell_value = ws.range(f'{col}{row}').value
-            if cell_value and any(
-                label in str(cell_value) for label in search_labels
-            ):
-                logger.debug(f"TS 헤더 발견: Row {row}, 값='{cell_value}' -> 아이템 시작 Row {row + 1}")
-                return row + 1  # 레이블 다음 행이 데이터 시작
-
-    logger.debug(f"TS 헤더를 찾지 못함 -> 기본값 Row {ITEM_START_ROW_FALLBACK} 사용")
-    return ITEM_START_ROW_FALLBACK
+    return find_item_start_row_xlwings(
+        ws,
+        search_labels=search_labels,
+        max_search_rows=max_search_rows,
+        columns=('A', 'B', 'C', 'D'),  # 거래명세표 헤더는 앞쪽 열에 위치
+        fallback_row=ITEM_START_ROW_FALLBACK,
+    )
 
 
 def _find_label_row(ws: xw.Sheet, col: str, search_text: str) -> int | None:
@@ -243,7 +246,7 @@ def _fill_ts_data(
     # 행 수 조정: 템플릿 예시보다 실제 아이템이 적으면 초과 행 삭제
     if num_items < template_item_count:
         rows_to_delete = template_item_count - num_items
-        # 뒤에서부터 삭제 (소계 행 바로 위부터)
+        # 같은 위치에서 반복 삭제 - xlUp으로 아래 행이 올라오므로 연속 행 삭제됨
         for _ in range(rows_to_delete):
             delete_row = item_start_row + num_items
             ws.range(f'{delete_row}:{delete_row}').api.Delete(Shift=-4162)  # xlUp

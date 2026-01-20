@@ -27,13 +27,12 @@ from po_generator.config import (
 from po_generator.utils import (
     load_dn_data,
     load_pmt_data,
-    find_dn_data,
-    load_so_for_advance,
     get_value,
 )
 from po_generator.ts_generator import create_ts_xlwings
 from po_generator.cli_common import validate_output_path, generate_output_filename
 from po_generator.logging_config import setup_logging
+from po_generator.services import DocumentService, GenerationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -101,9 +100,11 @@ def print_available_ids(df_dn: pd.DataFrame, df_pmt: pd.DataFrame, limit: int = 
 def generate_ts_from_dn(dn_id: str, df_dn: pd.DataFrame) -> bool:
     """DN 기반 거래명세표 생성
 
+    DocumentService를 사용하여 거래명세표를 생성합니다.
+
     Args:
         dn_id: DN_ID
-        df_dn: DN 데이터
+        df_dn: DN 데이터 (하위 호환용, 실제로는 사용하지 않음)
 
     Returns:
         성공 여부
@@ -112,78 +113,49 @@ def generate_ts_from_dn(dn_id: str, df_dn: pd.DataFrame) -> bool:
     print(f"거래명세표 생성 (납품): {dn_id}")
     print('=' * 50)
 
-    # 1. DN 데이터 검색
-    dn_result = find_dn_data(df_dn, dn_id)
-    if dn_result is None:
+    service = DocumentService()
+
+    # 1. DN 데이터 검색 및 정보 출력
+    order_data = service.finder.find_dn(dn_id)
+    if order_data is None:
         print(f"  [오류] '{dn_id}'를 찾을 수 없습니다.")
         return False
 
-    # 2. 다중/단일 아이템 처리
-    if isinstance(dn_result, pd.DataFrame):
-        items_df = dn_result
-        dn_data = items_df.iloc[0]
-        num_items = len(items_df)
-        print(f"  [다중 아이템] {num_items}개 아이템 발견")
-        for idx, (_, item) in enumerate(items_df.iterrows()):
+    # 2. 기본 정보 출력
+    if order_data.is_multi_item:
+        print(f"  [다중 아이템] {order_data.item_count}개 아이템 발견")
+        for idx, (_, item) in enumerate(order_data.items_df.iterrows()):
             item_name = get_value(item, 'item_name', 'N/A')
             item_qty = get_value(item, 'item_qty', 'N/A')
             print(f"    {idx + 1}. {item_name} x {item_qty}")
+
+    print(f"  고객: {order_data.get_value('customer_name', 'N/A')}")
+    if not order_data.is_multi_item:
+        print(f"  품목: {order_data.get_value('item_name', 'N/A')}")
+        print(f"  수량: {order_data.get_value('item_qty', 'N/A')}")
+        unit_price = order_data.get_value('sales_unit_price', 0)
+        if unit_price:
+            print(f"  단가: {unit_price:,}")
+
+    # 3. 문서 생성 (서비스 사용)
+    result = service.generate_ts(dn_id, doc_type='DN')
+
+    # 4. 결과 처리
+    if result.success:
+        print(f"  -> 거래명세표 생성 완료: {result.output_file.name}")
+        return True
     else:
-        items_df = None
-        dn_data = dn_result
-        num_items = 1
-
-    # 3. 기본 정보 출력
-    print(f"  고객: {get_value(dn_data, 'customer_name', 'N/A')}")
-    if num_items == 1:
-        print(f"  품목: {get_value(dn_data, 'item_name', 'N/A')}")
-        print(f"  수량: {get_value(dn_data, 'item_qty', 'N/A')}")
-        print(f"  단가: {get_value(dn_data, 'sales_unit_price', 'N/A'):,}")
-
-    # 4. 템플릿 확인
-    if not TS_TEMPLATE_FILE.exists():
-        print(f"  [오류] 템플릿 파일이 없습니다: {TS_TEMPLATE_FILE}")
+        if result.status == GenerationStatus.FILE_ERROR:
+            print(f"  [오류] {result.errors[0] if result.errors else result.message}")
+        else:
+            print(f"  [오류] {result.message}")
         return False
-
-    # 5. 출력 디렉토리 생성
-    TS_OUTPUT_DIR.mkdir(exist_ok=True)
-
-    # 6. 파일명 생성 및 경로 검증
-    customer_name = get_value(dn_data, 'customer_name', 'Unknown')
-    output_file = generate_output_filename("TS", dn_id, customer_name, TS_OUTPUT_DIR)
-
-    if not validate_output_path(output_file, TS_OUTPUT_DIR):
-        return False
-
-    # 7. 거래명세표 생성 (xlwings)
-    try:
-        create_ts_xlwings(
-            template_path=TS_TEMPLATE_FILE,
-            output_path=output_file,
-            order_data=dn_data,
-            items_df=items_df,
-            doc_type='DN',
-        )
-        print(f"  -> 거래명세표 생성 완료: {output_file.name}")
-
-    except FileNotFoundError as e:
-        print(f"  [오류] {e}")
-        return False
-    except PermissionError:
-        print(f"  [오류] 파일 저장 실패: {output_file.name} (파일이 열려있거나 권한 없음)")
-        return False
-    except Exception as e:
-        print(f"  [오류] 거래명세표 생성 실패: {e}")
-        return False
-
-    return True
 
 
 def generate_ts_from_adv(advance_id: str) -> bool:
     """선수금 거래명세표 생성 (SO_국내 데이터 사용)
 
-    PMT_국내에서 선수금_ID → SO_ID 매핑을 찾고,
-    SO_국내에서 품목/금액 정보를 가져와 거래명세표를 생성합니다.
+    DocumentService를 사용하여 선수금 거래명세표를 생성합니다.
 
     Args:
         advance_id: 선수금_ID
@@ -195,69 +167,46 @@ def generate_ts_from_adv(advance_id: str) -> bool:
     print(f"거래명세표 생성 (선수금): {advance_id}")
     print('=' * 50)
 
+    service = DocumentService()
+
     # 1. SO 데이터 로드 (선수금_ID -> SO_ID -> SO 아이템들)
-    result = load_so_for_advance(advance_id)
+    result = service.finder.find_so_for_advance(advance_id)
     if result is None:
         print(f"  [오류] '{advance_id}'를 찾을 수 없습니다.")
         return False
 
-    pmt_data, so_items = result
-    num_items = len(so_items)
+    pmt_data, order_data = result
 
     # 2. 기본 정보 출력
-    first_item = so_items.iloc[0]
-    customer_name = get_value(first_item, 'customer_name', 'N/A')
+    customer_name = order_data.get_value('customer_name', 'N/A')
     print(f"  고객: {customer_name}")
-    print(f"  SO_ID: {get_value(first_item, 'so_id', 'N/A')}")
+    print(f"  SO_ID: {order_data.get_value('so_id', 'N/A')}")
 
-    if num_items > 1:
-        print(f"  [다중 아이템] {num_items}개 아이템 발견")
-        for idx, (_, item) in enumerate(so_items.iterrows()):
+    if order_data.is_multi_item:
+        print(f"  [다중 아이템] {order_data.item_count}개 아이템 발견")
+        for idx, (_, item) in enumerate(order_data.items_df.iterrows()):
             item_name = get_value(item, 'item_name', 'N/A')
             item_qty = get_value(item, 'item_qty', 'N/A')
             unit_price = get_value(item, 'sales_unit_price', 0)
             print(f"    {idx + 1}. {item_name} x {item_qty} @ {unit_price:,.0f}")
     else:
-        print(f"  품목: {get_value(first_item, 'item_name', 'N/A')}")
-        print(f"  수량: {get_value(first_item, 'item_qty', 'N/A')}")
-        print(f"  단가: {get_value(first_item, 'sales_unit_price', 0):,.0f}")
+        print(f"  품목: {order_data.get_value('item_name', 'N/A')}")
+        print(f"  수량: {order_data.get_value('item_qty', 'N/A')}")
+        print(f"  단가: {order_data.get_value('sales_unit_price', 0):,.0f}")
 
-    # 3. 템플릿 확인
-    if not TS_TEMPLATE_FILE.exists():
-        print(f"  [오류] 템플릿 파일이 없습니다: {TS_TEMPLATE_FILE}")
+    # 3. 문서 생성 (서비스 사용)
+    gen_result = service.generate_ts(advance_id, doc_type='ADV')
+
+    # 4. 결과 처리
+    if gen_result.success:
+        print(f"  -> 선수금 거래명세표 생성 완료: {gen_result.output_file.name}")
+        return True
+    else:
+        if gen_result.status == GenerationStatus.FILE_ERROR:
+            print(f"  [오류] {gen_result.errors[0] if gen_result.errors else gen_result.message}")
+        else:
+            print(f"  [오류] {gen_result.message}")
         return False
-
-    # 4. 출력 디렉토리 생성
-    TS_OUTPUT_DIR.mkdir(exist_ok=True)
-
-    # 5. 파일명 생성 및 경로 검증
-    output_file = generate_output_filename("TS_ADV", advance_id, customer_name, TS_OUTPUT_DIR)
-
-    if not validate_output_path(output_file, TS_OUTPUT_DIR):
-        return False
-
-    # 6. 거래명세표 생성 (xlwings) - DN과 동일한 로직, doc_type='ADV'
-    try:
-        create_ts_xlwings(
-            template_path=TS_TEMPLATE_FILE,
-            output_path=output_file,
-            order_data=first_item,
-            items_df=so_items if num_items > 1 else None,
-            doc_type='ADV',
-        )
-        print(f"  -> 선수금 거래명세표 생성 완료: {output_file.name}")
-
-    except FileNotFoundError as e:
-        print(f"  [오류] {e}")
-        return False
-    except PermissionError:
-        print(f"  [오류] 파일 저장 실패: {output_file.name} (파일이 열려있거나 권한 없음)")
-        return False
-    except Exception as e:
-        print(f"  [오류] 거래명세표 생성 실패: {e}")
-        return False
-
-    return True
 
 
 def create_argument_parser() -> argparse.ArgumentParser:

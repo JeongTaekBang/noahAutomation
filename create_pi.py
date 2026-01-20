@@ -25,12 +25,12 @@ from po_generator.config import (
 )
 from po_generator.utils import (
     load_so_export_data,
-    find_so_export_data,
     get_value,
 )
 from po_generator.pi_generator import create_pi_xlwings
 from po_generator.cli_common import validate_output_path, generate_output_filename
 from po_generator.logging_config import setup_logging
+from po_generator.services import DocumentService, GenerationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +65,11 @@ def print_available_ids(df_so: pd.DataFrame, limit: int = 15) -> None:
 def generate_pi(so_id: str, df_so: pd.DataFrame) -> bool:
     """Proforma Invoice 생성
 
+    DocumentService를 사용하여 Proforma Invoice를 생성합니다.
+
     Args:
         so_id: SO_ID
-        df_so: SO 해외 데이터
+        df_so: SO 해외 데이터 (하위 호환용, 실제로는 사용하지 않음)
 
     Returns:
         성공 여부
@@ -76,74 +78,45 @@ def generate_pi(so_id: str, df_so: pd.DataFrame) -> bool:
     print(f"Proforma Invoice 생성: {so_id}")
     print('=' * 60)
 
-    # 1. SO 데이터 검색
-    so_result = find_so_export_data(df_so, so_id)
-    if so_result is None:
+    service = DocumentService()
+
+    # 1. SO 데이터 검색 및 정보 출력
+    order_data = service.finder.find_so_export(so_id)
+    if order_data is None:
         print(f"  [오류] '{so_id}'를 찾을 수 없습니다.")
         return False
 
-    # 2. 다중/단일 아이템 처리
-    if isinstance(so_result, pd.DataFrame):
-        items_df = so_result
-        so_data = items_df.iloc[0]
-        num_items = len(items_df)
-        print(f"  [다중 아이템] {num_items}개 아이템 발견")
-        for idx, (_, item) in enumerate(items_df.iterrows()):
+    # 2. 기본 정보 출력
+    if order_data.is_multi_item:
+        print(f"  [다중 아이템] {order_data.item_count}개 아이템 발견")
+        for idx, (_, item) in enumerate(order_data.items_df.iterrows()):
             item_name = get_value(item, 'item_name', 'N/A')
             item_qty = get_value(item, 'item_qty', 'N/A')
             unit_price = get_value(item, 'sales_unit_price', 0)
             print(f"    {idx + 1}. {item_name} x {item_qty} @ {unit_price:,.2f}")
-    else:
-        items_df = None
-        so_data = so_result
-        num_items = 1
 
-    # 3. 기본 정보 출력
-    print(f"  고객: {get_value(so_data, 'customer_name', 'N/A')}")
-    if num_items == 1:
-        print(f"  품목: {get_value(so_data, 'item_name', 'N/A')}")
-        print(f"  수량: {get_value(so_data, 'item_qty', 'N/A')}")
-        unit_price = get_value(so_data, 'sales_unit_price', 0)
-        currency = get_value(so_data, 'currency', 'USD')
+    print(f"  고객: {order_data.get_value('customer_name', 'N/A')}")
+    if not order_data.is_multi_item:
+        print(f"  품목: {order_data.get_value('item_name', 'N/A')}")
+        print(f"  수량: {order_data.get_value('item_qty', 'N/A')}")
+        unit_price = order_data.get_value('sales_unit_price', 0)
+        currency = order_data.get_value('currency', 'USD')
         print(f"  단가: {currency} {unit_price:,.2f}")
 
-    # 4. 템플릿 확인
-    if not PI_TEMPLATE_FILE.exists():
-        print(f"  [오류] 템플릿 파일이 없습니다: {PI_TEMPLATE_FILE}")
+    # 3. 문서 생성 (서비스 사용)
+    result = service.generate_pi(so_id)
+
+    # 4. 결과 처리
+    if result.success:
+        print(f"  -> Proforma Invoice 생성 완료: {result.output_file.name}")
+        return True
+    else:
+        if result.status == GenerationStatus.FILE_ERROR:
+            print(f"  [오류] {result.errors[0] if result.errors else result.message}")
+        else:
+            print(f"  [오류] {result.message}")
+        logger.error(f"Proforma Invoice 생성 실패: {result.message}")
         return False
-
-    # 5. 출력 디렉토리 생성
-    PI_OUTPUT_DIR.mkdir(exist_ok=True)
-
-    # 6. 파일명 생성 및 경로 검증
-    customer_name = get_value(so_data, 'customer_name', 'Unknown')
-    output_file = generate_output_filename("PI", so_id, customer_name, PI_OUTPUT_DIR)
-
-    if not validate_output_path(output_file, PI_OUTPUT_DIR):
-        return False
-
-    # 7. Proforma Invoice 생성 (xlwings)
-    try:
-        create_pi_xlwings(
-            template_path=PI_TEMPLATE_FILE,
-            output_path=output_file,
-            order_data=so_data,
-            items_df=items_df,
-        )
-        print(f"  -> Proforma Invoice 생성 완료: {output_file.name}")
-
-    except FileNotFoundError as e:
-        print(f"  [오류] {e}")
-        return False
-    except PermissionError:
-        print(f"  [오류] 파일 저장 실패: {output_file.name} (파일이 열려있거나 권한 없음)")
-        return False
-    except Exception as e:
-        print(f"  [오류] Proforma Invoice 생성 실패: {e}")
-        logger.exception("Proforma Invoice 생성 중 오류 발생")
-        return False
-
-    return True
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
