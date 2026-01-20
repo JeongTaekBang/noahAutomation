@@ -141,19 +141,26 @@ create_po.bat
 
 ## Architecture
 
-### Project Structure (v2.2 - 템플릿 기반 + 거래명세표)
+### Project Structure (v2.3 - 서비스 레이어 추가)
 ```
 purchaseOrderAutomation/
 ├── po_generator/           # 핵심 패키지
 │   ├── __init__.py
 │   ├── config.py           # 설정/상수 (경로, 색상, 필드, 템플릿 경로)
-│   ├── utils.py            # 유틸리티 (데이터 로드, get_safe_value)
+│   ├── utils.py            # 유틸리티 (데이터 로드, get_value)
 │   ├── validators.py       # 데이터 검증 로직
 │   ├── history.py          # 이력 관리 (중복 체크, 저장)
-│   ├── excel_generator.py  # PO Excel 생성 (openpyxl 기반)
-│   ├── template_engine.py  # PO 템플릿 처리 (행 복제, 공식 조정)
+│   ├── excel_helpers.py    # Excel 헬퍼 (find_item_start_row 통합)
+│   ├── excel_generator.py  # PO Excel 생성 (xlwings 기반)
+│   ├── template_engine.py  # PO 템플릿 생성 (Deprecated - xlwings로 대체)
 │   ├── ts_generator.py     # 거래명세표 생성 (xlwings 기반)
-│   └── pi_generator.py     # Proforma Invoice 생성 (xlwings 기반)
+│   ├── pi_generator.py     # Proforma Invoice 생성 (xlwings 기반)
+│   ├── logging_config.py   # 로깅 설정
+│   └── services/           # 서비스 레이어
+│       ├── __init__.py
+│       ├── document_service.py  # 문서 생성 오케스트레이터
+│       ├── finder_service.py    # 데이터 조회 서비스
+│       └── result.py            # 결과 클래스 (DocumentResult)
 ├── templates/              # 템플릿 파일
 │   ├── purchase_order.xlsx        # PO 템플릿
 │   ├── transaction_statement.xlsx # 거래명세표 템플릿
@@ -163,7 +170,8 @@ purchaseOrderAutomation/
 │   ├── test_validators.py
 │   ├── test_history.py
 │   ├── test_utils.py
-│   └── test_excel_generator.py
+│   ├── test_excel_generator.py
+│   └── test_integration.py       # 통합 테스트
 ├── create_po.py            # PO CLI 진입점
 ├── create_ts.py            # 거래명세표 CLI 진입점
 ├── create_pi.py            # Proforma Invoice CLI 진입점
@@ -189,14 +197,19 @@ purchaseOrderAutomation/
 ### Key Modules
 | Module | Responsibility |
 |--------|----------------|
-| `config.py` | 경로, 색상, 필드 정의, 상수, 템플릿 경로 |
-| `utils.py` | get_safe_value, load_noah_po_lists, find_order_data |
+| `config.py` | 경로, 색상, 필드 정의, 상수, 템플릿 경로, COLUMN_ALIASES |
+| `utils.py` | get_value (표준 API), load_noah_po_lists, find_order_data |
 | `validators.py` | ValidationResult, validate_order_data, validate_multiple_items |
 | `history.py` | check_duplicate_order, save_to_history (발주서→DB 형식), get_all_history |
-| `template_engine.py` | load_template, clone_row, generate_po_template (openpyxl 템플릿 처리) |
-| `excel_generator.py` | create_po_workbook (openpyxl 기반 PO 생성) |
+| `excel_helpers.py` | find_item_start_row 통합 함수, 헤더 라벨 프리셋 (PO/TS/PI) |
+| `template_engine.py` | generate_po_template (Deprecated - xlwings로 대체됨) |
+| `excel_generator.py` | create_po_workbook (xlwings 기반 PO 생성) |
 | `ts_generator.py` | create_ts_xlwings (xlwings 기반 거래명세표 생성) |
 | `pi_generator.py` | create_pi_xlwings (xlwings 기반 Proforma Invoice 생성) |
+| `logging_config.py` | 로깅 설정 (DEBUG 레벨 제어) |
+| `services/document_service.py` | DocumentService - 문서 생성 오케스트레이터 |
+| `services/finder_service.py` | FinderService - 데이터 조회 서비스 (지연 로딩) |
+| `services/result.py` | DocumentResult, GenerationStatus - 결과 클래스 |
 
 ### Excel Template Structure
 템플릿 기반으로 발주서를 생성합니다:
@@ -218,8 +231,8 @@ Generated files contain two sheets:
 ## Dependencies
 
 - pandas
-- openpyxl (PO 생성)
-- xlwings (거래명세표 및 향후 문서 - 이미지/서식 완벽 보존)
+- openpyxl (이력 조회, 테스트 검증용)
+- xlwings (모든 문서 생성 - 이미지/서식 완벽 보존)
 - pytest (dev)
 - pytest-cov (dev)
 
@@ -260,9 +273,9 @@ python -m pytest tests/ --cov=po_generator
   - 수동 발주서도 같은 폴더에 넣으면 집계됨
 
 ### 템플릿 기반 문서 생성
-- [x] PO (Purchase Order) - openpyxl 기반 ✓
+- [x] PO (Purchase Order) - xlwings 기반 ✓
   - `templates/purchase_order.xlsx` 템플릿 파일
-  - `template_engine.py` 모듈 (행 복제, 공식 조정)
+  - `excel_generator.py` 모듈 (xlwings로 이미지/서식 완벽 보존)
   - 사용자가 직접 로고/도장 이미지 추가 가능
   - **버그 수정 (2026-01-19)**:
     - Delivery Address 값이 안 나오던 문제 해결
@@ -271,6 +284,9 @@ python -m pytest tests/ --cov=po_generator
       - `excel_generator.py`: 하드코딩 키워드 검색 → `get_value()` 사용
     - 파일 열 때 Description 시트가 먼저 보이던 문제 해결
       - `excel_generator.py`: `wb.active = ws_po` 추가 (Purchase Order 시트 활성화)
+  - **리팩토링 (2026-01-20)**:
+    - openpyxl → xlwings 전환 (이미지/서식 보존)
+    - `get_safe_value` → `get_value` 표준 API로 통일
 - [x] 거래명세표 (Transaction Statement) - xlwings 기반 ✓
   - `templates/transaction_statement.xlsx` 템플릿 파일
   - `ts_generator.py` 모듈 (xlwings로 이미지/서식 완벽 보존)
@@ -300,10 +316,10 @@ python -m pytest tests/ --cov=po_generator
 - 새 템플릿 추가 시: `templates/` 폴더에 양식 파일 추가 후 코드에서 셀 매핑 정의
 
 ### 라이브러리 선택 기준
-| 문서 | 라이브러리 | 이유 |
+| 용도 | 라이브러리 | 이유 |
 |------|-----------|------|
-| PO | openpyxl | 이미지 없이 잘 동작, 빠름 |
-| 거래명세표/Invoice/Packing List | xlwings | 로고/도장 이미지, 복잡한 서식 완벽 보존 |
+| 문서 생성 (PO/TS/PI) | xlwings | 로고/도장 이미지, 복잡한 서식 완벽 보존 |
+| 이력 조회/테스트 검증 | openpyxl | COM 인터페이스 없이 안정적인 읽기 |
 
 ### SQL 기반 데이터 분석 (예정)
 - [ ] NOAH_SO_PO_DN.xlsx → 로컬 SQL DB 연동
@@ -314,3 +330,23 @@ python -m pytest tests/ --cov=po_generator
     - `po_generator/data_layer.py` - 데이터 레이어 모듈
     - `queries/` 폴더 - 자주 쓰는 분석 쿼리 저장
     - CLI 확장 (`--analyze` 옵션 또는 `create_report.py`)
+
+### 서비스 레이어 추가 (2026-01-21)
+- [x] `excel_helpers.py` 생성 ✓
+  - `find_item_start_row` 함수를 단일 모듈로 통합
+  - openpyxl/xlwings 버전 모두 지원
+  - 헤더 라벨 프리셋: `PO_HEADER_LABELS`, `TS_HEADER_LABELS`, `PI_HEADER_LABELS`
+- [x] `services/` 디렉토리 생성 ✓
+  - `DocumentService`: 문서 생성 오케스트레이터 (PO, TS, PI)
+  - `FinderService`: 데이터 조회 서비스 (지연 로딩)
+  - `DocumentResult`: 생성 결과 클래스 (성공/실패/중복/검증오류 등)
+- [x] CLI 리팩토링 ✓
+  - `create_po.py`, `create_ts.py`, `create_pi.py`에서 `DocumentService` 사용
+  - 사용자 상호작용(중복 확인, 검증 오류 확인)은 CLI에서 유지
+  - 비즈니스 로직은 서비스 레이어로 분리
+- [x] 행 삭제 주석 수정 ✓
+  - "뒤에서부터 삭제" → "같은 위치에서 반복 삭제 - xlUp으로 아래 행이 올라옴"
+  - `ts_generator.py`, `pi_generator.py` 주석 수정
+- [x] 통합 테스트 추가 ✓
+  - `tests/test_integration.py`: 11개 테스트 케이스
+  - 파일명 시퀀스, find_item_start_row 일관성, 행 삭제 동작 문서화
