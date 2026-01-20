@@ -264,10 +264,20 @@ python -m pytest tests/ --cov=po_generator
   - `templates/purchase_order.xlsx` 템플릿 파일
   - `template_engine.py` 모듈 (행 복제, 공식 조정)
   - 사용자가 직접 로고/도장 이미지 추가 가능
+  - **버그 수정 (2026-01-19)**:
+    - Delivery Address 값이 안 나오던 문제 해결
+      - `config.py`: `delivery_address` 컬럼 별칭 추가
+      - `utils.py`: SO→PO 병합 시 `'납품 주소'` 컬럼 누락 수정
+      - `excel_generator.py`: 하드코딩 키워드 검색 → `get_value()` 사용
+    - 파일 열 때 Description 시트가 먼저 보이던 문제 해결
+      - `excel_generator.py`: `wb.active = ws_po` 추가 (Purchase Order 시트 활성화)
 - [x] 거래명세표 (Transaction Statement) - xlwings 기반 ✓
   - `templates/transaction_statement.xlsx` 템플릿 파일
   - `ts_generator.py` 모듈 (xlwings로 이미지/서식 완벽 보존)
   - `create_ts.py` CLI 진입점
+  - **버그 수정 (2026-01-19)**:
+    - 템플릿 예시 아이템이 삭제되지 않던 문제 해결 (실제 아이템 < 템플릿 예시 시 초과 행 삭제)
+    - 행 삭제 후 테두리 복원 (`_restore_ts_item_borders`) - 헤더 하단/마지막 아이템 하단 테두리
 - [x] PI (Proforma Invoice) - xlwings 기반 ✓
   - `templates/proforma_invoice.xlsx` 템플릿 파일
   - `pi_generator.py` 모듈 (xlwings로 이미지/서식 완벽 보존)
@@ -294,3 +304,13 @@ python -m pytest tests/ --cov=po_generator
 |------|-----------|------|
 | PO | openpyxl | 이미지 없이 잘 동작, 빠름 |
 | 거래명세표/Invoice/Packing List | xlwings | 로고/도장 이미지, 복잡한 서식 완벽 보존 |
+
+### SQL 기반 데이터 분석 (예정)
+- [ ] NOAH_SO_PO_DN.xlsx → 로컬 SQL DB 연동
+  - **배경**: Power Pivot의 양방향 JOIN 제한으로 복잡한 분석 어려움
+  - **목표**: Python에서 데이터 로드 → SQL로 자유로운 분석
+  - **추천 라이브러리**: DuckDB (설치 불필요, pandas 직접 연동, 분석 특화)
+  - **구현 방향**:
+    - `po_generator/data_layer.py` - 데이터 레이어 모듈
+    - `queries/` 폴더 - 자주 쓰는 분석 쿼리 저장
+    - CLI 확장 (`--analyze` 옵션 또는 `create_report.py`)

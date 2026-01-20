@@ -101,14 +101,16 @@ class TestLoadNoahPoLists:
 
     def test_file_not_found_raises_error(self, tmp_path):
         """소스 파일이 없으면 FileNotFoundError"""
-        with patch('po_generator.utils.NOAH_PO_LISTS_FILE', tmp_path / "없는파일.xlsx"):
-            with pytest.raises(FileNotFoundError) as exc_info:
-                load_noah_po_lists()
-            assert "소스 파일을 찾을 수 없습니다" in str(exc_info.value)
+        # 새 파일과 기존 파일 모두 존재하지 않는 경로로 패치
+        with patch('po_generator.utils.NOAH_SO_PO_DN_FILE', tmp_path / "없는파일1.xlsx"):
+            with patch('po_generator.utils.NOAH_PO_LISTS_FILE', tmp_path / "없는파일2.xlsx"):
+                with pytest.raises(FileNotFoundError) as exc_info:
+                    load_noah_po_lists()
+                assert "소스 파일을 찾을 수 없습니다" in str(exc_info.value)
 
-    def test_loads_and_merges_sheets(self, tmp_path):
-        """국내/해외 시트를 로드하고 합침"""
-        # 테스트용 Excel 파일 생성
+    def test_loads_and_merges_sheets_legacy(self, tmp_path):
+        """Legacy: 국내/해외 시트를 로드하고 합침 (NOAH_PO_Lists.xlsx)"""
+        # 테스트용 Excel 파일 생성 (Legacy 형식)
         test_file = tmp_path / "test_po_lists.xlsx"
 
         df_domestic = pd.DataFrame({
@@ -127,8 +129,10 @@ class TestLoadNoahPoLists:
             df_domestic.to_excel(writer, sheet_name='국내', index=False)
             df_export.to_excel(writer, sheet_name='해외', index=False)
 
-        with patch('po_generator.utils.NOAH_PO_LISTS_FILE', test_file):
-            result = load_noah_po_lists()
+        # 새 파일은 존재하지 않도록, 기존 파일만 존재
+        with patch('po_generator.utils.NOAH_SO_PO_DN_FILE', tmp_path / "없는파일.xlsx"):
+            with patch('po_generator.utils.NOAH_PO_LISTS_FILE', test_file):
+                result = load_noah_po_lists()
 
         # 3건 합쳐짐
         assert len(result) == 3
@@ -137,6 +141,58 @@ class TestLoadNoahPoLists:
         assert list(result['_시트구분']) == ['국내', '국내', '해외']
         # 모든 컬럼 통일됨
         assert 'Export only' in result.columns
+
+    def test_loads_new_structure(self, tmp_path):
+        """새 구조: SO/PO 시트를 로드하고 병합 (NOAH_SO_PO_DN.xlsx)"""
+        test_file = tmp_path / "test_so_po_dn.xlsx"
+
+        # SO 시트 (고객 정보)
+        df_so_domestic = pd.DataFrame({
+            'SO_ID': ['SOD-2026-0001', 'SOD-2026-0002'],
+            'Customer PO': ['CPO-001', 'CPO-002'],
+            'Customer name': ['고객A', '고객B'],
+        })
+        # PO 시트 (발주 정보)
+        df_po_domestic = pd.DataFrame({
+            'PO_ID': ['ND-0001', 'ND-0002'],
+            'SO_ID': ['SOD-2026-0001', 'SOD-2026-0002'],
+            'Item name': ['Item1', 'Item2'],
+            'Item qty': [1, 2],
+            'ICO Unit': [100, 200],
+        })
+
+        df_so_export = pd.DataFrame({
+            'SO_ID': ['SOO-2026-0001'],
+            'Customer PO': ['CPO-E01'],
+            'Customer name': ['Customer C'],
+        })
+        df_po_export = pd.DataFrame({
+            'PO_ID': ['NO-0001'],
+            'SO_ID': ['SOO-2026-0001'],
+            'Item name': ['ItemE1'],
+            'Item qty': [3],
+            'ICO Unit': [300],
+        })
+
+        with pd.ExcelWriter(test_file) as writer:
+            df_so_domestic.to_excel(writer, sheet_name='SO_국내', index=False)
+            df_po_domestic.to_excel(writer, sheet_name='PO_국내', index=False)
+            df_so_export.to_excel(writer, sheet_name='SO_해외', index=False)
+            df_po_export.to_excel(writer, sheet_name='PO_해외', index=False)
+
+        with patch('po_generator.utils.NOAH_SO_PO_DN_FILE', test_file):
+            result = load_noah_po_lists()
+
+        # 3건 합쳐짐 (국내 2 + 해외 1)
+        assert len(result) == 3
+        # 시트 구분 컬럼 추가됨
+        assert '_시트구분' in result.columns
+        # PO와 SO가 병합됨
+        assert 'PO_ID' in result.columns
+        assert 'Customer name' in result.columns
+        # 국내/해외 구분
+        assert len(result[result['_시트구분'] == '국내']) == 2
+        assert len(result[result['_시트구분'] == '해외']) == 1
 
     def test_adds_sheet_identifier_column(self, tmp_path):
         """_시트구분 컬럼이 올바르게 추가됨"""
@@ -149,8 +205,10 @@ class TestLoadNoahPoLists:
             df_domestic.to_excel(writer, sheet_name='국내', index=False)
             df_export.to_excel(writer, sheet_name='해외', index=False)
 
-        with patch('po_generator.utils.NOAH_PO_LISTS_FILE', test_file):
-            result = load_noah_po_lists()
+        # 새 파일은 존재하지 않도록, 기존 파일만 존재
+        with patch('po_generator.utils.NOAH_SO_PO_DN_FILE', tmp_path / "없는파일.xlsx"):
+            with patch('po_generator.utils.NOAH_PO_LISTS_FILE', test_file):
+                result = load_noah_po_lists()
 
         domestic_rows = result[result['_시트구분'] == '국내']
         export_rows = result[result['_시트구분'] == '해외']
@@ -164,7 +222,17 @@ class TestFindOrderData:
 
     @pytest.fixture
     def sample_df(self):
-        """테스트용 DataFrame"""
+        """테스트용 DataFrame (새 구조: PO_ID)"""
+        return pd.DataFrame({
+            'PO_ID': ['ND-0001', 'ND-0002', 'ND-0002', 'ND-0003'],
+            'Customer name': ['고객A', '고객B', '고객B', '고객C'],
+            'Item name': ['Item1', 'Item2-1', 'Item2-2', 'Item3'],
+            'Item qty': [1, 2, 3, 4],
+        })
+
+    @pytest.fixture
+    def sample_df_legacy(self):
+        """테스트용 DataFrame (기존 구조: RCK Order no.)"""
         return pd.DataFrame({
             'RCK Order no.': ['ND-0001', 'ND-0002', 'ND-0002', 'ND-0003'],
             'Customer name': ['고객A', '고객B', '고객B', '고객C'],
@@ -196,10 +264,17 @@ class TestFindOrderData:
 
     def test_empty_dataframe_returns_none(self):
         """빈 DataFrame에서 검색하면 None"""
-        empty_df = pd.DataFrame({'RCK Order no.': []})
+        empty_df = pd.DataFrame({'PO_ID': []})
         result = find_order_data(empty_df, 'ND-0001')
 
         assert result is None
+
+    def test_legacy_column_name_works(self, sample_df_legacy):
+        """기존 컬럼명(RCK Order no.)도 동작함"""
+        result = find_order_data(sample_df_legacy, 'ND-0001')
+
+        assert isinstance(result, pd.Series)
+        assert result['Customer name'] == '고객A'
 
     def test_partial_match_not_found(self, sample_df):
         """부분 일치는 찾지 않음"""

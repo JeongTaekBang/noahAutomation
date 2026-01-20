@@ -1,288 +1,33 @@
 """
-템플릿 엔진 모듈
-================
+템플릿 엔진 모듈 (Deprecated)
+=============================
 
-템플릿 파일을 로드하고, 동적 행 처리, 공식 조정 등을 담당합니다.
+이 모듈은 openpyxl 기반 템플릿 처리를 위해 사용되었습니다.
+현재는 xlwings 기반 excel_generator.py로 대체되었습니다.
+
+generate_po_template() 함수만 유지하여 템플릿 생성 기능을 제공합니다.
 """
 
 from __future__ import annotations
 
-import re
 import logging
-from copy import copy
 from pathlib import Path
-from typing import Optional
 
-from openpyxl import load_workbook, Workbook
-from openpyxl.worksheet.worksheet import Worksheet
-from openpyxl.cell.cell import Cell, MergedCell
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
 from openpyxl.utils import get_column_letter
 
-from po_generator.config import PO_TEMPLATE_FILE, TEMPLATE_DIR
+from po_generator.config import (
+    PO_TEMPLATE_FILE,
+    TEMPLATE_DIR,
+    COLORS,
+    COLUMN_WIDTHS,
+    TOTAL_COLUMNS,
+    SPEC_FIELDS,
+    OPTION_FIELDS,
+)
 
 logger = logging.getLogger(__name__)
-
-
-def load_template(template_path: Optional[Path] = None) -> Workbook:
-    """템플릿 파일 로드 (이미지 포함)
-
-    Args:
-        template_path: 템플릿 파일 경로 (None이면 기본 PO 템플릿)
-
-    Returns:
-        로드된 Workbook
-
-    Raises:
-        FileNotFoundError: 템플릿 파일이 없는 경우
-    """
-    if template_path is None:
-        template_path = PO_TEMPLATE_FILE
-
-    if not template_path.exists():
-        raise FileNotFoundError(f"템플릿 파일을 찾을 수 없습니다: {template_path}")
-
-    logger.info(f"템플릿 로드: {template_path}")
-    # 이미지/차트 등 모든 요소를 포함하여 로드
-    return load_workbook(template_path, data_only=False)
-
-
-def copy_cell_style(source: Cell, target: Cell) -> None:
-    """셀 스타일 복사 (폰트, 배경, 테두리, 정렬, 숫자 포맷)
-
-    Args:
-        source: 원본 셀
-        target: 대상 셀
-    """
-    if source.has_style:
-        target.font = copy(source.font)
-        target.fill = copy(source.fill)
-        target.border = copy(source.border)
-        target.alignment = copy(source.alignment)
-        target.number_format = source.number_format
-        target.protection = copy(source.protection)
-
-
-def clone_row(
-    ws: Worksheet,
-    source_row: int,
-    target_row: int,
-    max_col: int = 10,
-) -> None:
-    """행 복제 (값, 스타일, 병합 포함)
-
-    Args:
-        ws: 워크시트
-        source_row: 원본 행 번호
-        target_row: 대상 행 번호
-        max_col: 복제할 최대 열 수
-    """
-    # 원본 행의 병합 정보 수집
-    merges_to_add = []
-    for merged_range in ws.merged_cells.ranges:
-        if merged_range.min_row == source_row and merged_range.max_row == source_row:
-            # 같은 행 내 병합 (예: B13:E13)
-            new_merge = f"{get_column_letter(merged_range.min_col)}{target_row}:" \
-                        f"{get_column_letter(merged_range.max_col)}{target_row}"
-            merges_to_add.append(new_merge)
-
-    # 셀 복사
-    for col in range(1, max_col + 1):
-        source_cell = ws.cell(row=source_row, column=col)
-        target_cell = ws.cell(row=target_row, column=col)
-
-        # MergedCell이 아닌 경우에만 값 복사
-        if not isinstance(source_cell, MergedCell):
-            # 공식인 경우 행 번호 조정
-            if source_cell.value and isinstance(source_cell.value, str) \
-               and source_cell.value.startswith('='):
-                target_cell.value = adjust_formula_row(
-                    source_cell.value, source_row, target_row
-                )
-            else:
-                target_cell.value = source_cell.value
-
-            # 스타일 복사
-            copy_cell_style(source_cell, target_cell)
-
-    # 새 병합 적용
-    for merge_range in merges_to_add:
-        ws.merge_cells(merge_range)
-
-    # 행 높이 복사
-    if ws.row_dimensions[source_row].height:
-        ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
-
-
-def adjust_formula_row(formula: str, old_row: int, new_row: int) -> str:
-    """공식 내 행 참조를 조정
-
-    예: =H13*F13 → =H14*F14 (old_row=13, new_row=14)
-
-    Args:
-        formula: 원본 공식
-        old_row: 원본 행 번호
-        new_row: 새 행 번호
-
-    Returns:
-        조정된 공식
-    """
-    # 행 번호 패턴: 열 문자 + 숫자 (예: A13, J13)
-    pattern = r'([A-Z]+)' + str(old_row) + r'(?![0-9])'
-    replacement = r'\g<1>' + str(new_row)
-    return re.sub(pattern, replacement, formula, flags=re.IGNORECASE)
-
-
-def shift_formulas_in_range(
-    ws: Worksheet,
-    start_row: int,
-    end_row: int,
-    shift_by: int,
-    reference_start_row: int,
-    max_col: int = 10,
-) -> None:
-    """특정 범위 내 공식의 행 참조를 이동
-
-    Args:
-        ws: 워크시트
-        start_row: 시작 행
-        end_row: 끝 행
-        shift_by: 이동할 행 수
-        reference_start_row: 이 행 이상의 참조만 이동
-        max_col: 최대 열 수
-    """
-    for row in range(start_row, end_row + 1):
-        for col in range(1, max_col + 1):
-            cell = ws.cell(row=row, column=col)
-            if cell.value and isinstance(cell.value, str) and cell.value.startswith('='):
-                cell.value = shift_formula_references(
-                    cell.value, shift_by, reference_start_row
-                )
-
-
-def shift_formula_references(
-    formula: str,
-    shift_by: int,
-    reference_start_row: int,
-) -> str:
-    """공식 내 행 참조를 shift_by만큼 이동
-
-    reference_start_row 이상의 행 참조만 이동합니다.
-
-    Args:
-        formula: 원본 공식
-        shift_by: 이동할 행 수 (양수: 아래로, 음수: 위로)
-        reference_start_row: 이 행 이상의 참조만 이동
-
-    Returns:
-        조정된 공식
-    """
-    def replace_row(match):
-        col = match.group(1)
-        row = int(match.group(2))
-        if row >= reference_start_row:
-            return f"{col}{row + shift_by}"
-        return match.group(0)
-
-    # 패턴: 열 문자 + 숫자 (예: A13, J15)
-    pattern = r'([A-Z]+)(\d+)'
-    return re.sub(pattern, replace_row, formula, flags=re.IGNORECASE)
-
-
-def _backup_images(ws: Worksheet) -> list:
-    """워크시트의 이미지 정보를 백업
-
-    Args:
-        ws: 워크시트
-
-    Returns:
-        이미지 객체 리스트
-    """
-    images = []
-    if hasattr(ws, '_images'):
-        # 이미지 객체와 앵커 정보를 복사
-        for img in ws._images:
-            images.append(img)
-    return images
-
-
-def _restore_images(ws: Worksheet, images: list) -> None:
-    """백업된 이미지를 워크시트에 복원
-
-    Args:
-        ws: 워크시트
-        images: 백업된 이미지 리스트
-    """
-    # 기존 이미지 제거 후 복원
-    ws._images = images
-
-
-def insert_rows_with_template(
-    ws: Worksheet,
-    template_row: int,
-    count: int,
-    max_col: int = 10,
-) -> int:
-    """템플릿 행을 복제하여 여러 행 삽입
-
-    템플릿 행 아래에 (count - 1)개의 행을 삽입하고 스타일을 복제합니다.
-    기존 행들은 아래로 이동합니다.
-    이미지는 원래 위치에 유지됩니다.
-
-    Args:
-        ws: 워크시트
-        template_row: 템플릿 행 번호 (이 행이 첫 번째 아이템 행이 됨)
-        count: 필요한 총 행 수
-        max_col: 최대 열 수
-
-    Returns:
-        마지막 아이템 행 번호
-    """
-    if count <= 1:
-        return template_row
-
-    rows_to_insert = count - 1
-    insert_position = template_row + 1
-
-    logger.debug(f"행 삽입: template_row={template_row}, count={count}, "
-                 f"rows_to_insert={rows_to_insert}")
-
-    # 1. 이미지 백업 (insert_rows가 이미지를 손상시킬 수 있음)
-    images_backup = _backup_images(ws)
-
-    # 2. 새 행 삽입 (기존 행들이 아래로 밀림)
-    ws.insert_rows(insert_position, rows_to_insert)
-
-    # 3. 이미지 복원
-    if images_backup:
-        _restore_images(ws, images_backup)
-
-    # 4. 삽입된 행들에 템플릿 스타일 복제
-    for i in range(rows_to_insert):
-        target_row = insert_position + i
-        clone_row(ws, template_row, target_row, max_col)
-
-    return template_row + rows_to_insert
-
-
-def update_sum_formula(
-    ws: Worksheet,
-    cell_address: str,
-    item_start_row: int,
-    item_end_row: int,
-    column: str = 'J',
-) -> None:
-    """SUM 공식의 범위 업데이트
-
-    Args:
-        ws: 워크시트
-        cell_address: 공식이 있는 셀 주소 (예: 'J14')
-        item_start_row: 아이템 시작 행
-        item_end_row: 아이템 끝 행
-        column: 합계할 열 (기본: 'J')
-    """
-    formula = f"=SUM({column}{item_start_row}:{column}{item_end_row})"
-    ws[cell_address] = formula
-    logger.debug(f"SUM 공식 업데이트: {cell_address} = {formula}")
 
 
 def ensure_template_dir() -> None:
@@ -299,14 +44,6 @@ def generate_po_template() -> Path:
     Returns:
         생성된 템플릿 파일 경로
     """
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, Alignment, Border, Side, PatternFill
-
-    from po_generator.config import (
-        COLORS, COLUMN_WIDTHS, TOTAL_COLUMNS,
-        SPEC_FIELDS, OPTION_FIELDS,
-    )
-
     ensure_template_dir()
 
     wb = Workbook()
@@ -577,3 +314,40 @@ def generate_po_template() -> Path:
     logger.info(f"PO 템플릿 생성 완료: {PO_TEMPLATE_FILE}")
 
     return PO_TEMPLATE_FILE
+
+
+# === 아래 함수들은 Deprecated - 하위 호환성을 위해 유지 ===
+
+def load_template(template_path: Path | None = None):
+    """템플릿 파일 로드 (Deprecated - xlwings로 대체됨)"""
+    from openpyxl import load_workbook
+    if template_path is None:
+        template_path = PO_TEMPLATE_FILE
+    if not template_path.exists():
+        raise FileNotFoundError(f"템플릿 파일을 찾을 수 없습니다: {template_path}")
+    return load_workbook(template_path, data_only=False)
+
+
+def clone_row(ws, source_row, target_row, max_col=10):
+    """행 복제 (Deprecated - xlwings로 대체됨)"""
+    pass
+
+
+def insert_rows_with_template(ws, template_row, count, max_col=10):
+    """템플릿 행 복제하여 삽입 (Deprecated - xlwings로 대체됨)"""
+    return template_row + count - 1 if count > 1 else template_row
+
+
+def update_sum_formula(ws, cell_address, item_start_row, item_end_row, column='J'):
+    """SUM 공식 범위 업데이트 (Deprecated - xlwings로 대체됨)"""
+    pass
+
+
+def shift_formula_references(formula, shift_by, reference_start_row):
+    """공식 행 참조 이동 (Deprecated - xlwings로 대체됨)"""
+    return formula
+
+
+def copy_cell_style(source, target):
+    """셀 스타일 복사 (Deprecated - xlwings로 대체됨)"""
+    pass

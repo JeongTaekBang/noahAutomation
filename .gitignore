@@ -52,6 +52,10 @@ po_history/
 tmpclaude-*
 .claude/
 
+# User settings (사용자별 경로 설정)
+user_settings.py
+local_config.bat
+
 # OS
 .DS_Store
 Thumbs.db

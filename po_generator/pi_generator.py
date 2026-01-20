@@ -20,7 +20,7 @@ import pandas as pd
 import xlwings as xw
 
 from po_generator.config import PI_TEMPLATE_FILE
-from po_generator.utils import get_safe_value
+from po_generator.utils import get_value
 
 logger = logging.getLogger(__name__)
 
@@ -133,19 +133,19 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series, today_str: str) -> None:
         order_data: 주문 데이터
         today_str: 오늘 날짜 문자열
     """
-    # Invoice No (SO_ID 사용)
-    so_id = get_safe_value(order_data, 'SO_ID', '')
+    # Invoice No (so_id 키 사용)
+    so_id = get_value(order_data, 'so_id', '')
     ws.range(CELL_INVOICE_NO).value = so_id
 
     # Invoice Date
     ws.range(CELL_INVOICE_DATE).value = today_str
 
-    # Customer 정보
-    customer_name = get_safe_value(order_data, 'Customer name', '')
-    customer_address = get_safe_value(order_data, 'Customer address', '')
-    customer_country = get_safe_value(order_data, 'Customer country', '')
-    customer_tel = get_safe_value(order_data, 'Customer TEL', '')
-    customer_fax = get_safe_value(order_data, 'Customer FAX', '')
+    # Customer 정보 (내부 키 사용)
+    customer_name = get_value(order_data, 'customer_name', '')
+    customer_address = get_value(order_data, 'customer_address', '')
+    customer_country = get_value(order_data, 'customer_country', '')
+    customer_tel = get_value(order_data, 'customer_tel', '')
+    customer_fax = get_value(order_data, 'customer_fax', '')
 
     # Consigned to (고객명 + 주소)
     consigned_to = f"{customer_name}\n{customer_address}" if customer_address else customer_name
@@ -158,9 +158,9 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series, today_str: str) -> None:
     ws.range(CELL_FROM).value = "INCHEON, KOREA"
     ws.range(CELL_DESTINATION).value = customer_country
 
-    # Customer PO
-    customer_po = get_safe_value(order_data, 'Customer PO', '')
-    po_date = get_safe_value(order_data, 'PO receipt date', '')
+    # Customer PO (내부 키 사용)
+    customer_po = get_value(order_data, 'customer_po', '')
+    po_date = get_value(order_data, 'po_receipt_date', '')
     ws.range(CELL_PO_NO).value = customer_po
     if po_date and pd.notna(po_date):
         if isinstance(po_date, datetime):
@@ -168,13 +168,13 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series, today_str: str) -> None:
         else:
             ws.range(CELL_PO_DATE).value = str(po_date)
 
-    # Incoterms
-    incoterms = get_safe_value(order_data, 'Incoterms', '')
+    # Incoterms (내부 키 사용)
+    incoterms = get_value(order_data, 'incoterms', '')
     # Incoterms는 별도 셀이 있으면 추가 (현재 매핑에 없음)
 
-    # L/C 정보 (있으면)
-    lc_no = get_safe_value(order_data, 'L/C No', '')
-    lc_date = get_safe_value(order_data, 'L/C date', '')
+    # L/C 정보 (내부 키 사용)
+    lc_no = get_value(order_data, 'lc_no', '')
+    lc_date = get_value(order_data, 'lc_date', '')
     if lc_no:
         ws.range(CELL_LC_NO).value = lc_no
     if lc_date and pd.notna(lc_date):
@@ -278,27 +278,27 @@ def _fill_items(
             ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=-4121)  # xlDown
         logger.debug(f"{rows_to_insert}개 행 삽입")
 
-    # 아이템 데이터 채우기
+    # 아이템 데이터 채우기 (내부 키 사용)
     total_amount = 0
-    currency = get_safe_value(order_data, 'Currency', 'USD')
+    currency = get_value(order_data, 'currency', 'USD')
 
     for idx, (_, item) in enumerate(items_df.iterrows()):
         row_num = ITEM_START_ROW + idx
 
         # 품목명
-        item_name = get_safe_value(item, 'Item name', '')
+        item_name = get_value(item, 'item_name', '')
         ws.range(f'{COL_ITEM_NAME}{row_num}').value = item_name
 
         # 수량
-        qty = get_safe_value(item, 'Item qty', 1)
+        qty = get_value(item, 'item_qty', 1)
         try:
             qty = int(qty) if pd.notna(qty) else 1
         except (ValueError, TypeError):
             qty = 1
         ws.range(f'{COL_QTY}{row_num}').value = qty
 
-        # 단가 (Sales Unit Price 사용)
-        unit_price = get_safe_value(item, 'Sales Unit Price', 0)
+        # 단가 (sales_unit_price 키 사용)
+        unit_price = get_value(item, 'sales_unit_price', 0)
         try:
             unit_price = float(unit_price) if pd.notna(unit_price) else 0
         except (ValueError, TypeError):
@@ -322,10 +322,10 @@ def _fill_shipping_mark(ws: xw.Sheet, order_data: pd.Series) -> None:
         ws: xlwings Sheet 객체
         order_data: 주문 데이터
     """
-    # 데이터 추출
-    customer_name = get_safe_value(order_data, 'Customer name', '')
-    customer_country = get_safe_value(order_data, 'Customer country', '')
-    customer_po = get_safe_value(order_data, 'Customer PO', '')
+    # 데이터 추출 (내부 키 사용)
+    customer_name = get_value(order_data, 'customer_name', '')
+    customer_country = get_value(order_data, 'customer_country', '')
+    customer_po = get_value(order_data, 'customer_po', '')
 
     # 검색 범위 (아이템 행 삭제로 위치가 변할 수 있으므로 넓게 검색)
     search_start = 20

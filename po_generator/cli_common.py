@@ -22,6 +22,9 @@ def print_available_orders(df: pd.DataFrame, limit: int = ORDER_LIST_DISPLAY_LIM
     Args:
         df: 주문 데이터
         limit: 출력 제한 수 (기본값: ORDER_LIST_DISPLAY_LIMIT)
+
+    Returns:
+        None
     """
     orders = df['RCK Order no.'].dropna().unique().tolist()
     print("\n사용 가능한 RCK Order No. 목록:")

@@ -39,12 +39,13 @@ from po_generator.config import (
 from po_generator.utils import (
     load_noah_po_lists,
     find_order_data,
-    get_safe_value,
+    get_value,
 )
 from po_generator.validators import validate_order_data, validate_multiple_items
 from po_generator.history import check_duplicate_order, save_to_history, get_all_history, get_history_count, get_current_month_info
 from po_generator.excel_generator import create_po_workbook
 from po_generator.cli_common import print_available_orders, validate_output_path, generate_output_filename
+from po_generator.logging_config import setup_logging
 
 # 경고 필터링 (openpyxl/pandas 관련 경고만 선택적으로 무시)
 import warnings
@@ -52,31 +53,6 @@ import warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 # pandas의 FutureWarning 무시 (버전 호환성 관련)
 warnings.filterwarnings('ignore', category=FutureWarning, module='pandas')
-
-
-def setup_logging(verbose: bool = False) -> None:
-    """로깅 설정
-
-    Args:
-        verbose: 상세 로깅 여부
-    """
-    level = logging.DEBUG if verbose else logging.INFO
-
-    # 콘솔 핸들러
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(level)
-    console_format = logging.Formatter('%(message)s')
-    console_handler.setFormatter(console_format)
-
-    # 루트 로거 설정
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-    root_logger.addHandler(console_handler)
-
-    # po_generator 로거 설정
-    pkg_logger = logging.getLogger('po_generator')
-    pkg_logger.setLevel(level)
-
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +98,8 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
         num_items = len(items_df)
         print(f"  [다중 아이템] {num_items}개 아이템 발견")
         for idx, (_, item) in enumerate(items_df.iterrows()):
-            item_name = get_safe_value(item, 'Item name', 'N/A')
-            item_qty = get_safe_value(item, 'Item qty', 'N/A')
+            item_name = get_value(item, 'item_name', 'N/A')
+            item_qty = get_value(item, 'item_qty', 'N/A')
             print(f"    {idx + 1}. {item_name} x {item_qty}")
     else:
         items_df = None
@@ -131,11 +107,11 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
         num_items = 1
 
     # 4. 기본 정보 출력
-    print(f"  고객: {get_safe_value(order_data, 'Customer name', 'N/A')}")
+    print(f"  고객: {get_value(order_data, 'customer_name', 'N/A')}")
     if num_items == 1:
-        print(f"  품목: {get_safe_value(order_data, 'Item name', 'N/A')}")
-        print(f"  수량: {get_safe_value(order_data, 'Item qty', 'N/A')}")
-    print(f"  시트: {get_safe_value(order_data, '_시트구분', 'N/A')}")
+        print(f"  품목: {get_value(order_data, 'item_name', 'N/A')}")
+        print(f"  수량: {get_value(order_data, 'item_qty', 'N/A')}")
+    print(f"  시트: {get_value(order_data, 'sheet_type', 'N/A')}")
 
     # 5. 데이터 검증
     if items_df is not None:
@@ -164,7 +140,7 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     # 7. 파일명 생성 및 경로 검증
-    customer_name_raw = get_safe_value(order_data, 'Customer name', 'Unknown')
+    customer_name_raw = get_value(order_data, 'customer_name', 'Unknown')
     output_file = generate_output_filename("PO", order_no, customer_name_raw, OUTPUT_DIR)
 
     if not validate_output_path(output_file, OUTPUT_DIR):
@@ -193,8 +169,8 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
         return False
 
     # 10. 이력 저장 (발주서 파일에서 데이터 추출)
-    order_no_val = get_safe_value(order_data, 'RCK Order no.')
-    customer_name_val = get_safe_value(order_data, 'Customer name')
+    order_no_val = get_value(order_data, 'order_no')
+    customer_name_val = get_value(order_data, 'customer_name')
     history_saved = save_to_history(output_file, order_no_val, customer_name_val)
 
     if not history_saved:

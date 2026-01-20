@@ -14,16 +14,61 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, TypedDict
+from typing import Any, TypedDict
+from zipfile import BadZipFile
 
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
-from zipfile import BadZipFile
 
-from po_generator.config import HISTORY_DIR
+from po_generator.config import (
+    HISTORY_DIR,
+    ITEM_START_ROW_FALLBACK,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# === 이력 추출용 로컬 상수 (config.py에서 이동됨) ===
+# 헤더 영역 고정 위치 (Purchase Order 시트)
+CELL_TITLE: str = "A1"
+CELL_DATE: str = "A5"
+CELL_CUSTOMER_NAME: str = "A10"
+
+# 이력 아이템 검색 제한 (기본값)
+HISTORY_MAX_SEARCH_ROWS: int = 100
+
+
+def _find_item_start_row(
+    ws,
+    search_labels: tuple[str, ...] = ('No.', 'Item Number', 'Item\nNumber', '품명', 'Item'),
+    max_search_rows: int = 30,
+    fallback_row: int = ITEM_START_ROW_FALLBACK,
+) -> int:
+    """템플릿에서 아이템 시작 행을 동적으로 찾기 (openpyxl 버전)
+
+    헤더 레이블을 찾아서 그 다음 행이 아이템 시작 위치입니다.
+
+    Args:
+        ws: openpyxl Worksheet 객체
+        search_labels: 검색할 헤더 레이블
+        max_search_rows: 최대 검색 행 수
+        fallback_row: 헤더를 찾지 못했을 때 기본값
+
+    Returns:
+        아이템 시작 행 번호
+    """
+    for row in range(1, max_search_rows + 1):
+        for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']:
+            cell_value = ws[f'{col}{row}'].value
+            if cell_value and any(
+                label in str(cell_value) for label in search_labels
+            ):
+                logger.debug(f"헤더 발견: Row {row}, 값='{cell_value}' -> 아이템 시작 Row {row + 1}")
+                return row + 1
+
+    logger.debug(f"헤더를 찾지 못함 -> 기본값 Row {fallback_row} 사용")
+    return fallback_row
 
 
 class DuplicateInfo(TypedDict):
@@ -85,7 +130,7 @@ def _get_history_filename(order_no: str, customer_name: str) -> str:
 
 
 def _extract_data_from_po_file(po_file: Path) -> dict[str, Any]:
-    """발주서 파일에서 데이터 추출 (DB 형식)
+    """발주서 파일에서 데이터 추출 (DB 형식) - openpyxl 버전
 
     Purchase Order 시트와 Description 시트에서 데이터를 추출하여
     한 행의 딕셔너리로 반환합니다.
@@ -97,8 +142,6 @@ def _extract_data_from_po_file(po_file: Path) -> dict[str, Any]:
     Returns:
         추출된 데이터 딕셔너리
     """
-    from po_generator.config import ITEM_START_ROW
-
     record: dict[str, Any] = {}
 
     try:
@@ -107,6 +150,9 @@ def _extract_data_from_po_file(po_file: Path) -> dict[str, Any]:
         # === Purchase Order 시트에서 추출 ===
         if "Purchase Order" in wb.sheetnames:
             ws_po = wb["Purchase Order"]
+
+            # 아이템 시작 행 동적 탐지
+            item_start_row = _find_item_start_row(ws_po, fallback_row=ITEM_START_ROW_FALLBACK)
 
             # 고정 위치 셀 (헤더 영역)
             # A1: "Purchase Order - ND-0001" 형식에서 주문번호 추출
@@ -120,15 +166,14 @@ def _extract_data_from_po_file(po_file: Path) -> dict[str, Any]:
             # A5: 날짜 "Date:  01/JAN/2026"
             date_cell = ws_po['A5'].value or ''
             if 'Date:' in str(date_cell):
-                record['PO Date'] = date_cell.replace('Date:', '').strip()
+                record['PO Date'] = str(date_cell).replace('Date:', '').strip()
 
-            # 아이템 정보 동적 추출 (Row 13부터 빈 셀까지)
+            # 아이템 정보 동적 추출 (동적 탐지된 행부터 빈 셀까지)
             items_data = []
-            row = ITEM_START_ROW  # 기본 13
-            max_search_rows = 100  # 무한 루프 방지
+            row = item_start_row
             searched = 0
 
-            while searched < max_search_rows:
+            while searched < HISTORY_MAX_SEARCH_ROWS:
                 desc = ws_po[f'B{row}'].value
                 if not desc:  # 빈 셀이면 아이템 끝
                     break
@@ -147,7 +192,7 @@ def _extract_data_from_po_file(po_file: Path) -> dict[str, Any]:
                 searched += 1
 
             # 아이템 마지막 행 (동적 계산)
-            item_last_row = ITEM_START_ROW + len(items_data) - 1 if items_data else ITEM_START_ROW
+            item_last_row = item_start_row + len(items_data) - 1 if items_data else item_start_row
 
             # 첫 번째 아이템 정보를 메인 레코드에
             if items_data:
@@ -184,28 +229,32 @@ def _extract_data_from_po_file(po_file: Path) -> dict[str, Any]:
             ws_desc = wb["Description"]
 
             # Description 시트는 세로 형식 (A열: 필드명, B열: 값)
-            for row in range(2, ws_desc.max_row + 1):
-                field_name = ws_desc.cell(row=row, column=1).value
-                field_value = ws_desc.cell(row=row, column=2).value
+            for row in range(2, min(ws_desc.max_row + 1, 100)):  # 최대 100행까지
+                field_name = ws_desc[f'A{row}'].value
+                field_value = ws_desc[f'B{row}'].value
 
                 if field_name and field_name != "Line No":
                     record[field_name] = field_value
 
         wb.close()
 
-    except (InvalidFileException, BadZipFile) as e:
+    except BadZipFile as e:
         logger.error(f"발주서 파일 손상: {e}")
+    except InvalidFileException as e:
+        logger.error(f"발주서 파일 형식 오류: {e}")
     except PermissionError as e:
         logger.error(f"발주서 파일 접근 권한 없음: {e}")
     except KeyError as e:
         logger.error(f"발주서 시트/셀 없음: {e}")
     except ValueError as e:
         logger.error(f"발주서 데이터 형식 오류: {e}")
+    except Exception as e:
+        logger.error(f"발주서 파일 읽기 오류: {e}")
 
     return record
 
 
-def check_duplicate_order(order_no: str, check_all_months: bool = True) -> Optional[DuplicateInfo]:
+def check_duplicate_order(order_no: str, check_all_months: bool = True) -> DuplicateInfo | None:
     """중복 발주 체크
 
     Args:

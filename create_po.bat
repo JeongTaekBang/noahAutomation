@@ -2,29 +2,47 @@
 chcp 65001 >nul
 title NOAH PO Generator
 
-set PYTHON_PATH=%LOCALAPPDATA%\miniconda3\envs\po-automate\python.exe
+REM 사용자별 설정 파일 로드 (local_config.bat)
+if exist "%~dp0local_config.bat" (
+    call "%~dp0local_config.bat"
+) else (
+    echo.
+    echo [경고] local_config.bat 파일이 없습니다.
+    echo        local_config.example.bat 을 복사해서 local_config.bat 으로 만드세요.
+    echo        그리고 본인의 Python 경로를 설정하세요.
+    echo.
+    pause
+    exit /b 1
+)
 
 :menu
 cls
 echo ========================================
-echo    NOAH Purchase Order Generator
+echo    NOAH Document Generator
 echo ========================================
 echo.
-echo   [1] 발주서 생성 (PO 생성)
-echo   [2] 발주 이력 조회
-echo   [3] 발주 이력 Excel 내보내기
-echo   [4] 거래명세표 생성
+echo   [국내]
+echo   [1] 발주서 생성 (PO)
+echo   [2] 거래명세표 생성 (DN/선수금)
+echo.
+echo   [해외]
+echo   [3] Proforma Invoice 생성 (PI)
+echo.
+echo   [기타]
+echo   [8] 발주 이력 조회
+echo   [9] 발주 이력 Excel 내보내기
 echo   [0] 종료
 echo.
 echo ========================================
 echo.
 
-set /p CHOICE="선택 (0-4): "
+set /p CHOICE="선택 (0-9): "
 
 if "%CHOICE%"=="1" goto create_po
-if "%CHOICE%"=="2" goto view_history
-if "%CHOICE%"=="3" goto export_history
-if "%CHOICE%"=="4" goto create_ts
+if "%CHOICE%"=="2" goto create_ts
+if "%CHOICE%"=="3" goto create_pi
+if "%CHOICE%"=="8" goto view_history
+if "%CHOICE%"=="9" goto export_history
 if "%CHOICE%"=="0" goto end
 echo [오류] 올바른 번호를 입력하세요.
 pause
@@ -86,15 +104,18 @@ goto menu
 :create_ts
 echo.
 echo ----------------------------------------
-echo   거래명세표 생성
+echo   거래명세표 생성 (국내 전용)
 echo ----------------------------------------
+echo.
+echo   - 납품: DN_ID (예: DN-2026-0001)
+echo   - 선수금: 선수금_ID (예: ADV_2026-0001)
 echo.
 
 :ts_input
-set /p TS_ORDER_NO="RCK Order No. 입력 (예: ND-0005): "
+set /p TS_DOC_ID="ID 입력: "
 
-if "%TS_ORDER_NO%"=="" (
-    echo [오류] Order No.를 입력하세요.
+if "%TS_DOC_ID%"=="" (
+    echo [오류] ID를 입력하세요.
     goto ts_input
 )
 
@@ -102,12 +123,41 @@ echo.
 echo 거래명세표 생성 중...
 echo.
 
-"%PYTHON_PATH%" "%~dp0create_ts.py" %TS_ORDER_NO%
+"%PYTHON_PATH%" "%~dp0create_ts.py" %TS_DOC_ID%
 
 echo.
 echo ----------------------------------------
 set /p TS_CONTINUE="다른 거래명세표를 생성하시겠습니까? (Y/N): "
 if /i "%TS_CONTINUE%"=="Y" goto ts_input
+goto menu
+
+:create_pi
+echo.
+echo ----------------------------------------
+echo   Proforma Invoice 생성 (해외)
+echo ----------------------------------------
+echo.
+echo   SO_ID 입력 (예: SOO-2026-0001)
+echo.
+
+:pi_input
+set /p PI_SO_ID="SO_ID 입력: "
+
+if "%PI_SO_ID%"=="" (
+    echo [오류] SO_ID를 입력하세요.
+    goto pi_input
+)
+
+echo.
+echo Proforma Invoice 생성 중...
+echo.
+
+"%PYTHON_PATH%" "%~dp0create_pi.py" %PI_SO_ID%
+
+echo.
+echo ----------------------------------------
+set /p PI_CONTINUE="다른 Proforma Invoice를 생성하시겠습니까? (Y/N): "
+if /i "%PI_CONTINUE%"=="Y" goto pi_input
 goto menu
 
 :end

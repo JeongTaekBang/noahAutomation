@@ -8,25 +8,29 @@
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
+
+
+# === 사용자 설정 로딩 헬퍼 ===
+def _load_user_setting(name: str, default: Any) -> Any:
+    """user_settings.py에서 설정값 로드 (없으면 기본값 반환)"""
+    try:
+        import user_settings
+        return getattr(user_settings, name, default)
+    except ImportError:
+        return default
 
 
 # === 경로 설정 ===
 BASE_DIR: Final[Path] = Path(__file__).parent.parent
 
 # 사용자 설정에서 값 가져오기 (없으면 기본값 사용)
-try:
-    from user_settings import DATA_FOLDER
-    DATA_DIR: Final[Path] = Path(DATA_FOLDER)
-except ImportError:
-    DATA_DIR: Final[Path] = BASE_DIR.parent
+_data_folder = _load_user_setting('DATA_FOLDER', None)
+DATA_DIR: Final[Path] = Path(_data_folder) if _data_folder else BASE_DIR.parent
 
 # 출력 폴더 기본 경로 (user_settings에서 설정 가능)
-try:
-    from user_settings import OUTPUT_BASE_DIR
-    _OUTPUT_BASE: Path | None = Path(OUTPUT_BASE_DIR) if OUTPUT_BASE_DIR else None
-except ImportError:
-    _OUTPUT_BASE = None
+_output_base_dir = _load_user_setting('OUTPUT_BASE_DIR', None)
+_OUTPUT_BASE: Path | None = Path(_output_base_dir) if _output_base_dir else None
 # 새 데이터베이스 파일 (SO/PO/DN 분리 구조)
 NOAH_SO_PO_DN_FILE: Final[Path] = DATA_DIR / "NOAH_SO_PO_DN.xlsx"
 # 기존 파일 (하위 호환 - deprecated)
@@ -82,23 +86,15 @@ TS_HEADER_ROW: Final[int] = 12  # 헤더 행
 # TS_ITEM_START_ROW 제거됨 - find_item_start_row()로 동적 탐지
 
 # === 비즈니스 규칙 상수 ===
-try:
-    from user_settings import VAT_RATE_DOMESTIC as _VAT_RATE
-    VAT_RATE_DOMESTIC: Final[float] = _VAT_RATE
-except ImportError:
-    VAT_RATE_DOMESTIC: Final[float] = 0.1  # 국내 부가세율 10%
+VAT_RATE_DOMESTIC: Final[float] = _load_user_setting('VAT_RATE_DOMESTIC', 0.1)
 
 # === 안전 장치 상수 ===
-MAX_HEADER_SEARCH_ROWS: Final[int] = 30  # 동적 헤더 탐지 최대 범위
-HISTORY_MAX_SEARCH_ROWS: Final[int] = 100  # 이력 아이템 검색 제한
+# MAX_HEADER_SEARCH_ROWS 제거됨 - 미사용
+# HISTORY_MAX_SEARCH_ROWS는 history.py에서 함수 기본값으로 이동
 
 
 # === 검증 설정 ===
-try:
-    from user_settings import MIN_LEAD_TIME_DAYS as _MIN_LEAD
-    MIN_LEAD_TIME_DAYS: Final[int] = _MIN_LEAD
-except ImportError:
-    MIN_LEAD_TIME_DAYS: Final[int] = 7
+MIN_LEAD_TIME_DAYS: Final[int] = _load_user_setting('MIN_LEAD_TIME_DAYS', 7)
 
 
 # === 메시지 마커 ===
@@ -107,27 +103,14 @@ MSG_WARNING: Final[str] = "[경고]"
 MSG_NOTICE: Final[str] = "[주의]"
 
 
-# === Excel 셀 참조 (이력 추출용 - 헤더 영역 고정 위치) ===
-CELL_TITLE: Final[str] = "A1"
-CELL_DATE: Final[str] = "A5"
-CELL_CUSTOMER_NAME: Final[str] = "A10"
+# === Excel 셀 참조 - history.py로 이동됨 ===
+# CELL_TITLE, CELL_DATE, CELL_CUSTOMER_NAME은 history.py에서만 사용
 
 
 # === 파일명/출력 설정 ===
 ORDER_LIST_DISPLAY_LIMIT: Final[int] = 20  # 주문 목록 출력 제한
-
-try:
-    from user_settings import HISTORY_CUSTOMER_DISPLAY_LENGTH as _HIST_CUST_LEN
-    HISTORY_CUSTOMER_DISPLAY_LENGTH: Final[int] = _HIST_CUST_LEN
-except ImportError:
-    HISTORY_CUSTOMER_DISPLAY_LENGTH: Final[int] = 15  # 이력 조회 시 고객명 표시 길이
-
-try:
-    from user_settings import HISTORY_DESC_DISPLAY_LENGTH as _HIST_DESC_LEN
-    HISTORY_DESC_DISPLAY_LENGTH: Final[int] = _HIST_DESC_LEN
-except ImportError:
-    HISTORY_DESC_DISPLAY_LENGTH: Final[int] = 20  # 이력 조회 시 설명 표시 길이
-
+HISTORY_CUSTOMER_DISPLAY_LENGTH: Final[int] = _load_user_setting('HISTORY_CUSTOMER_DISPLAY_LENGTH', 15)
+HISTORY_DESC_DISPLAY_LENGTH: Final[int] = _load_user_setting('HISTORY_DESC_DISPLAY_LENGTH', 20)
 HISTORY_DATE_DISPLAY_LENGTH: Final[int] = 10  # 이력 조회 시 날짜 표시 길이
 
 
@@ -210,8 +193,9 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'ico_unit': ('ICO Unit', 'ICO unit', 'ico unit', 'Unit Price', '단가'),
     'total_ico': ('Total ICO', 'Total ico', 'total_ico', '총ICO'),
     'sales_unit_price': ('Sales Unit Price', 'Sales unit price', 'sales unit price', '판매단가'),
-    'model': ('Model', 'MODEL', 'model', '모델'),
+    'model': ('Model', 'MODEL', 'model', '모델', 'Model number'),
     'delivery_date': ('예상 EXW date', '예상 납품 날짜', 'Requested delivery date', 'Delivery Date', 'delivery date', '납기일', '요청납기일'),
+    'delivery_address': ('납품 주소', '납품주소', 'Delivery Address', 'delivery address', '배송주소', '배송 주소'),
     'item_name': ('Item name', 'Item Name', 'item name', 'Item', '품목명'),
     'remark': ('Note', 'Remark', 'REMARK', 'remark', '비고'),
     'incoterms': ('Incoterms', 'INCOTERMS', 'incoterms', '인코텀즈'),
@@ -234,6 +218,15 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'paid_amount': ('입금액', 'Paid Amount', '입금금액'),
     'paid_date': ('입금일', 'Paid Date'),
     'tax_invoice_date': ('세금계산서 발행일', '발행일'),
+    # PI/TS (해외) 필드
+    'customer_address': ('Customer address', 'Customer Address', 'customer address', '고객주소'),
+    'customer_country': ('Customer country', 'Customer Country', 'customer country', '고객국가'),
+    'customer_tel': ('Customer TEL', 'Customer Tel', 'customer tel', '고객전화'),
+    'customer_fax': ('Customer FAX', 'Customer Fax', 'customer fax', '고객팩스'),
+    'currency': ('Currency', 'CURRENCY', 'currency', '통화'),
+    'po_receipt_date': ('PO receipt date', 'PO Receipt Date', 'po receipt date', 'PO수령일'),
+    'lc_no': ('L/C No', 'LC No', 'lc no', 'LC번호'),
+    'lc_date': ('L/C date', 'LC date', 'lc date', 'LC발행일'),
 }
 
 
@@ -251,18 +244,18 @@ class SupplierInfo:
 
 
 # user_settings에서 공급자 정보 가져오기
-try:
-    from user_settings import SUPPLIER_INFO as _USER_SUPPLIER
+_user_supplier = _load_user_setting('SUPPLIER_INFO', None)
+if _user_supplier:
     SUPPLIER_INFO: Final[SupplierInfo] = SupplierInfo(
-        name=_USER_SUPPLIER.get('name', '로토크 콘트롤즈 코리아㈜'),
-        rep_name=_USER_SUPPLIER.get('rep_name', '이민수'),
-        business_no=_USER_SUPPLIER.get('business_no', '220-81-21175'),
-        address=_USER_SUPPLIER.get('address', '경기도 성남시 분당구 장미로 42'),
-        address2=_USER_SUPPLIER.get('address2', '야탑리더스빌딩 515'),
-        business_type=_USER_SUPPLIER.get('business_type', '도매업, 제조, 도매'),
-        business_item=_USER_SUPPLIER.get('business_item', '기타운수및기계장비, 밸브류, 무역'),
+        name=_user_supplier.get('name', '로토크 콘트롤즈 코리아㈜'),
+        rep_name=_user_supplier.get('rep_name', '이민수'),
+        business_no=_user_supplier.get('business_no', '220-81-21175'),
+        address=_user_supplier.get('address', '경기도 성남시 분당구 장미로 42'),
+        address2=_user_supplier.get('address2', '야탑리더스빌딩 515'),
+        business_type=_user_supplier.get('business_type', '도매업, 제조, 도매'),
+        business_item=_user_supplier.get('business_item', '기타운수및기계장비, 밸브류, 무역'),
     )
-except ImportError:
+else:
     SUPPLIER_INFO: Final[SupplierInfo] = SupplierInfo()
 
 

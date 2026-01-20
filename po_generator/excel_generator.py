@@ -1,133 +1,147 @@
 """
-Excel 생성 모듈 (템플릿 기반)
-=============================
+Excel 생성 모듈 (xlwings 기반)
+===============================
 
-템플릿 파일을 로드하여 Purchase Order 및 Description 시트를 생성합니다.
-사용자는 템플릿 파일에 직접 로고/도장 이미지를 추가할 수 있습니다.
+xlwings를 사용하여 템플릿 기반으로 Purchase Order 및 Description 시트를 생성합니다.
+이미지, 서식 등이 완벽하게 보존됩니다.
 """
 
 from __future__ import annotations
 
 import logging
+import shutil
+import tempfile
 from datetime import datetime
-from typing import Optional
+from pathlib import Path
 
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.worksheet.worksheet import Worksheet
-from openpyxl.styles import Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
+import xlwings as xw
 
 from po_generator.config import (
-    COLORS,
-    COLUMN_WIDTHS,
     TOTAL_COLUMNS,
-    ITEM_START_ROW,
+    ITEM_START_ROW_FALLBACK,
+    VAT_RATE_DOMESTIC,
     SPEC_FIELDS,
     OPTION_FIELDS,
     PO_TEMPLATE_FILE,
 )
-from po_generator.utils import get_safe_value, get_value, escape_excel_formula
-from po_generator.template_engine import (
-    load_template,
-    generate_po_template,
-    clone_row,
-    insert_rows_with_template,
-    update_sum_formula,
-    shift_formula_references,
-    copy_cell_style,
+from po_generator.utils import (
+    get_value,
+    escape_excel_formula,
 )
 
 logger = logging.getLogger(__name__)
 
 
-# === 스타일 정의 (템플릿 수정 시 사용) ===
-THIN_BORDER = Border(
-    left=Side(style='thin'),
-    right=Side(style='thin'),
-    top=Side(style='thin'),
-    bottom=Side(style='thin'),
-)
+# === 템플릿 셀 매핑 ===
+CELL_TITLE = 'A1'
+CELL_DATE = 'A5'
+CELL_DELIVERY_ADDR = 'C5'
+CELL_CUSTOMER_PO = 'C7'
+CELL_CUSTOMER_NAME = 'A10'
+
+
+def _find_item_start_row_xlwings(
+    ws: xw.Sheet,
+    search_labels: tuple[str, ...] = ('No.', 'Item Number', 'Item\nNumber', '품명', 'Item'),
+    max_search_rows: int = 30,
+    fallback_row: int = ITEM_START_ROW_FALLBACK,
+) -> int:
+    """템플릿에서 아이템 시작 행을 동적으로 찾기 (xlwings 버전)
+
+    Args:
+        ws: xlwings Sheet 객체
+        search_labels: 검색할 헤더 레이블
+        max_search_rows: 최대 검색 행 수
+        fallback_row: 헤더를 찾지 못했을 때 기본값
+
+    Returns:
+        아이템 시작 행 번호
+    """
+    for row in range(1, max_search_rows + 1):
+        for col in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I']:
+            cell_value = ws.range(f'{col}{row}').value
+            if cell_value and any(
+                label in str(cell_value) for label in search_labels
+            ):
+                logger.debug(f"헤더 발견: Row {row}, 값='{cell_value}' -> 아이템 시작 Row {row + 1}")
+                return row + 1
+
+    logger.debug(f"헤더를 찾지 못함 -> 기본값 Row {fallback_row} 사용")
+    return fallback_row
 
 
 def _ensure_template_exists() -> None:
-    """템플릿 파일이 없으면 생성"""
+    """템플릿 파일이 없으면 오류 발생"""
     if not PO_TEMPLATE_FILE.exists():
-        logger.info("템플릿 파일이 없습니다. 새로 생성합니다...")
-        generate_po_template()
+        raise FileNotFoundError(
+            f"템플릿 파일이 없습니다: {PO_TEMPLATE_FILE}\n"
+            "templates/purchase_order.xlsx 파일을 생성해 주세요."
+        )
 
 
 def _fill_header_data(
-    ws: Worksheet,
+    ws: xw.Sheet,
     order_data: pd.Series,
     rck_order_no: str,
     today_str: str,
 ) -> None:
-    """헤더 섹션에 데이터 채움 (Row 1-11)
+    """헤더 섹션에 데이터 채움
 
     Args:
-        ws: 워크시트
+        ws: xlwings Sheet 객체
         order_data: 주문 데이터
         rck_order_no: RCK Order No.
         today_str: 오늘 날짜 문자열
     """
     customer_name = get_value(order_data, 'customer_name')
     customer_po = get_value(order_data, 'customer_po')
-
-    # 배송 주소 찾기
-    delivery_addr = ''
-    for col in order_data.index:
-        if '납품' in str(col) or '주소' in str(col):
-            val = order_data.get(col, '')
-            if pd.notna(val) and str(val) != 'nan':
-                delivery_addr = str(val)
-                break
+    delivery_addr = get_value(order_data, 'delivery_address')
 
     # 데이터 채움 (수식 인젝션 방지 적용)
-    ws['A1'] = f"Purchase Order - {escape_excel_formula(rck_order_no)}"
-    ws['A5'] = f"Date:  {today_str}"
-    ws['C5'] = escape_excel_formula(delivery_addr)
-    ws['C7'] = escape_excel_formula(customer_po)
-    ws['A10'] = escape_excel_formula(customer_name)
+    ws.range(CELL_TITLE).value = f"Purchase Order - {escape_excel_formula(rck_order_no)}"
+    ws.range(CELL_DATE).value = f"Date:  {today_str}"
+    ws.range(CELL_DELIVERY_ADDR).value = escape_excel_formula(delivery_addr)
+    ws.range(CELL_CUSTOMER_PO).value = escape_excel_formula(customer_po)
+    ws.range(CELL_CUSTOMER_NAME).value = escape_excel_formula(customer_name)
 
 
 def _fill_item_data(
-    ws: Worksheet,
+    ws: xw.Sheet,
     row_num: int,
     item_idx: int,
     item_data: pd.Series,
     currency: str = 'KRW',
+    is_export: bool = False,
 ) -> None:
     """아이템 행에 데이터 채움
 
     Args:
-        ws: 워크시트
+        ws: xlwings Sheet 객체
         row_num: 행 번호
         item_idx: 아이템 인덱스 (0부터 시작)
         item_data: 아이템 데이터
         currency: 통화 코드 (KRW 또는 USD)
+        is_export: 해외 여부
     """
     number_format = '₩#,##0' if currency == 'KRW' else '$#,##0.00'
 
     # 데이터 추출
-    model = get_value(item_data, 'model')
-    power = get_value(item_data, 'power_supply')
     item_name = get_value(item_data, 'item_name')
 
-    # Description 조합
-    desc_parts = []
-    if item_name:
-        desc_parts.append(item_name)
-    elif model:
-        desc_parts.append(model)
-
-    if power and isinstance(power, str):
-        desc_parts.append(power.replace('-1Ph-', ', ').replace('-3Ph-', ', '))
-
-    if str(get_value(item_data, 'als')).upper() == 'Y':
-        desc_parts.append('ALS')
-
-    description = ', '.join([p for p in desc_parts if p])
+    # Description: 해외는 Model number + Item name, 국내는 Item name만
+    if is_export:
+        model_number = get_value(item_data, 'model')
+        if model_number and item_name:
+            description = f"{model_number} {item_name}"
+        elif item_name:
+            description = item_name
+        elif model_number:
+            description = model_number
+        else:
+            description = ''
+    else:
+        description = item_name if item_name else ''
 
     # 수량
     try:
@@ -154,19 +168,19 @@ def _fill_item_data(
             requested_date_str = ''
 
     # 데이터 입력 (수식 인젝션 방지 적용)
-    ws[f'A{row_num}'] = item_idx + 1
-    ws[f'B{row_num}'] = escape_excel_formula(description)
-    ws[f'F{row_num}'] = qty
-    ws[f'G{row_num}'] = "EA"
-    ws[f'H{row_num}'] = ico_unit
-    ws[f'H{row_num}'].number_format = number_format
-    ws[f'I{row_num}'] = requested_date_str
-    ws[f'J{row_num}'] = f"=H{row_num}*F{row_num}"
-    ws[f'J{row_num}'].number_format = number_format
+    ws.range(f'A{row_num}').value = item_idx + 1
+    ws.range(f'B{row_num}').value = escape_excel_formula(description)
+    ws.range(f'F{row_num}').value = qty
+    ws.range(f'G{row_num}').value = "EA"
+    ws.range(f'H{row_num}').value = ico_unit
+    ws.range(f'H{row_num}').number_format = number_format
+    ws.range(f'I{row_num}').value = requested_date_str
+    ws.range(f'J{row_num}').formula = f"=H{row_num}*F{row_num}"
+    ws.range(f'J{row_num}').number_format = number_format
 
 
 def _fill_footer_data(
-    ws: Worksheet,
+    ws: xw.Sheet,
     order_data: pd.Series,
     footer_start_row: int,
     is_export: bool = False,
@@ -174,7 +188,7 @@ def _fill_footer_data(
     """푸터 섹션에 데이터 채움
 
     Args:
-        ws: 워크시트
+        ws: xlwings Sheet 객체
         order_data: 주문 데이터
         footer_start_row: 푸터 시작 행 (합계 섹션 다음)
         is_export: 해외 여부
@@ -192,44 +206,53 @@ def _fill_footer_data(
     industry_code = get_value(order_data, 'industry_code')
 
     r = footer_start_row
-    ws[f'D{r}'] = escape_excel_formula(opportunity)
+    ws.range(f'D{r}').value = escape_excel_formula(opportunity)
     r += 1
-    ws[f'D{r}'] = escape_excel_formula(sector)
+    ws.range(f'D{r}').value = escape_excel_formula(sector)
     r += 1
-    ws[f'D{r}'] = escape_excel_formula(industry_code)
+    ws.range(f'D{r}').value = escape_excel_formula(industry_code)
     r += 1
-    ws[f'C{r}'] = f"Note. {escape_excel_formula(remark)}" if remark else "Note."
+    ws.range(f'C{r}').value = f"Note. {escape_excel_formula(remark)}" if remark else "Note."
     r += 1
-    ws[f'B{r}'] = currency
+    ws.range(f'B{r}').value = currency
     r += 1
-    ws[f'B{r}'] = incoterms
+    ws.range(f'B{r}').value = incoterms
 
     # 마지막 행 (청록색 푸터)은 r + 3
     return r + 3
 
 
-def _update_print_area(ws: Worksheet, last_row: int) -> None:
-    """인쇄 영역 업데이트"""
-    ws.print_area = f'A1:J{last_row}'
-    ws.row_dimensions[last_row].height = 25
-
-
-def create_purchase_order(
-    ws: Worksheet,
-    order_data: pd.Series,
-    items_df: Optional[pd.DataFrame] = None,
-) -> None:
-    """Purchase Order 시트 생성 (템플릿 기반)
-
-    템플릿 파일을 로드하여 데이터를 채웁니다.
-    템플릿이 없으면 자동 생성합니다.
+def _find_totals_row(ws: xw.Sheet, start_row: int, max_search: int = 20) -> int:
+    """'Total net amount' 텍스트가 있는 행 찾기
 
     Args:
-        ws: 워크시트 (템플릿에서 복사된 시트)
+        ws: xlwings Sheet 객체
+        start_row: 검색 시작 행
+        max_search: 최대 검색 행 수
+
+    Returns:
+        Total net amount 행 번호 (못 찾으면 start_row)
+    """
+    for row in range(start_row, start_row + max_search):
+        cell_value = ws.range(f'I{row}').value
+        if cell_value and 'Total net' in str(cell_value):
+            return row
+    return start_row
+
+
+def _create_purchase_order(
+    ws: xw.Sheet,
+    order_data: pd.Series,
+    items_df: pd.DataFrame | None = None,
+) -> None:
+    """Purchase Order 시트 생성 (xlwings 기반)
+
+    Args:
+        ws: xlwings Sheet 객체 (템플릿에서 복사된 시트)
         order_data: 첫 번째 아이템 데이터 (공통 정보 추출용)
         items_df: 다중 아이템인 경우 DataFrame, 단일이면 None
     """
-    logger.info("Purchase Order 시트 생성 중 (템플릿 기반)...")
+    logger.info("Purchase Order 시트 생성 중 (xlwings)...")
 
     # 아이템 목록 준비
     if items_df is not None:
@@ -248,72 +271,82 @@ def create_purchase_order(
     sheet_type = get_value(order_data, 'sheet_type', '')
     is_export = sheet_type == '해외'
 
-    # 1. 헤더 데이터 채움 (Row 1-11)
+    # 1. 헤더 데이터 채움
     _fill_header_data(ws, order_data, rck_order_no, today_str)
 
-    # 2. 아이템 행 처리
-    template_row = ITEM_START_ROW  # Row 13
-    rows_to_insert = num_items - 1
+    # 2. 아이템 시작 행 동적 탐지
+    template_row = _find_item_start_row_xlwings(ws, fallback_row=ITEM_START_ROW_FALLBACK)
 
-    if rows_to_insert > 0:
-        # 추가 행 삽입 (Row 14부터)
-        ws.insert_rows(template_row + 1, rows_to_insert)
+    # 3. 템플릿 아이템 행 수 계산 (Total net amount 행 찾기)
+    totals_row = _find_totals_row(ws, template_row)
+    template_item_count = totals_row - template_row
+    logger.debug(f"템플릿 아이템 수: {template_item_count}, 실제 아이템 수: {num_items}")
 
-        # 삽입된 행에 템플릿 스타일 복제
+    # 4. 행 수 조정
+    if num_items < template_item_count:
+        # 초과 행 삭제
+        rows_to_delete = template_item_count - num_items
+        for _ in range(rows_to_delete):
+            delete_row = template_row + num_items
+            ws.range(f'{delete_row}:{delete_row}').api.Delete(Shift=-4162)  # xlUp
+        logger.debug(f"{rows_to_delete}개 초과 행 삭제")
+    elif num_items > template_item_count:
+        # 행 삽입
+        rows_to_insert = num_items - template_item_count
         for i in range(rows_to_insert):
-            target_row = template_row + 1 + i
-            clone_row(ws, template_row, target_row, TOTAL_COLUMNS)
+            ws.range(f'{template_row}:{template_row}').api.Copy()
+            insert_row = template_row + template_item_count + i
+            ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=-4121)  # xlDown
+        logger.debug(f"{rows_to_insert}개 행 삽입")
 
-    # 아이템 데이터 채움
+    # 5. 아이템 데이터 채움
     for item_idx, item_data in enumerate(items_list):
         row_num = template_row + item_idx
-        _fill_item_data(ws, row_num, item_idx, item_data, currency)
+        _fill_item_data(ws, row_num, item_idx, item_data, currency, is_export)
 
     item_last_row = template_row + num_items - 1
 
-    # 3. 합계 섹션 업데이트 (동적 위치)
-    # 템플릿에서 합계 섹션은 Row 14-16이었음
-    # 아이템 삽입 후 위치가 변경됨
+    # 6. 합계 섹션 업데이트 (동적 위치)
     totals_start_row = item_last_row + 1
     row_total_net = totals_start_row
     row_vat = totals_start_row + 1
     row_order_total = totals_start_row + 2
 
     # SUM 공식 범위 업데이트
-    ws[f'J{row_total_net}'] = f"=SUM(J{ITEM_START_ROW}:J{item_last_row})"
+    ws.range(f'J{row_total_net}').formula = f"=SUM(J{template_row}:J{item_last_row})"
 
     # VAT 처리 (해외는 0)
     if is_export:
-        ws[f'J{row_vat}'] = 0
+        ws.range(f'J{row_vat}').value = 0
     else:
-        ws[f'J{row_vat}'] = f"=J{row_total_net}*0.1"
+        ws.range(f'J{row_vat}').formula = f"=J{row_total_net}*{VAT_RATE_DOMESTIC}"
 
     # Order Total 공식 업데이트
-    ws[f'J{row_order_total}'] = f"=SUM(J{row_total_net}:J{row_vat})"
+    ws.range(f'J{row_order_total}').formula = f"=SUM(J{row_total_net}:J{row_vat})"
 
-    # 4. 푸터 데이터 채움
+    # 7. 푸터 데이터 채움
     footer_start_row = row_order_total + 1
     last_row = _fill_footer_data(ws, order_data, footer_start_row, is_export)
 
-    # 5. 인쇄 영역 업데이트
-    _update_print_area(ws, last_row)
+    # 8. 인쇄 영역 업데이트
+    ws.api.PageSetup.PrintArea = f'$A$1:$J${last_row}'
 
     logger.info(f"Purchase Order 시트 생성 완료 (아이템 {num_items}개)")
 
 
-def create_description_sheet(
-    ws: Worksheet,
+def _create_description_sheet(
+    ws: xw.Sheet,
     order_data: pd.Series,
-    items_df: Optional[pd.DataFrame] = None,
+    items_df: pd.DataFrame | None = None,
 ) -> None:
-    """Description 시트 생성 (템플릿 기반)
+    """Description 시트 생성 (xlwings 기반)
 
     Args:
-        ws: 워크시트 (템플릿에서 복사된 시트)
+        ws: xlwings Sheet 객체 (템플릿에서 복사된 시트)
         order_data: 첫 번째 아이템 데이터
         items_df: 다중 아이템인 경우 DataFrame, 단일이면 None
     """
-    logger.info("Description 시트 생성 중 (템플릿 기반)...")
+    logger.info("Description 시트 생성 중 (xlwings)...")
 
     # 아이템 목록 준비
     if items_df is not None:
@@ -323,84 +356,149 @@ def create_description_sheet(
 
     num_items = len(items_list)
 
+    # 첫 번째 아이템 데이터 (B열)
+    try:
+        qty_first = int(float(get_value(items_list[0], 'item_qty', 1)))
+    except (ValueError, TypeError):
+        qty_first = 1
+    ws.range('B2').value = qty_first
+
     # 추가 아이템 열 생성 (B열은 이미 템플릿에 있음)
     if num_items > 1:
-        # C열부터 추가
         for idx in range(1, num_items):
-            col_num = 2 + idx  # C, D, E...
-            col_letter = get_column_letter(col_num)
+            col_letter = chr(ord('C') + idx - 1)  # C, D, E...
 
             # Row 1: Line No
-            ws.cell(row=1, column=col_num, value=idx + 1)
-            ws.cell(row=1, column=col_num).border = THIN_BORDER
-            ws.cell(row=1, column=col_num).alignment = Alignment(horizontal='center')
+            ws.range(f'{col_letter}1').value = idx + 1
 
             # Row 2: Qty
             try:
                 qty = int(float(get_value(items_list[idx], 'item_qty', 1)))
             except (ValueError, TypeError):
                 qty = 1
-            ws.cell(row=2, column=col_num, value=qty)
-            ws.cell(row=2, column=col_num).border = THIN_BORDER
-            ws.cell(row=2, column=col_num).alignment = Alignment(horizontal='center')
-
-            # 열 너비
-            ws.column_dimensions[col_letter].width = 15
-
-    # 첫 번째 아이템 데이터 (B열)
-    try:
-        qty_first = int(float(get_value(items_list[0], 'item_qty', 1)))
-    except (ValueError, TypeError):
-        qty_first = 1
-    ws['B2'] = qty_first
+            ws.range(f'{col_letter}2').value = qty
 
     # SPEC_FIELDS 데이터 채움 (수식 인젝션 방지 적용)
     row_idx = 3
     for field in SPEC_FIELDS:
         for idx, item_data in enumerate(items_list):
-            col_num = 2 + idx
-            value = get_safe_value(item_data, field)
+            col_letter = chr(ord('B') + idx)
+            value = get_value(item_data, field, default='')
             escaped_value = escape_excel_formula(value) if value else None
-            ws.cell(row=row_idx, column=col_num, value=escaped_value)
-            ws.cell(row=row_idx, column=col_num).border = THIN_BORDER
+            ws.range(f'{col_letter}{row_idx}').value = escaped_value
         row_idx += 1
 
     # OPTION_FIELDS 데이터 채움 (수식 인젝션 방지 적용)
     for field in OPTION_FIELDS:
         for idx, item_data in enumerate(items_list):
-            col_num = 2 + idx
-            value = get_safe_value(item_data, field)
+            col_letter = chr(ord('B') + idx)
+            value = get_value(item_data, field, default='')
             escaped_value = escape_excel_formula(value) if value else None
-            ws.cell(row=row_idx, column=col_num, value=escaped_value)
-            ws.cell(row=row_idx, column=col_num).border = THIN_BORDER
+            ws.range(f'{col_letter}{row_idx}').value = escaped_value
         row_idx += 1
 
     logger.info("Description 시트 생성 완료")
 
 
-def create_po_workbook(
+def _create_po_workbook_impl(
     order_data: pd.Series,
-    items_df: Optional[pd.DataFrame] = None,
-) -> Workbook:
-    """템플릿 기반으로 PO Workbook 생성
+    items_df: pd.DataFrame | None = None,
+) -> Path:
+    """xlwings 기반으로 PO Workbook 생성 (내부 구현)
 
     Args:
         order_data: 주문 데이터
         items_df: 다중 아이템 DataFrame (선택)
 
     Returns:
-        생성된 Workbook
+        생성된 임시 파일 경로
     """
-    # 템플릿 확인 및 로드
+    # 템플릿 확인
     _ensure_template_exists()
-    wb = load_template()
 
-    # Purchase Order 시트
-    ws_po = wb['Purchase Order']
-    create_purchase_order(ws_po, order_data, items_df)
+    # 날짜
+    today = datetime.now()
 
-    # Description 시트
-    ws_desc = wb['Description']
-    create_description_sheet(ws_desc, order_data, items_df)
+    # 경로에 한글이 포함된 경우 임시 폴더에서 작업
+    temp_dir = Path(tempfile.gettempdir())
+    temp_template = temp_dir / f"po_template_{today.strftime('%Y%m%d%H%M%S')}.xlsx"
+    temp_output = temp_dir / f"po_output_{today.strftime('%Y%m%d%H%M%S')}.xlsx"
 
-    return wb
+    # 템플릿을 임시 폴더로 복사
+    shutil.copy(PO_TEMPLATE_FILE, temp_template)
+
+    # Excel 앱 시작 (백그라운드)
+    app = xw.App(visible=False)
+    app.display_alerts = False
+    app.screen_updating = False
+
+    try:
+        # 임시 템플릿 열기
+        wb = app.books.open(str(temp_template))
+
+        # Purchase Order 시트
+        ws_po = wb.sheets['Purchase Order']
+        _create_purchase_order(ws_po, order_data, items_df)
+
+        # Description 시트
+        ws_desc = wb.sheets['Description']
+        _create_description_sheet(ws_desc, order_data, items_df)
+
+        # Purchase Order 시트를 먼저 보이도록 활성화
+        ws_po.activate()
+
+        # 임시 위치에 저장
+        wb.save(str(temp_output))
+        logger.info(f"PO 생성 완료 (임시): {temp_output}")
+
+    finally:
+        # 정리
+        try:
+            wb.close()
+        except NameError:
+            pass
+        app.quit()
+
+        # 임시 템플릿 삭제
+        try:
+            temp_template.unlink()
+        except Exception:
+            pass
+
+    return temp_output
+
+
+class POWorkbook:
+    """PO Workbook 래퍼 클래스 (기존 API 호환용)
+
+    create_po.py에서 wb.save(output_file) 패턴을 유지하기 위한 래퍼입니다.
+    """
+
+    def __init__(self, temp_file: Path):
+        self.temp_file = temp_file
+
+    def save(self, output_file: Path) -> None:
+        """임시 파일을 최종 출력 경로로 이동"""
+        shutil.move(str(self.temp_file), str(output_file))
+        logger.info(f"PO 저장 완료: {output_file}")
+
+
+def create_po_workbook(
+    order_data: pd.Series,
+    items_df: pd.DataFrame | None = None,
+) -> POWorkbook:
+    """PO Workbook 생성 (공개 API)
+
+    xlwings로 생성 후 POWorkbook 래퍼를 반환합니다.
+    사용법: wb = create_po_workbook(order_data)
+           wb.save(output_file)
+
+    Args:
+        order_data: 주문 데이터
+        items_df: 다중 아이템 DataFrame (선택)
+
+    Returns:
+        POWorkbook 래퍼 (save 메서드 제공)
+    """
+    temp_file = _create_po_workbook_impl(order_data, items_df)
+    return POWorkbook(temp_file)
