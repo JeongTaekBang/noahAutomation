@@ -254,15 +254,9 @@ def load_noah_po_lists() -> pd.DataFrame:
             xl, SO_EXPORT_SHEET, PO_EXPORT_SHEET, '해외'
         )
 
-        # 컬럼 통일 (없는 컬럼은 NaN으로)
-        all_columns = list(set(df_domestic.columns) | set(df_export.columns))
-        for col in all_columns:
-            if col not in df_domestic.columns:
-                df_domestic[col] = pd.NA
-            if col not in df_export.columns:
-                df_export[col] = pd.NA
-
-        df = pd.concat([df_domestic, df_export], ignore_index=True)
+        # concat: pandas가 자동으로 없는 컬럼에 NaN 채움
+        dfs = [df for df in [df_domestic, df_export] if len(df) > 0]
+        df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
         logger.info(f"총 {len(df)}건의 주문 데이터 로드 완료")
         return df
@@ -278,14 +272,9 @@ def load_noah_po_lists() -> pd.DataFrame:
         df_domestic['_시트구분'] = '국내'
         df_export['_시트구분'] = '해외'
 
-        all_columns = list(set(df_domestic.columns) | set(df_export.columns))
-        for col in all_columns:
-            if col not in df_domestic.columns:
-                df_domestic[col] = pd.NA
-            if col not in df_export.columns:
-                df_export[col] = pd.NA
-
-        df = pd.concat([df_domestic, df_export], ignore_index=True)
+        # concat: pandas가 자동으로 없는 컬럼에 NaN 채움
+        dfs = [df for df in [df_domestic, df_export] if len(df) > 0]
+        df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
         logger.info(f"총 {len(df)}건의 주문 데이터 로드 완료")
         return df
