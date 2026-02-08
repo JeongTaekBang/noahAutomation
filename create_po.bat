@@ -107,7 +107,23 @@ echo ----------------------------------------
 echo   거래명세표 생성 (국내 전용)
 echo ----------------------------------------
 echo.
-echo   - 납품: DN_ID (예: DN-2026-0001)
+echo   [1] 단건 거래명세표 (DN 1건)
+echo   [2] 월합 거래명세표 (여러 DN을 한 장으로)
+echo   [0] 메뉴로 돌아가기
+echo.
+
+set /p TS_MODE="선택: "
+
+if "%TS_MODE%"=="1" goto ts_single
+if "%TS_MODE%"=="2" goto ts_merge
+if "%TS_MODE%"=="0" goto menu
+echo [오류] 올바른 번호를 입력하세요.
+pause
+goto create_ts
+
+:ts_single
+echo.
+echo   - 납품: DN_ID (예: DND-2026-0001)
 echo   - 선수금: 선수금_ID (예: ADV_2026-0001)
 echo.
 
@@ -129,6 +145,22 @@ echo.
 echo ----------------------------------------
 set /p TS_CONTINUE="다른 거래명세표를 생성하시겠습니까? (Y/N): "
 if /i "%TS_CONTINUE%"=="Y" goto ts_input
+goto menu
+
+:ts_merge
+echo.
+echo ----------------------------------------
+echo   월합 거래명세표 (여러 DN을 한 장으로)
+echo ----------------------------------------
+echo.
+echo   DN_ID 목록을 세로로 붙여넣기 하세요.
+echo   (빈 줄 입력하면 생성 시작)
+echo.
+
+"%PYTHON_PATH%" "%~dp0create_ts.py" --interactive --merge
+
+echo.
+pause
 goto menu
 
 :create_pi

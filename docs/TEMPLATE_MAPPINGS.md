@@ -34,14 +34,15 @@
 | E18~ | Quantity | 수량 |
 | G18~ | Unit Price | 단가 |
 
-**동적 행 처리 필요**: 아이템 개수에 따라 행 복제 (template_engine.py의 `clone_row` 패턴 참고)
+**동적 행 처리 필요**: 아이템 개수에 따라 행 복제 (`pi_generator.py`의 xlwings 패턴 참고)
 
 ---
 
-## 구현 예정 템플릿
+## 구현 상태
 
 ### Proforma Invoice
-- [ ] 셀 매핑 정보 추가 예정
+- [x] 구현 완료 (`pi_generator.py`)
+- 셀 매핑: `templates/proforma_invoice.xlsx` 템플릿 참조
 
 ### Packing List
 - [ ] 셀 매핑 정보 추가 예정
@@ -50,6 +51,7 @@
 
 ## 구현 시 참고사항
 
-1. **라이브러리 선택**: 이미지/서식 보존이 필요하면 xlwings, 그렇지 않으면 openpyxl
-2. **동적 행 처리**: `template_engine.py`의 `clone_row()` 함수 패턴 활용
-3. **데이터 소스**: SO_해외, DN_해외 시트에서 SO_ID로 조회
+1. **라이브러리**: xlwings 사용 (모든 문서 생성에 통일됨)
+2. **동적 행 처리**: `pi_generator.py`의 행 복제 패턴 참고 (xlwings Range.insert/delete)
+3. **데이터 조회**: `get_value(data, 'internal_key')` 표준 API 사용 (COLUMN_ALIASES 매핑)
+4. **데이터 소스**: SO_해외, DN_해외 시트에서 SO_ID로 조회

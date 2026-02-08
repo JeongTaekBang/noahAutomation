@@ -56,6 +56,18 @@ tmpclaude-*
 user_settings.py
 local_config.bat
 
+# Business data files (운영 데이터 - 제외)
+DN_*.xlsx
+SO_*.xlsx
+dn_analysis.txt
+nul
+
+# Local/temp templates
+templates/ts_template_local.xlsx
+
+# Company images (도장 등)
+templates/sign_*.png
+
 # OS
 .DS_Store
 Thumbs.db

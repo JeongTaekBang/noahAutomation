@@ -124,7 +124,26 @@ REQUIRED_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
-# === 액추에이터 사양 필드 (Description 시트) ===
+# === 메타 컬럼 (Description 시트에서 제외) ===
+# PO 시트에서 사양/옵션이 아닌 메타 정보 컬럼들
+META_COLUMNS: Final[frozenset[str]] = frozenset({
+    'PO_ID', 'SO_ID', 'NOAH O.C No.', 'Customer name', 'Customer PO',
+    'Item name', 'Item qty', 'ICO Unit', 'Total ICO',
+    '예상 납품 날짜', '예상 EXW date', 'Status',
+    # 내부 컬럼
+    '_시트구분', '_문서유형',
+})
+
+# === 사양 필드 시작 마커 ===
+# 이 컬럼부터 사양 필드 시작 (동적 추출 시 사용)
+SPEC_START_COLUMN: Final[str] = 'Power supply'
+
+# === 옵션 필드 시작 마커 ===
+# 이 컬럼부터 옵션 필드 시작 (Status 다음 컬럼)
+OPTION_START_COLUMN: Final[str] = 'Model'
+
+# === 액추에이터 사양 필드 (Description 시트) - Fallback용 ===
+# 동적 추출 실패 시 사용되는 기본값
 SPEC_FIELDS: Final[tuple[str, ...]] = (
     'Power supply', 'Motor(kW)', 'BASE', 'ACT Flange', 'Operating time',
     'Handwheel', 'RPM', 'Turns', 'Bushing', 'MOV', 'Gearbox model',
@@ -134,11 +153,13 @@ SPEC_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
-# === 옵션 필드 (Y 체크 시 가격 반영) ===
+# === 옵션 필드 (Y 체크 시 가격 반영) - Fallback용 ===
+# 동적 추출 실패 시 사용되는 기본값
 OPTION_FIELDS: Final[tuple[str, ...]] = (
     'Model', 'Bush', 'ALS', 'EXT', 'DC24V', 'Modbus, Profibus', 'LCU', 'PIU',
     'CPT+PIU', 'PCU+PIU', '-40', '-60', 'SCP', 'EXP', 'Bush-SQ', 'Bush-STAR',
     'INTEGRAL', 'IMS', 'BLDC', 'HART, Foundation Fieldbus', 'ATS',
+    'MOV사양', 'VALVE 사양',
 )
 
 
@@ -209,6 +230,7 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'als': ('ALS', 'als'),
     # DN (납품) 필드
     'dn_id': ('DN_ID', 'DN ID', 'dn_id', '납품번호'),
+    'dispatch_date': ('출고일', 'Dispatch Date', 'dispatch_date', '출하일'),
     'unit_price': ('Unit Price', 'unit price', '단가'),
     'total_sales': ('Total Sales', 'total sales', '판매금액'),
     'tax_invoice_no': ('세금계산서', '세금계산서번호', 'Tax Invoice No'),

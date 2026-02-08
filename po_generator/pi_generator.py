@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -21,8 +20,39 @@ import xlwings as xw
 
 from po_generator.config import PI_TEMPLATE_FILE
 from po_generator.utils import get_value
+from po_generator.excel_helpers import (
+    XlConstants,
+    xlwings_app_context,
+    prepare_template,
+    cleanup_temp_file,
+    delete_rows_range,
+    find_text_in_column_batch,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _to_text(value) -> str:
+    """숫자를 문자열로 변환 (앞 0 보존, 뒤 .0 제거)
+
+    Excel에서 숫자로 읽힌 값을 원래 텍스트 형태로 복원합니다.
+    예: 12345.0 -> '12345', '0123' -> '0123'
+    """
+    if pd.isna(value) or value == '':
+        return ''
+
+    # 이미 문자열이면 그대로 반환
+    if isinstance(value, str):
+        return value
+
+    # float인 경우 .0 제거
+    if isinstance(value, float):
+        # 정수로 변환 가능하면 정수로
+        if value == int(value):
+            return str(int(value))
+        return str(value)
+
+    return str(value)
 
 
 # === 셀 매핑 (Commercial Invoice 기준 - Proforma Invoice 동일) ===
@@ -53,6 +83,10 @@ COL_QTY = 'E'           # 수량
 COL_UNIT_PRICE = 'G'    # 단가
 COL_AMOUNT = 'I'        # 금액 (수량 * 단가)
 
+# Incoterms / Currency 관련 셀
+CELL_INCOTERMS = 'G17'          # Incoterms (단가 헤더 옆)
+CELL_CURRENCY_TOTAL = 'H26'     # 합계 옆 통화 (템플릿 기준, 동적으로 조정됨)
+
 
 def create_pi_xlwings(
     template_path: Path,
@@ -68,57 +102,33 @@ def create_pi_xlwings(
         order_data: 주문 데이터 (첫 번째 아이템 또는 단일 아이템)
         items_df: 다중 아이템인 경우 전체 아이템 DataFrame
     """
-    if not template_path.exists():
-        raise FileNotFoundError(f"템플릿 파일이 없습니다: {template_path}")
+    # 템플릿 준비 (임시 폴더로 복사)
+    temp_template, temp_output = prepare_template(template_path, "pi")
 
     # 날짜
     today = datetime.now()
     today_str = today.strftime("%Y-%m-%d")
 
-    # 경로에 한글이 포함된 경우 임시 폴더에서 작업 (xlwings COM 인터페이스 호환성)
-    temp_dir = Path(tempfile.gettempdir())
-    temp_template = temp_dir / f"pi_template_{today.strftime('%Y%m%d%H%M%S')}.xlsx"
-    temp_output = temp_dir / f"pi_output_{today.strftime('%Y%m%d%H%M%S')}.xlsx"
-
-    # 템플릿을 임시 폴더로 복사
-    shutil.copy(template_path, temp_template)
-
-    # Excel 앱 시작 (백그라운드)
-    app = xw.App(visible=False)
-    app.display_alerts = False
-    app.screen_updating = False
-
     try:
-        # 임시 템플릿 열기
-        wb = app.books.open(str(temp_template))
-        ws = wb.sheets[0]
+        # xlwings App 생명주기 관리
+        with xlwings_app_context() as app:
+            # 임시 템플릿 열기
+            wb = app.books.open(str(temp_template))
+            ws = wb.sheets[0]
 
-        # 1. 헤더 정보 채우기
-        _fill_header(ws, order_data, today_str)
+            # 1. 헤더 정보 채우기
+            _fill_header(ws, order_data, today_str)
 
-        # 2. 아이템 데이터 채우기
-        inserted_rows = _fill_items(ws, order_data, items_df)
+            # 2. 아이템 데이터 채우기
+            inserted_rows = _fill_items(ws, order_data, items_df)
 
-        # 3. Shipping Mark (동적으로 찾아서 채우기)
-        _fill_shipping_mark(ws, order_data)
-
-        # 임시 위치에 저장
-        wb.save(str(temp_output))
-        logger.info(f"Proforma Invoice 생성 완료 (임시): {temp_output}")
+            # 임시 위치에 저장
+            wb.save(str(temp_output))
+            logger.info(f"Proforma Invoice 생성 완료 (임시): {temp_output}")
 
     finally:
-        # 정리
-        try:
-            wb.close()
-        except NameError:
-            pass
-        app.quit()
-
         # 임시 템플릿 삭제
-        try:
-            temp_template.unlink()
-        except Exception:
-            pass
+        cleanup_temp_file(temp_template)
 
     # 최종 출력 경로로 이동
     shutil.move(str(temp_output), str(output_path))
@@ -168,9 +178,10 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series, today_str: str) -> None:
         else:
             ws.range(CELL_PO_DATE).value = str(po_date)
 
-    # Incoterms (내부 키 사용)
+    # Incoterms (G17)
     incoterms = get_value(order_data, 'incoterms', '')
-    # Incoterms는 별도 셀이 있으면 추가 (현재 매핑에 없음)
+    if incoterms:
+        ws.range(CELL_INCOTERMS).value = incoterms
 
     # L/C 정보 (내부 키 사용)
     lc_no = get_value(order_data, 'lc_no', '')
@@ -185,6 +196,7 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series, today_str: str) -> None:
 
 
 
+
 def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
     """행 삭제 후 아이템 영역 테두리 복원
 
@@ -192,29 +204,23 @@ def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
         ws: xlwings Sheet 객체
         num_items: 실제 아이템 수
     """
-    # xlwings 상수
-    xlEdgeTop = 8
-    xlEdgeBottom = 9
-    xlContinuous = 1
-    xlThin = 2
-
     # 마지막 아이템 행 (Total 바로 위)
     last_item_row = ITEM_START_ROW + num_items - 1
 
     # 헤더 아래 행 (첫 번째 아이템 행 바로 위 = Row 17)의 아래 테두리
     header_bottom_row = ITEM_START_ROW - 1
-    ws.range(f'A{header_bottom_row}:I{header_bottom_row}').api.Borders(xlEdgeBottom).LineStyle = xlContinuous
-    ws.range(f'A{header_bottom_row}:I{header_bottom_row}').api.Borders(xlEdgeBottom).Weight = xlThin
+    ws.range(f'A{header_bottom_row}:I{header_bottom_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlContinuous
+    ws.range(f'A{header_bottom_row}:I{header_bottom_row}').api.Borders(XlConstants.xlEdgeBottom).Weight = XlConstants.xlThin
 
     # 마지막 아이템 행의 아래 테두리
-    ws.range(f'A{last_item_row}:I{last_item_row}').api.Borders(xlEdgeBottom).LineStyle = xlContinuous
-    ws.range(f'A{last_item_row}:I{last_item_row}').api.Borders(xlEdgeBottom).Weight = xlThin
+    ws.range(f'A{last_item_row}:I{last_item_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlContinuous
+    ws.range(f'A{last_item_row}:I{last_item_row}').api.Borders(XlConstants.xlEdgeBottom).Weight = XlConstants.xlThin
 
     logger.debug(f"테두리 복원: Row {header_bottom_row} 하단, Row {last_item_row} 하단")
 
 
 def _find_total_row(ws: xw.Sheet, start_row: int, max_search: int = 20) -> int:
-    """'Total' 텍스트가 있는 행 찾기
+    """'Total' 텍스트가 있는 행 찾기 (배치 읽기 최적화)
 
     Args:
         ws: xlwings Sheet 객체
@@ -224,11 +230,10 @@ def _find_total_row(ws: xw.Sheet, start_row: int, max_search: int = 20) -> int:
     Returns:
         Total 행 번호 (못 찾으면 start_row + 10)
     """
-    for row in range(start_row, start_row + max_search):
-        cell_value = ws.range(f'A{row}').value
-        if cell_value and 'Total' in str(cell_value):
-            return row
-    return start_row + 10  # 기본값
+    # 배치 읽기로 20회 COM 호출 → 1회로 감소
+    end_row = start_row + max_search - 1
+    row = find_text_in_column_batch(ws, 'A', 'Total', start_row, end_row)
+    return row if row is not None else start_row + 10
 
 
 def _fill_items(
@@ -236,7 +241,7 @@ def _fill_items(
     order_data: pd.Series,
     items_df: pd.DataFrame | None,
 ) -> int:
-    """아이템 데이터 채우기
+    """아이템 데이터 채우기 - 배치 쓰기 최적화
 
     Args:
         ws: xlwings Sheet 객체
@@ -259,11 +264,8 @@ def _fill_items(
     # 행 수 조정: 템플릿 예시보다 실제 아이템이 적으면 초과 행 삭제
     if num_items < template_item_count:
         rows_to_delete = template_item_count - num_items
-        # 같은 위치에서 반복 삭제 - xlUp으로 아래 행이 올라오므로 연속 행 삭제됨
-        for _ in range(rows_to_delete):
-            delete_row = ITEM_START_ROW + num_items
-            ws.range(f'{delete_row}:{delete_row}').api.Delete(Shift=-4162)  # xlUp
-        logger.debug(f"{rows_to_delete}개 초과 행 삭제")
+        # 범위 삭제로 N회 COM 호출 → 1회로 감소
+        delete_rows_range(ws, ITEM_START_ROW + num_items, rows_to_delete)
 
         # 테두리 복원: 행 삭제로 사라진 테두리 다시 그리기
         _restore_item_borders(ws, num_items)
@@ -271,82 +273,118 @@ def _fill_items(
     # 행 수 조정: 템플릿 예시보다 실제 아이템이 많으면 행 삽입
     elif num_items > template_item_count:
         rows_to_insert = num_items - template_item_count
+
+        # 삽입 전: 템플릿 원래 마지막 행의 하단 테두리 제거
+        # (이 테두리가 그대로 남아 중간에 선이 생기는 문제 방지)
+        original_last_row = ITEM_START_ROW + template_item_count - 1
+        ws.range(f'A{original_last_row}:I{original_last_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlNone
+
         source_row = ITEM_START_ROW
         for i in range(rows_to_insert):
             insert_row = ITEM_START_ROW + template_item_count + i
             ws.range(f'{source_row}:{source_row}').api.Copy()
-            ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=-4121)  # xlDown
+            ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=XlConstants.xlShiftDown)
         logger.debug(f"{rows_to_insert}개 행 삽입")
 
-    # 아이템 데이터 채우기 (내부 키 사용)
-    total_amount = 0
-    currency = get_value(order_data, 'currency', 'USD')
+        # 테두리 복원: 새 마지막 아이템 행에 하단 테두리 추가
+        _restore_item_borders(ws, num_items)
 
-    for idx, (_, item) in enumerate(items_df.iterrows()):
-        row_num = ITEM_START_ROW + idx
+    # 아이템 데이터 배치 쓰기 (N개 아이템 * 4열 COM 호출 → 1회로 감소)
+    _fill_items_batch(ws, items_df)
 
-        # 품목명
-        item_name = get_value(item, 'item_name', '')
-        ws.range(f'{COL_ITEM_NAME}{row_num}').value = item_name
-
-        # 수량
-        qty = get_value(item, 'item_qty', 1)
-        try:
-            qty = int(qty) if pd.notna(qty) else 1
-        except (ValueError, TypeError):
-            qty = 1
-        ws.range(f'{COL_QTY}{row_num}').value = qty
-
-        # 단가 (sales_unit_price 키 사용)
-        unit_price = get_value(item, 'sales_unit_price', 0)
-        try:
-            unit_price = float(unit_price) if pd.notna(unit_price) else 0
-        except (ValueError, TypeError):
-            unit_price = 0
-        ws.range(f'{COL_UNIT_PRICE}{row_num}').value = unit_price
-
-        # 금액
-        amount = qty * unit_price
-        ws.range(f'{COL_AMOUNT}{row_num}').value = amount
-        total_amount += amount
+    # Total 행 수식 및 Currency 업데이트
+    _update_total_row(ws, num_items, order_data)
 
     return num_items - template_item_count if num_items > template_item_count else 0
 
 
-def _fill_shipping_mark(ws: xw.Sheet, order_data: pd.Series) -> None:
-    """Shipping Mark 영역 채우기 (동적으로 찾아서)
-
-    각 레이블 텍스트를 찾아서 해당 위치에 값을 채웁니다.
+def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> None:
+    """Total 행의 수식과 Currency 업데이트
 
     Args:
         ws: xlwings Sheet 객체
-        order_data: 주문 데이터
+        num_items: 실제 아이템 수
+        order_data: 주문 데이터 (Currency 정보용)
     """
-    # 데이터 추출 (내부 키 사용)
-    customer_name = get_value(order_data, 'customer_name', '')
-    customer_country = get_value(order_data, 'customer_country', '')
-    customer_po = get_value(order_data, 'customer_po', '')
+    # Total 행 위치 계산 (아이템 마지막 행 + 1)
+    total_row = ITEM_START_ROW + num_items
+    last_item_row = total_row - 1
 
-    # 검색 범위 (아이템 행 삭제로 위치가 변할 수 있으므로 넓게 검색)
-    search_start = 20
-    search_end = 100
+    # I열: Amount 합계 수식 업데이트
+    sum_formula = f"=SUM(I{ITEM_START_ROW}:I{last_item_row})"
+    ws.range(f'I{total_row}').formula = sum_formula
+    logger.debug(f"Total 수식 업데이트: I{total_row} = {sum_formula}")
 
-    # 1. Shipping Mark 헤더 찾아서 +1행에 Customer name
-    for row in range(search_start, search_end):
-        cell_value = ws.range(f'A{row}').value
-        if cell_value and 'Shipping Mark' in str(cell_value):
-            ws.range(f'A{row + 1}').value = customer_name
-            ws.range(f'A{row + 2}').value = customer_country
-            logger.debug(f"Shipping Mark 발견 Row {row}: {customer_name}, {customer_country}")
-            break
+    # H열: Currency
+    currency = get_value(order_data, 'currency', '')
+    if currency:
+        ws.range(f'H{total_row}').value = currency
+        logger.debug(f"Currency 업데이트: H{total_row} = {currency}")
 
-    # 2. "PO No" 텍스트 찾아서 같은 행 C열에 PO 값
-    for row in range(search_start, search_end):
-        for col in ['A', 'B']:
-            cell_value = ws.range(f'{col}{row}').value
-            if cell_value and 'PO No' in str(cell_value):
-                ws.range(f'C{row}').value = customer_po
-                logger.debug(f"PO No 발견 {col}{row}: {customer_po} -> C{row}")
-                return
 
-    logger.warning("PO No 레이블을 찾을 수 없습니다.")
+def _fill_items_batch(
+    ws: xw.Sheet,
+    items_df: pd.DataFrame,
+) -> None:
+    """아이템 데이터 배치 쓰기 (성능 최적화)
+
+    PI는 열이 불연속적이므로(A, E, G, I) 열별로 배치 쓰기 수행
+
+    Args:
+        ws: xlwings Sheet 객체
+        items_df: 아이템 DataFrame
+    """
+    num_items = len(items_df)
+    end_row = ITEM_START_ROW + num_items - 1
+
+    # 데이터 준비
+    names = []
+    qtys = []
+    prices = []
+    amounts = []
+
+    for item_idx, (_, item) in enumerate(items_df.iterrows()):
+        # 품목명: Model + Item name (Model은 텍스트로 변환하여 앞 0 보존)
+        raw_model = get_value(item, 'model', '')
+        model = _to_text(raw_model)
+        item_name = get_value(item, 'item_name', '')
+        if model and item_name:
+            full_name = f"{model} {item_name}"
+        elif model:
+            full_name = model
+        else:
+            full_name = str(item_name) if item_name else ''
+        names.append(full_name)
+
+        # 수량
+        raw_qty = get_value(item, 'item_qty', 1)
+        try:
+            qty = int(raw_qty) if pd.notna(raw_qty) else 1
+        except (ValueError, TypeError):
+            logger.warning(f"Item {item_idx+1}: 수량 변환 실패 '{raw_qty}' -> 기본값 1 사용")
+            qty = 1
+        qtys.append(qty)
+
+        # 단가
+        raw_price = get_value(item, 'sales_unit_price', 0)
+        try:
+            unit_price = float(raw_price) if pd.notna(raw_price) else 0
+        except (ValueError, TypeError):
+            logger.warning(f"Item {item_idx+1}: 단가 변환 실패 '{raw_price}' -> 기본값 0 사용")
+            unit_price = 0
+        prices.append(unit_price)
+
+        # 금액
+        amounts.append(qty * unit_price)
+
+    # 열별 배치 쓰기 (4회 COM 호출 - 아이템 수에 관계없이 고정)
+    # xlwings는 1D 리스트를 수직으로 쓰려면 2D로 변환해야 함
+    ws.range(f'{COL_ITEM_NAME}{ITEM_START_ROW}:{COL_ITEM_NAME}{end_row}').value = [[n] for n in names]
+    ws.range(f'{COL_QTY}{ITEM_START_ROW}:{COL_QTY}{end_row}').value = [[q] for q in qtys]
+    ws.range(f'{COL_UNIT_PRICE}{ITEM_START_ROW}:{COL_UNIT_PRICE}{end_row}').value = [[p] for p in prices]
+    ws.range(f'{COL_AMOUNT}{ITEM_START_ROW}:{COL_AMOUNT}{end_row}').value = [[a] for a in amounts]
+
+    # 아이템 영역 행 높이 자동 조정
+    ws.range(f'{ITEM_START_ROW}:{end_row}').rows.autofit()
+
+    logger.debug(f"PI 아이템 배치 쓰기 완료: {num_items}개")
