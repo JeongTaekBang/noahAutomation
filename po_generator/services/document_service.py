@@ -17,8 +17,10 @@ from po_generator.config import (
     OUTPUT_DIR,
     TS_OUTPUT_DIR,
     PI_OUTPUT_DIR,
+    FI_OUTPUT_DIR,
     TS_TEMPLATE_FILE,
     PI_TEMPLATE_FILE,
+    FI_TEMPLATE_FILE,
 )
 from po_generator.utils import get_value
 from po_generator.validators import validate_order_data, validate_multiple_items
@@ -26,6 +28,7 @@ from po_generator.history import check_duplicate_order, save_to_history
 from po_generator.excel_generator import create_po_workbook
 from po_generator.ts_generator import create_ts_xlwings
 from po_generator.pi_generator import create_pi_xlwings
+from po_generator.fi_generator import create_fi_xlwings
 from po_generator.cli_common import generate_output_filename, validate_output_path
 from po_generator.services.result import DocumentResult, GenerationStatus
 from po_generator.services.finder_service import FinderService, OrderData
@@ -306,6 +309,76 @@ class DocumentService:
         return DocumentResult.success_result(
             output_file=output_file,
             order_no=so_id,
+            customer_name=customer_name,
+            item_count=order_data.item_count,
+        )
+
+    def generate_fi(self, dn_id: str) -> DocumentResult:
+        """Final Invoice 생성 (대금 청구용)
+
+        Args:
+            dn_id: DN_ID (예: DNO-2026-0001)
+
+        Returns:
+            DocumentResult
+        """
+        logger.info(f"FI 생성 시작: {dn_id}")
+
+        # 템플릿 확인
+        if not FI_TEMPLATE_FILE.exists():
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"템플릿 파일 없음: {FI_TEMPLATE_FILE}",
+            )
+
+        # 데이터 검색 (DN_해외 + Customer_해외 JOIN)
+        order_data = self._finder.find_dn_export(dn_id)
+        if order_data is None:
+            return DocumentResult.not_found_result(dn_id)
+
+        # 출력 디렉토리 생성
+        FI_OUTPUT_DIR.mkdir(exist_ok=True)
+
+        # 파일명 생성
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        output_file = generate_output_filename("FI", dn_id, customer_name, FI_OUTPUT_DIR)
+
+        if not validate_output_path(output_file, FI_OUTPUT_DIR):
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message="출력 경로 검증 실패",
+            )
+
+        # 문서 생성
+        try:
+            create_fi_xlwings(
+                template_path=FI_TEMPLATE_FILE,
+                output_path=output_file,
+                order_data=order_data.first_item,
+                items_df=order_data.items_df,
+            )
+            logger.info(f"FI 생성 완료: {output_file}")
+
+        except FileNotFoundError as e:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=str(e),
+            )
+        except PermissionError:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
+            )
+        except Exception as e:
+            logger.exception("FI 생성 중 오류 발생")
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=str(e),
+            )
+
+        return DocumentResult.success_result(
+            output_file=output_file,
+            order_no=dn_id,
             customer_name=customer_name,
             item_count=order_data.item_count,
         )

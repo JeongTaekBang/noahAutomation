@@ -19,10 +19,12 @@ from po_generator.utils import (
     load_dn_data,
     load_pmt_data,
     load_so_export_data,
+    load_dn_export_data,
     find_order_data,
     find_dn_data,
     find_pmt_data,
     find_so_export_data,
+    find_dn_export_data,
     load_so_for_advance,
     get_value,
 )
@@ -86,6 +88,7 @@ class FinderService:
         self._dn_df: pd.DataFrame | None = None
         self._pmt_df: pd.DataFrame | None = None
         self._so_export_df: pd.DataFrame | None = None
+        self._dn_export_df: pd.DataFrame | None = None
 
     def load_po_data(self) -> pd.DataFrame:
         """PO 데이터 로드 (국내 + 해외)"""
@@ -178,6 +181,45 @@ class FinderService:
         if result is None:
             return None
         return OrderData.from_result(result)
+
+    def load_dn_export_data(self) -> pd.DataFrame:
+        """DN 해외 데이터 로드 (Customer_해외 JOIN 포함)"""
+        if self._dn_export_df is None:
+            logger.info("DN 해외 데이터 로딩 중...")
+            self._dn_export_df = load_dn_export_data()
+            logger.info(f"DN 해외 데이터 {len(self._dn_export_df)}건 로드 완료")
+        return self._dn_export_df
+
+    def find_dn_export(self, dn_id: str) -> OrderData | None:
+        """DN 해외 데이터 검색
+
+        Args:
+            dn_id: DN_ID (예: DNO-2026-0001)
+
+        Returns:
+            OrderData 또는 None
+        """
+        df = self.load_dn_export_data()
+        result = find_dn_export_data(df, dn_id)
+        if result is None:
+            return None
+        return OrderData.from_result(result)
+
+    def get_available_dn_export_ids(self, limit: int = 20) -> list[tuple[str, str]]:
+        """사용 가능한 DN_ID (해외) 목록 반환
+
+        Args:
+            limit: 반환할 최대 개수
+
+        Returns:
+            (DN_ID, 고객명) 튜플 목록
+        """
+        df = self.load_dn_export_data()
+        result = []
+        for dn_id in df['DN_ID'].dropna().unique()[:limit]:
+            customer = df[df['DN_ID'] == dn_id]['Customer name'].iloc[0] if len(df[df['DN_ID'] == dn_id]) > 0 else ''
+            result.append((str(dn_id), str(customer) if pd.notna(customer) else ''))
+        return result
 
     def find_so_for_advance(self, advance_id: str) -> tuple[pd.Series, OrderData] | None:
         """선수금용 SO 데이터 검색

@@ -193,6 +193,13 @@ PI_HEADER_LABELS: tuple[str, ...] = (
     'DESCRIPTION',
 )
 
+# Final Invoice 헤더 라벨
+FI_HEADER_LABELS: tuple[str, ...] = (
+    'No.',
+    'Description',
+    'DESCRIPTION',
+)
+
 # 기본 헤더 라벨 (모든 문서 유형에 공통)
 DEFAULT_HEADER_LABELS: tuple[str, ...] = (
     'No.',
