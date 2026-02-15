@@ -83,6 +83,7 @@ NOAH 엑셀 원가 계산:
 | **PO_매입월별** | **월별 매입 집계 (IC Balance Confirmation용)** |
 | **PO_미출고** | **Invoiced인데 DN 미매칭 건 (데이터 점검용)** |
 | Inventory_Transaction | 입출고 트랜잭션 (감사 추적용) |
+| **Order_Book** | **월별 수주잔고 (Backlog) 롤링 원장 - AX 오더북 형식** |
 
 ---
 
@@ -1001,6 +1002,354 @@ in
    - DN 기록 누락 → DN 시트에 추가
    - Item name 오타 → PO 또는 DN 수정
    - 출고일 비어있음 → DN 시트에서 출고일 입력
+
+---
+
+## Order_Book
+
+### 목적
+- SO_국내 + SO_해외의 수주 데이터를 **월별 롤링 원장**으로 표현
+- AX2009 Order Book과 동일한 형식: **건별 × Period**
+- 수주잔고(Backlog) 흐름을 Period별로 추적
+- SO-DN 금액 불일치 자동 감지
+- **SO_ID + OS name 기준 그룹화** (같은 제품의 Line item 합산 → 행 수 감소)
+
+### 개념
+
+```
+수주잔고 Order Book = 오더의 흐름을 월별로 추적하는 원장
+
+  Start (전월 이월)
++ Input (당월 수주 = SO 등록)
+- Output (당월 매출 = DN 출고/선적)
++ Variance (조정분, 현재 0)
+= Ending (당월 잔고 → 다음 달 Start로 이월)
+```
+
+```
+SOD-0001, IQ3를 1월에 수주, 2월에 출고:
+
+P01: Start=0    + Input=500만 - Output=0      = Ending=500만  (Backlog)
+P02: Start=500만 + Input=0    - Output=480만  = Ending=20만   (SO-DN 차이)
+         ↑                          ↑                  ↑
+    P01 Ending             DN 실제 매출 금액    점검 대상 (0이 아님)
+```
+
+### 동작 방식
+
+- **버튼/마감 작업 없음** — Ctrl+Alt+F5 새로고침 시 전체 재계산
+- SO/DN 원본 데이터에서 매번 처음부터 계산하는 **뷰(View)**
+- 스냅샷 저장 없음 (과도기적 사용, 과거 데이터 수정 시 소급 반영)
+- Input = SO의 `Sales amount KRW` (수주 금액)
+- Output = DN의 `Total Sales` / `Total Sales KRW` (실제 매출 금액)
+- 국내: DN 출고일 기준, **해외: DN 선적일 기준** (매출 인식 시점)
+
+### SO-DN 금액 차이 감지
+
+```
+출고 후 Ending = 0  → 정상 (SO 금액 = DN 금액)
+출고 후 Ending ≠ 0  → SO-DN 금액 불일치 → 데이터 점검 필요
+
+예: SO 수주 500만, DN 출고 480만 → Ending = 20만 (단가 조정 발생?)
+```
+
+### OS name 기준 그룹화
+
+Line item 단위로 처리하면 행 수가 과도하게 많아지므로, **OS name이 같은 Line item을 합산**하여 표시합니다.
+
+```
+SO_ID = SOD-0001
+  Line item 1: IQ3  (OS name: IQ3)   → qty 5, amount 250만
+  Line item 2: IQ3  (OS name: IQ3)   → qty 3, amount 150만
+  Line item 3: CVA  (OS name: CVA)   → qty 2, amount 100만
+
+→ 그룹화 후:
+  SOD-0001 × IQ3: qty 8, amount 400만  (Line 1+2 합산)
+  SOD-0001 × CVA: qty 2, amount 100만  (Line 3 단독)
+```
+
+- **그룹화 키**: SO_ID + OS name + Period
+- **합산 필드**: qty, amount (Input/Output 모두)
+- **대표값 필드**: Customer name, Item name, 구분, Sector 등은 첫 번째 값 사용
+- **AX Project number**: 그룹 내 고유값을 `, `로 연결 (예: "P001, P002")
+- **처리 순서**: Line item 레벨에서 Input/Output 계산 → OS name으로 그룹화 → 롤링 계산
+
+### 결과 컬럼
+
+| 컬럼 | 설명 |
+|------|------|
+| Period | 해당 월 (yyyy-MM, 텍스트) |
+| 구분 | 국내/해외 |
+| SO_ID | 주문 번호 |
+| Customer name | 고객명 |
+| Item name | 아이템명 (대표값) |
+| OS name | OneStream Item name (**그룹화 키**) |
+| AX Project number | ERP 프로젝트 번호 (그룹 내 고유값 연결) |
+| Sector | 사업 부문 |
+| Business registration number | 사업자등록번호 |
+| Industry code | 산업 코드 |
+| Value_Start_qty | 전월 이월 수량 |
+| Value_Input_qty | 당월 수주 수량 (등록 Period에만) |
+| Value_Output_qty | 당월 출고 수량 (출고월에만, DN 기준) |
+| Value_Variance_qty | 수량 조정분 (현재 0, 향후 확장용) |
+| Value_Ending_qty | Start + Input - Output + Variance |
+| Value_Start_amount | 전월 이월 금액 |
+| Value_Input_amount | 당월 수주 금액 (SO 기준) |
+| Value_Output_amount | 당월 매출 금액 (DN 기준) |
+| Value_Variance_amount | 금액 조정분 (현재 0, 향후 확장용) |
+| Value_Ending_amount | Start + Input - Output + Variance |
+
+### M 코드
+
+```
+let
+    // ========== SO 원본 (수주) ==========
+    SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
+    SO_해외_Raw = Excel.CurrentWorkbook(){[Name="SO_해외"]}[Content],
+
+    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Customer name", "Item name", "OS name", "Line item", "Item qty", "Sales amount", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code"}),
+    SO_국내_Renamed = Table.RenameColumns(SO_국내, {{"Sales amount", "Sales amount KRW"}}),
+    SO_국내_Tagged = Table.AddColumn(SO_국내_Renamed, "구분", each "국내"),
+
+    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Customer name", "Item name", "OS name", "Line item", "Item qty", "Sales amount KRW", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code"}),
+    SO_해외_Tagged = Table.AddColumn(SO_해외, "구분", each "해외"),
+
+    SO_Combined = Table.Combine({SO_국내_Tagged, SO_해외_Tagged}),
+    // Cancelled 제외, Period 비어있는 행 제외
+    SO_Filtered = Table.SelectRows(SO_Combined, each
+        ([Status] = null or [Status] <> "Cancelled") and
+        [Period] <> null and Text.Trim(Text.From([Period])) <> ""
+    ),
+
+    // ========== DN (출고 시점 + 실제 매출 금액) ==========
+    DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
+    DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
+
+    // 국내: 출고일 기준, Total Sales = 매출
+    DN_국내 = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Qty", "Total Sales", "출고일"}),
+    DN_국내_WithPeriod = Table.AddColumn(DN_국내, "출고월", each
+        if [출고일] = null then null
+        else Text.From(Date.Year([출고일])) & "-" & Text.PadStart(Text.From(Date.Month([출고일])), 2, "0"),
+        type text),
+    DN_국내_Final = Table.RenameColumns(DN_국내_WithPeriod, {{"Total Sales", "출고금액"}}),
+
+    // 해외: 선적일 기준 (매출 인식 시점), Total Sales KRW = 매출
+    DN_해외 = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Qty", "Total Sales KRW", "선적일"}),
+    DN_해외_WithPeriod = Table.AddColumn(DN_해외, "출고월", each
+        if [선적일] = null then null
+        else Text.From(Date.Year([선적일])) & "-" & Text.PadStart(Text.From(Date.Month([선적일])), 2, "0"),
+        type text),
+    DN_해외_Final = Table.RenameColumns(DN_해외_WithPeriod, {{"Total Sales KRW", "출고금액"}}),
+
+    DN_Combined = Table.Combine({DN_국내_Final, DN_해외_Final}),
+
+    // SO_ID + Line item 기준 DN 집계 (출고월 + 실제 출고 수량/금액)
+    DN_Grouped = Table.Group(DN_Combined, {"SO_ID", "Line item"}, {
+        {"Output_qty", each List.Sum([Qty]), type number},
+        {"Output_amount", each List.Sum([출고금액]), type number},
+        {"출고월", each List.Max(List.RemoveNulls([출고월])), type text}
+    }),
+
+    // ========== SO + DN 조인 ==========
+    WithDN = Table.NestedJoin(SO_Filtered, {"SO_ID", "Line item"}, DN_Grouped, {"SO_ID", "Line item"}, "DN_Data", JoinKind.LeftOuter),
+    WithDNExpanded = Table.ExpandTableColumn(WithDN, "DN_Data", {"Output_qty", "Output_amount", "출고월"}),
+
+    // ========== Period 리스트 ==========
+    AllPeriods = List.Buffer(List.Sort(List.Distinct(
+        List.RemoveNulls(Table.Column(WithDNExpanded, "Period")) &
+        List.RemoveNulls(Table.Column(WithDNExpanded, "출고월"))
+    ))),
+    LastPeriod = List.Last(AllPeriods),
+
+    // ========== 건별 × Period 확장 ==========
+    // 각 SO Line: 등록 Period ~ 출고월(또는 마지막 Period)까지 행 생성
+    // 출고 완료 건: 출고월까지만 표시
+    // 미출고 건: 마지막 Period까지 표시 (Backlog)
+    WithPeriodList = Table.AddColumn(WithDNExpanded, "ActivePeriods", each
+        let
+            startIdx = List.PositionOf(AllPeriods, [Period]),
+            endPeriod = if [출고월] <> null then [출고월] else LastPeriod,
+            endIdx = List.PositionOf(AllPeriods, endPeriod),
+            s = if startIdx < 0 then 0 else startIdx,
+            e = if endIdx < 0 then List.Count(AllPeriods) - 1
+                else if endIdx < s then s else endIdx
+        in
+            List.Range(AllPeriods, s, e - s + 1)
+    ),
+
+    Expanded = Table.ExpandListColumn(WithPeriodList, "ActivePeriods"),
+    Renamed = Table.RenameColumns(Expanded, {{"Period", "등록Period"}, {"ActivePeriods", "Period"}}),
+
+    // ========== Input / Output (Line item 레벨) ==========
+    // Input = SO 금액 (수주 시점, 등록 Period에만)
+    // Output = DN 금액 (실제 매출 인식 금액, 출고월에만)
+    WithInputQty = Table.AddColumn(Renamed, "Value_Input_qty", each
+        if [Period] = [등록Period] then [Item qty] else 0, type number),
+    WithInputAmt = Table.AddColumn(WithInputQty, "Value_Input_amount", each
+        if [Period] = [등록Period] then [Sales amount KRW] else 0, type number),
+    WithOutputQty = Table.AddColumn(WithInputAmt, "Value_Output_qty", each
+        if [출고월] <> null and [Period] = [출고월]
+        then (if [Output_qty] = null then 0 else [Output_qty])
+        else 0, type number),
+    WithValues = Table.AddColumn(WithOutputQty, "Value_Output_amount", each
+        if [출고월] <> null and [Period] = [출고월]
+        then (if [Output_amount] = null then 0 else [Output_amount])
+        else 0, type number),
+
+    // ========== OS name 기준 그룹화 ==========
+    // Line item 레벨 → SO_ID + OS name + Period 로 합산
+    // 같은 OS name의 Line item들이 하나의 행으로 합쳐짐
+    OSGrouped = Table.Group(WithValues, {"SO_ID", "OS name", "Period"}, {
+        {"Customer name", each List.First([Customer name]), type text},
+        {"Item name", each List.First([Item name]), type text},
+        {"구분", each List.First([구분]), type text},
+        {"Sector", each List.First([Sector]), type text},
+        {"Business registration number", each List.First([Business registration number]), type text},
+        {"Industry code", each List.First([Industry code]), type text},
+        {"AX Project number", each Text.Combine(List.Distinct(List.RemoveNulls([AX Project number])), ", "), type text},
+        {"Value_Input_qty", each List.Sum([Value_Input_qty]), type number},
+        {"Value_Input_amount", each List.Sum([Value_Input_amount]), type number},
+        {"Value_Output_qty", each List.Sum([Value_Output_qty]), type number},
+        {"Value_Output_amount", each List.Sum([Value_Output_amount]), type number}
+    }),
+
+    // ========== 건별 롤링 계산 ==========
+    // SO_ID + OS name 그룹 → 각 그룹 내에서 Start/Ending 전파
+    ProcessLine = (lineTable as table) as list =>
+        let
+            sorted = Table.Sort(lineTable, {{"Period", Order.Ascending}}),
+            rows = Table.ToRecords(sorted),
+            result = List.Accumulate({0..List.Count(rows)-1}, {}, (state, idx) =>
+                let
+                    r = rows{idx},
+                    sQty = if idx = 0 then 0 else state{idx-1}[Value_Ending_qty],
+                    sAmt = if idx = 0 then 0 else state{idx-1}[Value_Ending_amount]
+                in
+                    state & {[
+                        Period = r[Period],
+                        구분 = r[구분],
+                        SO_ID = r[SO_ID],
+                        #"Customer name" = r[#"Customer name"],
+                        #"Item name" = r[#"Item name"],
+                        #"OS name" = r[#"OS name"],
+                        #"AX Project number" = r[#"AX Project number"],
+                        Sector = r[Sector],
+                        #"Business registration number" = r[#"Business registration number"],
+                        #"Industry code" = r[#"Industry code"],
+                        Value_Start_qty = sQty,
+                        Value_Input_qty = r[Value_Input_qty],
+                        Value_Output_qty = r[Value_Output_qty],
+                        Value_Variance_qty = 0,
+                        Value_Ending_qty = sQty + r[Value_Input_qty] - r[Value_Output_qty],
+                        Value_Start_amount = sAmt,
+                        Value_Input_amount = r[Value_Input_amount],
+                        Value_Output_amount = r[Value_Output_amount],
+                        Value_Variance_amount = 0,
+                        Value_Ending_amount = sAmt + r[Value_Input_amount] - r[Value_Output_amount]
+                    ]}
+            )
+        in
+            result,
+
+    Grouped = Table.Group(OSGrouped, {"SO_ID", "OS name"}, {
+        {"Processed", each ProcessLine(_)}
+    }),
+
+    // 결과 펼치기
+    AllRows = List.Combine(Grouped[Processed]),
+    ResultTable = Table.FromRecords(AllRows),
+
+    // ========== 정렬 + 컬럼 정리 + 타입 ==========
+    Reordered = Table.ReorderColumns(ResultTable, {
+        "Period", "구분", "SO_ID", "Customer name", "Item name", "OS name",
+        "AX Project number", "Sector", "Business registration number", "Industry code",
+        "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty",
+        "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount"
+    }),
+
+    FinalSorted = Table.Sort(Reordered, {
+        {"Period", Order.Descending},
+        {"구분", Order.Ascending},
+        {"SO_ID", Order.Ascending},
+        {"OS name", Order.Ascending}
+    }),
+
+    Result = Table.TransformColumnTypes(FinalSorted, {
+        {"Value_Start_qty", Int64.Type},
+        {"Value_Input_qty", Int64.Type},
+        {"Value_Output_qty", Int64.Type},
+        {"Value_Variance_qty", Int64.Type},
+        {"Value_Ending_qty", Int64.Type},
+        {"Value_Start_amount", Currency.Type},
+        {"Value_Input_amount", Currency.Type},
+        {"Value_Output_amount", Currency.Type},
+        {"Value_Variance_amount", Currency.Type},
+        {"Value_Ending_amount", Currency.Type}
+    })
+in
+    Result
+```
+
+### 결과 예시
+
+| Period | 구분 | SO_ID | Customer name | OS name | Sector | Start_qty | Input_qty | Output_qty | Var_qty | Ending_qty | Start_amt | Input_amt | Output_amt | Var_amt | Ending_amt |
+|--------|------|-------|---------------|---------|--------|-----------|-----------|------------|---------|------------|-----------|-----------|------------|---------|------------|
+| 2026-02 | 국내 | SOD-0001 | 삼성전자 | IQ3 | Process | 10 | 0 | **10** | 0 | **0** | 5,000,000 | 0 | 5,000,000 | 0 | **0** |
+| 2026-02 | 국내 | SOD-0003 | 현대중공업 | NA028 | CPI | 20 | 0 | 0 | 0 | **20** | 10,000,000 | 0 | 0 | 0 | **10,000,000** |
+| 2026-02 | 해외 | SOO-0001 | ABC Corp | CVA | Water | 5 | 0 | 0 | 0 | **5** | 4,000,000 | 0 | 0 | 0 | **4,000,000** |
+| 2026-01 | 국내 | SOD-0001 | 삼성전자 | IQ3 | Process | 0 | **10** | 0 | 0 | **10** | 0 | 5,000,000 | 0 | 0 | **5,000,000** |
+| 2026-01 | 국내 | SOD-0002 | LG전자 | CVA | Water | 0 | **8** | **8** | 0 | **0** | 0 | 4,000,000 | 4,000,000 | 0 | **0** |
+| 2026-01 | 국내 | SOD-0003 | 현대중공업 | NA028 | CPI | 0 | **20** | 0 | 0 | **20** | 0 | 10,000,000 | 0 | 0 | **10,000,000** |
+
+```
+SOD-0001: 1월 수주(10) → 2월 출고(10) → Ending=0 (소진)
+SOD-0002: Line item 2개 (CVA qty 5 + CVA qty 3) → OS name 그룹화 → qty 8, 1월 출고 완료
+SOD-0003: 1월 수주(20) → 2월에도 미출고 → Ending=20 (Backlog)
+```
+
+### 활용
+
+| 보고 싶은 것 | 방법 |
+|-------------|------|
+| **현재 Backlog** | 마지막 Period 필터 → Value_Ending_amount > 0 |
+| **월별 요약** | 피벗 테이블: Period 행 → SUM(Input/Output/Ending) |
+| **고객별 Backlog** | Value_Ending > 0 필터 → Customer name 그룹화 |
+| **국내/해외 split** | 구분 컬럼 필터/슬라이서 |
+| **Sector별 분석** | Sector 컬럼 필터/슬라이서 → 사업부문별 Backlog |
+| **특정 월 스냅샷** | Period = "2026-01" 필터 → 그 시점의 모든 건 |
+| **누적 매출** | Value_Output_amount를 P01~해당월까지 합산 |
+| **SO-DN 차이 점검** | 출고 완료 건 중 Value_Ending ≠ 0 필터 |
+
+### AX 오더북과의 비교
+
+| 항목 | AX2009 Order Book | NOAH Order_Book |
+|------|-------------------|-----------------|
+| 마감 | Period 마감 → 잠금 | 없음 (매번 재계산) |
+| Start 이월 | DB에 저장된 값 | Power Query가 계산한 값 |
+| Variance | 자동 추적 (금액 변경, 취소) | 현재 0 (스냅샷 없어 변경 추적 불가, 향후 확장용) |
+| 스냅샷 | DB에 보존 | 없음 (현재 데이터 기준) |
+| 그룹화 | Project number 기준 | SO_ID + OS name 기준 (Line item 합산) |
+| Input 기준 | SO 등록일 | SO의 Period 컬럼 (yyyy-MM) |
+| Output 기준 | Invoice 일자 | DN 출고일(국내) / 선적일(해외) |
+| 금액 기준 | SO 금액 | Input=SO, Output=DN (차이 감지 가능) |
+| 갱신 | 자동 (트랜잭션 기반) | Ctrl+Alt+F5 (수동 새로고침) |
+
+### 전제조건
+
+- SO의 **Period 컬럼**: `yyyy-MM` 형식 텍스트 (예: "2026-01")
+- SO의 **Sector 컬럼**: 사업 부문 (예: "Process", "CPI", "Water")
+- SO의 **Business registration number 컬럼**: 사업자등록번호
+- SO의 **Industry code 컬럼**: 산업 코드
+- DN의 **출고일/선적일**: 날짜 형식 → 쿼리에서 yyyy-MM으로 변환
+
+### 한계
+
+| 한계 | 설명 | 대응 |
+|------|------|------|
+| 마감 잠금 없음 | 과거 SO/DN 수정 시 소급 변경 | 과도기적 사용이므로 허용 |
+| Variance 미추적 | 취소/금액 변경 이력 없음 | Cancelled는 Input에서 제외됨 |
+| 스냅샷 없음 | 과거 시점 재현 불가 | 필요 시 월말 PDF 저장으로 대체 |
+| Period 갭 | 활동 없는 월은 행 생성 안됨 | 전월 Ending이 다음 활동월 Start로 정확히 이월됨 |
 
 ---
 
