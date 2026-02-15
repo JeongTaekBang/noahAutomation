@@ -1043,6 +1043,7 @@ P02: Start=500만 + Input=0    - Output=480만  = Ending=20만   (SO-DN 차이)
 - Input = SO의 `Sales amount KRW` (수주 금액)
 - Output = DN의 `Total Sales` / `Total Sales KRW` (실제 매출 금액)
 - 국내: DN 출고일 기준, **해외: DN 선적일 기준** (매출 인식 시점)
+- **분할 출고 대응**: 같은 SO+Line item에 DN이 여러 건이면 각 출고월에 해당 수량/금액 배분
 
 ### SO-DN 금액 차이 감지
 
@@ -1150,21 +1151,26 @@ let
 
     DN_Combined = Table.Combine({DN_국내_Final, DN_해외_Final}),
 
-    // SO_ID + Line item 기준 DN 집계 (출고월 + 실제 출고 수량/금액)
-    DN_Grouped = Table.Group(DN_Combined, {"SO_ID", "Line item"}, {
+    // DN 월별 집계 (분할 출고 대응: SO_ID + Line item + 출고월)
+    DN_ByMonth = Table.Group(DN_Combined, {"SO_ID", "Line item", "출고월"}, {
         {"Output_qty", each List.Sum([Qty]), type number},
-        {"Output_amount", each List.Sum([출고금액]), type number},
+        {"Output_amount", each List.Sum([출고금액]), type number}
+    }),
+
+    // DN 마지막 출고월 (ActivePeriods 범위 결정용)
+    DN_LastMonth = Table.Group(DN_Combined, {"SO_ID", "Line item"}, {
         {"출고월", each List.Max(List.RemoveNulls([출고월])), type text}
     }),
 
-    // ========== SO + DN 조인 ==========
-    WithDN = Table.NestedJoin(SO_Filtered, {"SO_ID", "Line item"}, DN_Grouped, {"SO_ID", "Line item"}, "DN_Data", JoinKind.LeftOuter),
-    WithDNExpanded = Table.ExpandTableColumn(WithDN, "DN_Data", {"Output_qty", "Output_amount", "출고월"}),
+    // ========== SO + DN 조인 (기간 범위용, 마지막 출고월만) ==========
+    WithDN = Table.NestedJoin(SO_Filtered, {"SO_ID", "Line item"}, DN_LastMonth, {"SO_ID", "Line item"}, "DN_Data", JoinKind.LeftOuter),
+    WithDNExpanded = Table.ExpandTableColumn(WithDN, "DN_Data", {"출고월"}),
 
     // ========== Period 리스트 ==========
+    // SO 등록 Period + DN 모든 출고월 (분할 출고 중간 월 누락 방지)
     AllPeriods = List.Buffer(List.Sort(List.Distinct(
         List.RemoveNulls(Table.Column(WithDNExpanded, "Period")) &
-        List.RemoveNulls(Table.Column(WithDNExpanded, "출고월"))
+        List.RemoveNulls(Table.Column(DN_ByMonth, "출고월"))
     ))),
     LastPeriod = List.Last(AllPeriods),
 
@@ -1187,26 +1193,27 @@ let
     Expanded = Table.ExpandListColumn(WithPeriodList, "ActivePeriods"),
     Renamed = Table.RenameColumns(Expanded, {{"Period", "등록Period"}, {"ActivePeriods", "Period"}}),
 
-    // ========== Input / Output (Line item 레벨) ==========
+    // ========== Input (Line item 레벨) ==========
     // Input = SO 금액 (수주 시점, 등록 Period에만)
-    // Output = DN 금액 (실제 매출 인식 금액, 출고월에만)
     WithInputQty = Table.AddColumn(Renamed, "Value_Input_qty", each
         if [Period] = [등록Period] then [Item qty] else 0, type number),
     WithInputAmt = Table.AddColumn(WithInputQty, "Value_Input_amount", each
         if [Period] = [등록Period] then [Sales amount KRW] else 0, type number),
-    WithOutputQty = Table.AddColumn(WithInputAmt, "Value_Output_qty", each
-        if [출고월] <> null and [Period] = [출고월]
-        then (if [Output_qty] = null then 0 else [Output_qty])
-        else 0, type number),
+
+    // ========== Output (DN 월별 조인) ==========
+    // DN_ByMonth와 SO_ID + Line item + Period = 출고월 조인 → 분할 출고 월별 배분
+    WithDNOutput = Table.NestedJoin(WithInputAmt, {"SO_ID", "Line item", "Period"}, DN_ByMonth, {"SO_ID", "Line item", "출고월"}, "DN_Output", JoinKind.LeftOuter),
+    WithDNOutputExpanded = Table.ExpandTableColumn(WithDNOutput, "DN_Output", {"Output_qty", "Output_amount"}),
+    WithOutputQty = Table.AddColumn(WithDNOutputExpanded, "Value_Output_qty", each
+        if [Output_qty] = null then 0 else [Output_qty], type number),
     WithValues = Table.AddColumn(WithOutputQty, "Value_Output_amount", each
-        if [출고월] <> null and [Period] = [출고월]
-        then (if [Output_amount] = null then 0 else [Output_amount])
-        else 0, type number),
+        if [Output_amount] = null then 0 else [Output_amount], type number),
+    WithValuesCleaned = Table.RemoveColumns(WithValues, {"Output_qty", "Output_amount"}),
 
     // ========== OS name 기준 그룹화 ==========
-    // Line item 레벨 → SO_ID + OS name + Period 로 합산
+    // Line item 레벨 → SO_ID + OS name + Expected delivery date + Period 로 합산
     // 같은 OS name의 Line item들이 하나의 행으로 합쳐짐
-    OSGrouped = Table.Group(WithValues, {"SO_ID", "OS name", "Expected delivery date", "Period"}, {
+    OSGrouped = Table.Group(WithValuesCleaned, {"SO_ID", "OS name", "Expected delivery date", "Period"}, {
         {"Customer name", each List.First([Customer name]), type text},
         {"Customer PO", each List.First([Customer PO]), type text},
         {"Item name", each List.First([Item name]), type text},
