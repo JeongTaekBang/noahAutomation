@@ -1082,6 +1082,7 @@ SO_ID = SOD-0001
 | 구분 | 국내/해외 |
 | SO_ID | 주문 번호 |
 | Customer name | 고객명 |
+| Customer PO | 고객 발주번호 (대표값) |
 | Item name | 아이템명 (대표값) |
 | OS name | OneStream Item name (**그룹화 키**) |
 | AX Project number | ERP 프로젝트 번호 (그룹 내 고유값 연결) |
@@ -1107,11 +1108,11 @@ let
     SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
     SO_해외_Raw = Excel.CurrentWorkbook(){[Name="SO_해외"]}[Content],
 
-    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Customer name", "Item name", "OS name", "Line item", "Item qty", "Sales amount", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code"}),
+    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Customer name", "Customer PO", "Item name", "OS name", "Line item", "Item qty", "Sales amount", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code"}),
     SO_국내_Renamed = Table.RenameColumns(SO_국내, {{"Sales amount", "Sales amount KRW"}}),
     SO_국내_Tagged = Table.AddColumn(SO_국내_Renamed, "구분", each "국내"),
 
-    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Customer name", "Item name", "OS name", "Line item", "Item qty", "Sales amount KRW", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code"}),
+    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Customer name", "Customer PO", "Item name", "OS name", "Line item", "Item qty", "Sales amount KRW", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code"}),
     SO_해외_Tagged = Table.AddColumn(SO_해외, "구분", each "해외"),
 
     SO_Combined = Table.Combine({SO_국내_Tagged, SO_해외_Tagged}),
@@ -1201,6 +1202,7 @@ let
     // 같은 OS name의 Line item들이 하나의 행으로 합쳐짐
     OSGrouped = Table.Group(WithValues, {"SO_ID", "OS name", "Period"}, {
         {"Customer name", each List.First([Customer name]), type text},
+        {"Customer PO", each List.First([Customer PO]), type text},
         {"Item name", each List.First([Item name]), type text},
         {"구분", each List.First([구분]), type text},
         {"Sector", each List.First([Sector]), type text},
@@ -1230,6 +1232,7 @@ let
                         구분 = r[구분],
                         SO_ID = r[SO_ID],
                         #"Customer name" = r[#"Customer name"],
+                        #"Customer PO" = r[#"Customer PO"],
                         #"Item name" = r[#"Item name"],
                         #"OS name" = r[#"OS name"],
                         #"AX Project number" = r[#"AX Project number"],
@@ -1261,7 +1264,7 @@ let
 
     // ========== 정렬 + 컬럼 정리 + 타입 ==========
     Reordered = Table.ReorderColumns(ResultTable, {
-        "Period", "구분", "SO_ID", "Customer name", "Item name", "OS name",
+        "Period", "구분", "SO_ID", "Customer name", "Customer PO", "Item name", "OS name",
         "AX Project number", "Sector", "Business registration number", "Industry code",
         "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty",
         "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount"
