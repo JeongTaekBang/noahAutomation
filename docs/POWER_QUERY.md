@@ -1012,7 +1012,7 @@ in
 - AX2009 Order Book과 동일한 형식: **건별 × Period**
 - 수주잔고(Backlog) 흐름을 Period별로 추적
 - SO-DN 금액 불일치 자동 감지
-- **SO_ID + OS name 기준 그룹화** (같은 제품의 Line item 합산 → 행 수 감소)
+- **SO_ID + OS name + Expected delivery date 기준 그룹화** (같은 제품의 Line item 합산, 납기일이 다르면 구분)
 
 ### 개념
 
@@ -1053,26 +1053,29 @@ P02: Start=500만 + Input=0    - Output=480만  = Ending=20만   (SO-DN 차이)
 예: SO 수주 500만, DN 출고 480만 → Ending = 20만 (단가 조정 발생?)
 ```
 
-### OS name 기준 그룹화
+### OS name + Expected delivery date 기준 그룹화
 
 Line item 단위로 처리하면 행 수가 과도하게 많아지므로, **OS name이 같은 Line item을 합산**하여 표시합니다.
+단, **Expected delivery date가 다르면 별도 행**으로 구분합니다.
 
 ```
 SO_ID = SOD-0001
-  Line item 1: IQ3  (OS name: IQ3)   → qty 5, amount 250만
-  Line item 2: IQ3  (OS name: IQ3)   → qty 3, amount 150만
-  Line item 3: CVA  (OS name: CVA)   → qty 2, amount 100만
+  Line item 1: IQ3  (OS name: IQ3, 납기: 2/20)  → qty 5, amount 250만
+  Line item 2: IQ3  (OS name: IQ3, 납기: 2/20)  → qty 3, amount 150만
+  Line item 3: IQ3  (OS name: IQ3, 납기: 3/10)  → qty 2, amount 100만
+  Line item 4: CVA  (OS name: CVA, 납기: 2/20)  → qty 2, amount 100만
 
 → 그룹화 후:
-  SOD-0001 × IQ3: qty 8, amount 400만  (Line 1+2 합산)
-  SOD-0001 × CVA: qty 2, amount 100만  (Line 3 단독)
+  SOD-0001 × IQ3 × 2/20: qty 8, amount 400만  (Line 1+2 합산, 같은 납기)
+  SOD-0001 × IQ3 × 3/10: qty 2, amount 100만  (Line 3, 납기 다름 → 별도)
+  SOD-0001 × CVA × 2/20: qty 2, amount 100만  (Line 4 단독)
 ```
 
-- **그룹화 키**: SO_ID + OS name + Period
+- **그룹화 키**: SO_ID + OS name + Expected delivery date + Period
 - **합산 필드**: qty, amount (Input/Output 모두)
 - **대표값 필드**: Customer name, Item name, 구분, Sector 등은 첫 번째 값 사용
 - **AX Project number**: 그룹 내 고유값을 `, `로 연결 (예: "P001, P002")
-- **처리 순서**: Line item 레벨에서 Input/Output 계산 → OS name으로 그룹화 → 롤링 계산
+- **처리 순서**: Line item 레벨에서 Input/Output 계산 → OS name + 납기일로 그룹화 → 롤링 계산
 
 ### 결과 컬럼
 
@@ -1085,6 +1088,7 @@ SO_ID = SOD-0001
 | Customer PO | 고객 발주번호 (대표값) |
 | Item name | 아이템명 (대표값) |
 | OS name | OneStream Item name (**그룹화 키**) |
+| Expected delivery date | 예상 납기일 (**그룹화 키**, 같은 OS name이라도 납기일 다르면 구분) |
 | AX Project number | ERP 프로젝트 번호 (그룹 내 고유값 연결) |
 | Sector | 사업 부문 |
 | Business registration number | 사업자등록번호 |
@@ -1108,16 +1112,18 @@ let
     SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
     SO_해외_Raw = Excel.CurrentWorkbook(){[Name="SO_해외"]}[Content],
 
-    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Customer name", "Customer PO", "Item name", "OS name", "Line item", "Item qty", "Sales amount", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code"}),
+    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Customer name", "Customer PO", "Item name", "OS name", "Line item", "Item qty", "Sales amount", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code", "Expected delivery date"}),
     SO_국내_Renamed = Table.RenameColumns(SO_국내, {{"Sales amount", "Sales amount KRW"}}),
     SO_국내_Tagged = Table.AddColumn(SO_국내_Renamed, "구분", each "국내"),
 
-    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Customer name", "Customer PO", "Item name", "OS name", "Line item", "Item qty", "Sales amount KRW", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code"}),
+    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Customer name", "Customer PO", "Item name", "OS name", "Line item", "Item qty", "Sales amount KRW", "Period", "Status", "AX Project number", "Sector", "Business registration number", "Industry code", "Expected delivery date"}),
     SO_해외_Tagged = Table.AddColumn(SO_해외, "구분", each "해외"),
 
     SO_Combined = Table.Combine({SO_국내_Tagged, SO_해외_Tagged}),
+    // #N/A 등 에러 값을 null로 치환 (XLOOKUP 실패 등)
+    SO_CleanErrors = Table.ReplaceErrorValues(SO_Combined, {{"Expected delivery date", null}}),
     // Cancelled 제외, Period 비어있는 행 제외
-    SO_Filtered = Table.SelectRows(SO_Combined, each
+    SO_Filtered = Table.SelectRows(SO_CleanErrors, each
         ([Status] = null or [Status] <> "Cancelled") and
         [Period] <> null and Text.Trim(Text.From([Period])) <> ""
     ),
@@ -1200,7 +1206,7 @@ let
     // ========== OS name 기준 그룹화 ==========
     // Line item 레벨 → SO_ID + OS name + Period 로 합산
     // 같은 OS name의 Line item들이 하나의 행으로 합쳐짐
-    OSGrouped = Table.Group(WithValues, {"SO_ID", "OS name", "Period"}, {
+    OSGrouped = Table.Group(WithValues, {"SO_ID", "OS name", "Expected delivery date", "Period"}, {
         {"Customer name", each List.First([Customer name]), type text},
         {"Customer PO", each List.First([Customer PO]), type text},
         {"Item name", each List.First([Item name]), type text},
@@ -1235,6 +1241,7 @@ let
                         #"Customer PO" = r[#"Customer PO"],
                         #"Item name" = r[#"Item name"],
                         #"OS name" = r[#"OS name"],
+                        #"Expected delivery date" = r[#"Expected delivery date"],
                         #"AX Project number" = r[#"AX Project number"],
                         Sector = r[Sector],
                         #"Business registration number" = r[#"Business registration number"],
@@ -1254,7 +1261,7 @@ let
         in
             result,
 
-    Grouped = Table.Group(OSGrouped, {"SO_ID", "OS name"}, {
+    Grouped = Table.Group(OSGrouped, {"SO_ID", "OS name", "Expected delivery date"}, {
         {"Processed", each ProcessLine(_)}
     }),
 
@@ -1265,7 +1272,7 @@ let
     // ========== 정렬 + 컬럼 정리 + 타입 ==========
     Reordered = Table.ReorderColumns(ResultTable, {
         "Period", "구분", "SO_ID", "Customer name", "Customer PO", "Item name", "OS name",
-        "AX Project number", "Sector", "Business registration number", "Industry code",
+        "Expected delivery date", "AX Project number", "Sector", "Business registration number", "Industry code",
         "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty",
         "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount"
     }),
@@ -1278,6 +1285,7 @@ let
     }),
 
     Result = Table.TransformColumnTypes(FinalSorted, {
+        {"Expected delivery date", type date},
         {"Value_Start_qty", Int64.Type},
         {"Value_Input_qty", Int64.Type},
         {"Value_Output_qty", Int64.Type},
@@ -1295,18 +1303,17 @@ in
 
 ### 결과 예시
 
-| Period | 구분 | SO_ID | Customer name | OS name | Sector | Start_qty | Input_qty | Output_qty | Var_qty | Ending_qty | Start_amt | Input_amt | Output_amt | Var_amt | Ending_amt |
-|--------|------|-------|---------------|---------|--------|-----------|-----------|------------|---------|------------|-----------|-----------|------------|---------|------------|
-| 2026-02 | 국내 | SOD-0001 | 삼성전자 | IQ3 | Process | 10 | 0 | **10** | 0 | **0** | 5,000,000 | 0 | 5,000,000 | 0 | **0** |
-| 2026-02 | 국내 | SOD-0003 | 현대중공업 | NA028 | CPI | 20 | 0 | 0 | 0 | **20** | 10,000,000 | 0 | 0 | 0 | **10,000,000** |
-| 2026-02 | 해외 | SOO-0001 | ABC Corp | CVA | Water | 5 | 0 | 0 | 0 | **5** | 4,000,000 | 0 | 0 | 0 | **4,000,000** |
-| 2026-01 | 국내 | SOD-0001 | 삼성전자 | IQ3 | Process | 0 | **10** | 0 | 0 | **10** | 0 | 5,000,000 | 0 | 0 | **5,000,000** |
-| 2026-01 | 국내 | SOD-0002 | LG전자 | CVA | Water | 0 | **8** | **8** | 0 | **0** | 0 | 4,000,000 | 4,000,000 | 0 | **0** |
-| 2026-01 | 국내 | SOD-0003 | 현대중공업 | NA028 | CPI | 0 | **20** | 0 | 0 | **20** | 0 | 10,000,000 | 0 | 0 | **10,000,000** |
+| Period | 구분 | SO_ID | Customer name | OS name | Expected delivery date | Ending_qty | Ending_amt |
+|--------|------|-------|---------------|---------|----------------------|------------|------------|
+| 2026-02 | 국내 | SOD-0001 | 삼성전자 | IQ3 | 2026-02-20 | **0** | **0** |
+| 2026-02 | 국내 | SOD-0003 | 현대중공업 | NA028 | 2026-03-10 | **20** | **10,000,000** |
+| 2026-02 | 해외 | SOO-0001 | ABC Corp | CVA | 2026-03-15 | **5** | **4,000,000** |
+| 2026-01 | 국내 | SOD-0002 | LG전자 | CVA | 2026-01-25 | **0** | **0** |
+| 2026-01 | 국내 | SOD-0002 | LG전자 | CVA | 2026-02-10 | **3** | **1,500,000** |
 
 ```
 SOD-0001: 1월 수주(10) → 2월 출고(10) → Ending=0 (소진)
-SOD-0002: Line item 2개 (CVA qty 5 + CVA qty 3) → OS name 그룹화 → qty 8, 1월 출고 완료
+SOD-0002: 같은 CVA지만 납기일 다름 → 1/25분은 출고 완료, 2/10분은 Backlog
 SOD-0003: 1월 수주(20) → 2월에도 미출고 → Ending=20 (Backlog)
 ```
 

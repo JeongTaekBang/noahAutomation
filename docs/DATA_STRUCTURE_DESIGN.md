@@ -152,32 +152,44 @@ SO_국내 표에 새 SO_ID 추가 시:
 
 **역할**: 고객으로부터 받은 발주 정보
 
-**컬럼 목록**:
+**컬럼 목록 (공통)**:
 | 컬럼명 | 설명 |
 |--------|------|
-| SO_ID | 키 (SO-2026-0001 형식) |
+| SO_ID | 키 (SOD-2026-0001 / SOO-2026-0001 형식) |
 | Customer PO | 고객 발주번호 |
 | PO receipt date | 발주 접수일 |
-| Period | 기간 |
-| Customer name | 고객명 |
+| Period | 기간 (yyyy-MM) |
+| AX Project number | AX 프로젝트번호 |
+| CS담당자 | CS 담당자 |
 | Business registration number | 사업자등록번호 |
+| Customer name | 고객명 |
 | Order type | 주문 유형 |
 | Opportunity | 기회 |
 | Sector | 섹터 |
 | Industry code | 산업코드 |
-| AX Project number | AX 프로젝트번호 |
 | AX Item number | AX 품목번호 |
 | Item name | 품목명 |
-| **Line item** | 아이템 순번 (같은 SO_ID 내 1, 2, 3...) |
-| Model | 모델 |
+| OS name | OneStream Item name |
 | Currency | 통화 |
+| **Line item** | 아이템 순번 (같은 SO_ID 내 1, 2, 3...) |
 | Item qty | 수량 |
 | Sales Unit Price | 판매 단가 |
 | Sales amount | 판매 금액 |
 | Incoterms | 인코텀즈 |
-| Requested delivery date | 요청 납기 |
+| Requested delivery date | 요청 납기 (고객 희망일) |
+| EXW NOAH | EXW 출고 기준일 |
+| Expected delivery date | 예상 납기 (실제 예상 도착일) |
+| Status | 상태 (Cancelled 등) |
 | 납품 주소 | 배송지 |
-| 영업담당 Person | 담당자 |
+| 영업 담당 | 영업 담당자 |
+| Remarks | 비고 |
+
+**해외 전용 컬럼**:
+| 컬럼명 | 설명 |
+|--------|------|
+| Model number | 모델 번호 |
+| Sales amount KRW | 판매 금액 (원화 환산) |
+| Shipping method | 운송 방법 |
 
 **SO_ID 규칙**:
 - 형식: `SOD-YYYY-NNNN` (국내), `SOO-YYYY-NNNN` (해외)
