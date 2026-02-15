@@ -1336,7 +1336,7 @@ SOD-0003: 1월 수주(20) → 2월에도 미출고 → Ending=20 (Backlog)
 |------|-------------------|-----------------|
 | 마감 | Period 마감 → 잠금 | 없음 (매번 재계산) |
 | Start 이월 | DB에 저장된 값 | Power Query가 계산한 값 |
-| Variance | 자동 추적 (금액 변경, 취소) | 현재 0 (스냅샷 없어 변경 추적 불가, 향후 확장용) |
+| Variance | 자동 추적 (금액 변경, 취소) | 불필요 (조정분을 새 Line item으로 추가 → Input에서 넷팅) |
 | 스냅샷 | DB에 보존 | 없음 (현재 데이터 기준) |
 | 그룹화 | Project number 기준 | SO_ID + OS name 기준 (Line item 합산) |
 | Input 기준 | SO 등록일 | SO의 Period 컬럼 (yyyy-MM) |
@@ -1352,14 +1352,35 @@ SOD-0003: 1월 수주(20) → 2월에도 미출고 → Ending=20 (Backlog)
 - SO의 **Industry code 컬럼**: 산업 코드
 - DN의 **출고일/선적일**: 날짜 형식 → 쿼리에서 yyyy-MM으로 변환
 
+### 수량/금액 조정 방법 (분개 방식)
+
+원래 SO 행은 수정하지 않고, **조정분을 새 Line item으로 추가**하여 넷팅합니다.
+
+```
+P01: SOD-0001, IQ3, Line item 1, qty=10, amount=500만  (원래 수주)
+P02: SOD-0001, IQ3, Line item 2, qty=-2, amount=-100만  (조정분)
+
+→ Order_Book 롤링:
+  P01: Start=0,  Input=+10, Ending=10
+  P02: Start=10, Input=-2,  Ending=8    ← 넷팅
+  P03: Start=8,  Output=8,  Ending=0    ← DN 출고, 소진
+```
+
+- **원래 행 안 건드림** → SO raw에 이력 보존
+- **새 Line item** → 언제, 얼마나 조정했는지 추적 가능
+- OS name 그룹화가 자동으로 넷팅 처리
+- Variance 컬럼 불필요 (스냅샷 없이도 조정 이력 관리 가능)
+- Variance 컬럼은 M 코드에 구조만 유지 (현재 0, 향후 스냅샷 도입 시 활용 가능)
+
 ### 한계
 
 | 한계 | 설명 | 대응 |
 |------|------|------|
-| 마감 잠금 없음 | 과거 SO/DN 수정 시 소급 변경 | 과도기적 사용이므로 허용 |
-| Variance 미추적 | 취소/금액 변경 이력 없음 | Cancelled는 Input에서 제외됨 |
-| 스냅샷 없음 | 과거 시점 재현 불가 | 필요 시 월말 PDF 저장으로 대체 |
+| 마감 잠금 없음 | 과거 SO/DN 수정 시 소급 변경 | 원래 행 수정 금지, 조정은 새 Line item으로 추가 |
+| 스냅샷 없음 | 과거 시점 재현 불가 | SO raw 데이터에 원본+조정 이력이 남아 추적 가능 |
 | Period 갭 | 활동 없는 월은 행 생성 안됨 | 전월 Ending이 다음 활동월 Start로 정확히 이월됨 |
+
+> **향후 확장**: ERP 통합 등으로 스냅샷 기반 Variance 추적이 필요해지면, M 코드의 `Value_Variance_qty/amount` 컬럼(현재 0)에 스냅샷 대비 차이를 계산하는 로직을 추가할 수 있음. 현재 분개 방식과 병행 가능.
 
 ---
 
