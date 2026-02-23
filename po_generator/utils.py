@@ -647,6 +647,7 @@ def find_dn_export_data(
 _spec_option_fields_cache: dict[str, tuple[list[str], list[str]]] = {}
 
 
+
 def get_spec_option_fields(
     sheet_type: str = '국내',
     force_reload: bool = False,
