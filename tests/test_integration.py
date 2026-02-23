@@ -22,7 +22,6 @@ from po_generator.history import (
 )
 from po_generator.excel_helpers import (
     find_item_start_row_openpyxl,
-    find_item_start_row,
     PO_HEADER_LABELS,
     TS_HEADER_LABELS,
     DEFAULT_HEADER_LABELS,
@@ -194,17 +193,17 @@ class TestFindItemStartRowConsistency:
 
         wb_read.close()
 
-    def test_auto_detect_openpyxl(self, tmp_path: Path):
-        """find_item_start_row가 openpyxl을 자동 감지"""
+    def test_openpyxl_with_multiple_items(self, tmp_path: Path):
+        """여러 아이템이 있는 PO에서 아이템 시작 행 찾기"""
         test_file = tmp_path / 'test.xlsx'
-        create_mock_po_file_with_items(test_file, 'ND-0001', 'Test', item_count=1)
+        create_mock_po_file_with_items(test_file, 'ND-0001', 'Test', item_count=5)
 
         from openpyxl import load_workbook
         wb = load_workbook(test_file)
         ws = wb['Purchase Order']
 
-        # 자동 감지 함수 사용
-        result = find_item_start_row(ws, PO_HEADER_LABELS)
+        # 아이템 수에 관계없이 헤더 다음 행(13)을 반환해야 함
+        result = find_item_start_row_openpyxl(ws, PO_HEADER_LABELS)
         assert result == 13
 
         wb.close()

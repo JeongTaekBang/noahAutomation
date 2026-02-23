@@ -11,7 +11,6 @@ import logging
 from typing import Any
 
 import pandas as pd
-from openpyxl.worksheet.worksheet import Worksheet
 
 from po_generator.config import (
     NOAH_SO_PO_DN_FILE,
@@ -22,46 +21,20 @@ from po_generator.config import (
     PMT_DOMESTIC_SHEET,
     SO_EXPORT_SHEET,
     PO_EXPORT_SHEET,
+    DN_EXPORT_SHEET,
+    CUSTOMER_EXPORT_SHEET,
     COLUMN_ALIASES,
-)
-from po_generator.excel_helpers import (
-    find_item_start_row_openpyxl,
-    DEFAULT_HEADER_LABELS,
+    META_COLUMNS,
+    SPEC_START_COLUMN,
+    OPTION_START_COLUMN,
+    SPEC_FIELDS,
+    OPTION_FIELDS,
 )
 
 logger = logging.getLogger(__name__)
 
 # Excel 수식 인젝션 방지용 문자
 FORMULA_ESCAPE_CHARS: tuple[str, ...] = ('=', '+', '-', '@')
-
-
-def find_item_start_row(
-    ws: Worksheet,
-    search_labels: tuple[str, ...] = DEFAULT_HEADER_LABELS,
-    max_search_rows: int = 30,
-    fallback_row: int = 13,
-) -> int:
-    """템플릿에서 아이템 시작 행을 동적으로 찾기
-
-    excel_helpers.find_item_start_row_openpyxl의 래퍼입니다.
-    헤더 레이블을 찾아서 그 다음 행이 아이템 시작 위치입니다.
-    Purchase Order와 거래명세표 모두에서 사용 가능합니다.
-
-    Args:
-        ws: openpyxl Worksheet 객체
-        search_labels: 검색할 헤더 레이블 (기본: 아이템 번호 관련)
-        max_search_rows: 최대 검색 행 수 (기본: 30)
-        fallback_row: 헤더를 찾지 못했을 때 기본값 (기본: 13)
-
-    Returns:
-        아이템 시작 행 번호
-    """
-    return find_item_start_row_openpyxl(
-        ws,
-        search_labels=search_labels,
-        max_search_rows=max_search_rows,
-        fallback_row=fallback_row,
-    )
 
 
 def escape_excel_formula(value: Any) -> Any:
@@ -242,17 +215,16 @@ def load_noah_po_lists() -> pd.DataFrame:
     # 새 파일 우선 사용
     if NOAH_SO_PO_DN_FILE.exists():
         logger.info(f"데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
-        xl = pd.ExcelFile(NOAH_SO_PO_DN_FILE)
+        with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+            # 국내 데이터 로드 및 병합
+            df_domestic = _load_and_merge_sheets(
+                xl, SO_DOMESTIC_SHEET, PO_DOMESTIC_SHEET, '국내'
+            )
 
-        # 국내 데이터 로드 및 병합
-        df_domestic = _load_and_merge_sheets(
-            xl, SO_DOMESTIC_SHEET, PO_DOMESTIC_SHEET, '국내'
-        )
-
-        # 해외 데이터 로드 및 병합
-        df_export = _load_and_merge_sheets(
-            xl, SO_EXPORT_SHEET, PO_EXPORT_SHEET, '해외'
-        )
+            # 해외 데이터 로드 및 병합
+            df_export = _load_and_merge_sheets(
+                xl, SO_EXPORT_SHEET, PO_EXPORT_SHEET, '해외'
+            )
 
         # concat: pandas가 자동으로 없는 컬럼에 NaN 채움
         dfs = [df for df in [df_domestic, df_export] if len(df) > 0]
@@ -264,10 +236,9 @@ def load_noah_po_lists() -> pd.DataFrame:
     # 기존 파일로 폴백
     if NOAH_PO_LISTS_FILE.exists():
         logger.info(f"데이터 로드 (Legacy): {NOAH_PO_LISTS_FILE.name}")
-        xl = pd.ExcelFile(NOAH_PO_LISTS_FILE)
-
-        df_domestic = pd.read_excel(xl, sheet_name=0)
-        df_export = pd.read_excel(xl, sheet_name=1)
+        with pd.ExcelFile(NOAH_PO_LISTS_FILE) as xl:
+            df_domestic = pd.read_excel(xl, sheet_name=0)
+            df_export = pd.read_excel(xl, sheet_name=1)
 
         df_domestic['_시트구분'] = '국내'
         df_export['_시트구분'] = '해외'
@@ -282,6 +253,47 @@ def load_noah_po_lists() -> pd.DataFrame:
     raise FileNotFoundError(
         f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE} 또는 {NOAH_PO_LISTS_FILE}"
     )
+
+
+def _find_data_by_id(
+    df: pd.DataFrame,
+    column_key: str,
+    id_value: str,
+    id_label: str,
+    allow_multiple: bool = True,
+) -> pd.Series | pd.DataFrame | None:
+    """ID로 데이터 검색 (공통 로직)
+
+    Args:
+        df: 검색 대상 DataFrame
+        column_key: COLUMN_ALIASES의 키 (예: 'order_no', 'dn_id')
+        id_value: 검색할 ID 값
+        id_label: 로그 메시지용 라벨 (예: '주문번호', 'DN_ID')
+        allow_multiple: True면 다중 아이템 시 DataFrame 반환
+
+    Returns:
+        - 단일 아이템: pd.Series
+        - 다중 아이템 (allow_multiple=True): pd.DataFrame
+        - 없음: None
+    """
+    col = resolve_column(df.columns, column_key)
+    if col is None:
+        logger.error(f"{id_label} 컬럼을 찾을 수 없습니다.")
+        return None
+
+    mask = df[col] == id_value
+    match_count = mask.sum()
+
+    if match_count == 0:
+        logger.warning(f"{id_label} '{id_value}'를 찾을 수 없습니다.")
+        return None
+
+    if allow_multiple and match_count > 1:
+        logger.info(f"{id_label} '{id_value}': {match_count}개 아이템 발견 (다중 아이템)")
+        return df[mask]
+
+    logger.info(f"{id_label} '{id_value}': {'발견' if not allow_multiple else '단일 아이템'}")
+    return df[mask].iloc[0]
 
 
 def find_order_data(
@@ -299,25 +311,7 @@ def find_order_data(
         - 다중 아이템: pd.DataFrame
         - 없음: None
     """
-    # 컬럼 별칭으로 실제 컬럼명 찾기
-    order_no_col = resolve_column(df.columns, 'order_no')
-    if order_no_col is None:
-        logger.error("주문번호 컬럼을 찾을 수 없습니다.")
-        return None
-
-    mask = df[order_no_col] == order_no
-    match_count = mask.sum()
-
-    if match_count == 0:
-        logger.warning(f"주문번호 '{order_no}'를 찾을 수 없습니다.")
-        return None
-
-    if match_count > 1:
-        logger.info(f"주문번호 '{order_no}': {match_count}개 아이템 발견 (다중 아이템)")
-        return df[mask]  # DataFrame
-
-    logger.info(f"주문번호 '{order_no}': 단일 아이템")
-    return df[mask].iloc[0]  # Series
+    return _find_data_by_id(df, 'order_no', order_no, '주문번호')
 
 
 def format_currency(value: float, currency: str = 'KRW') -> str:
@@ -353,16 +347,15 @@ def load_dn_data() -> pd.DataFrame:
         raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
 
     logger.info(f"DN 데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
-    xl = pd.ExcelFile(NOAH_SO_PO_DN_FILE)
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        # DN_국내 로드 (DN 고유 정보만: DN_ID, SO_ID, 납품일 등)
+        df_dn = pd.read_excel(xl, sheet_name=DN_DOMESTIC_SHEET)
+        # SO_국내에서 품목/금액/고객 정보 가져오기
+        df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
 
-    # DN_국내 로드 (DN 고유 정보만: DN_ID, SO_ID, 납품일 등)
-    df_dn = pd.read_excel(xl, sheet_name=DN_DOMESTIC_SHEET)
     df_dn = df_dn[df_dn['DN_ID'].notna()].copy()
     # DN_ID 중복 제거 (DN_ID는 고유해야 함, SO_ID만 참조용)
     df_dn = df_dn.drop_duplicates(subset='DN_ID', keep='first')
-
-    # SO_국내에서 품목/금액/고객 정보 가져오기
-    df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
     so_cols = [
         'SO_ID',
         'Customer name',        # 고객명
@@ -402,24 +395,7 @@ def find_dn_data(
         - 다중 아이템: pd.DataFrame
         - 없음: None
     """
-    dn_col = resolve_column(df.columns, 'dn_id')
-    if dn_col is None:
-        logger.error("DN_ID 컬럼을 찾을 수 없습니다.")
-        return None
-
-    mask = df[dn_col] == dn_id
-    match_count = mask.sum()
-
-    if match_count == 0:
-        logger.warning(f"DN_ID '{dn_id}'를 찾을 수 없습니다.")
-        return None
-
-    if match_count > 1:
-        logger.info(f"DN_ID '{dn_id}': {match_count}개 아이템 발견 (다중 아이템)")
-        return df[mask]
-
-    logger.info(f"DN_ID '{dn_id}': 단일 아이템")
-    return df[mask].iloc[0]
+    return _find_data_by_id(df, 'dn_id', dn_id, 'DN_ID')
 
 
 # === PMT (입금/선수금) 데이터 로드 ===
@@ -439,16 +415,15 @@ def load_pmt_data() -> pd.DataFrame:
         raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
 
     logger.info(f"PMT 데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
-    xl = pd.ExcelFile(NOAH_SO_PO_DN_FILE)
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        # PMT_국내 로드
+        df_pmt = pd.read_excel(xl, sheet_name=PMT_DOMESTIC_SHEET)
+        # SO_국내에서 거래명세표에 필요한 모든 정보 가져오기
+        df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
 
-    # PMT_국내 로드
-    df_pmt = pd.read_excel(xl, sheet_name=PMT_DOMESTIC_SHEET)
     df_pmt = df_pmt[df_pmt['선수금_ID'].notna()].copy()
     # 선수금_ID 중복 제거 (선수금_ID는 고유해야 함)
     df_pmt = df_pmt.drop_duplicates(subset='선수금_ID', keep='first')
-
-    # SO_국내에서 거래명세표에 필요한 모든 정보 가져오기
-    df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
     so_cols = [
         'SO_ID',
         'Customer name',        # 고객명
@@ -487,20 +462,7 @@ def find_pmt_data(
         - pd.Series (항상 단일 건)
         - 없음: None
     """
-    adv_col = resolve_column(df.columns, 'advance_id')
-    if adv_col is None:
-        logger.error("선수금_ID 컬럼을 찾을 수 없습니다.")
-        return None
-
-    mask = df[adv_col] == advance_id
-    match_count = mask.sum()
-
-    if match_count == 0:
-        logger.warning(f"선수금_ID '{advance_id}'를 찾을 수 없습니다.")
-        return None
-
-    logger.info(f"선수금_ID '{advance_id}': 발견")
-    return df[mask].iloc[0]
+    return _find_data_by_id(df, 'advance_id', advance_id, '선수금_ID', allow_multiple=False)
 
 
 # === SO (Sales Order) 데이터 로드 (선수금용) ===
@@ -521,10 +483,12 @@ def load_so_for_advance(advance_id: str) -> tuple[pd.Series, pd.DataFrame] | Non
     if not NOAH_SO_PO_DN_FILE.exists():
         raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
 
-    xl = pd.ExcelFile(NOAH_SO_PO_DN_FILE)
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        # 1. PMT_국내에서 선수금_ID로 SO_ID 찾기
+        df_pmt = pd.read_excel(xl, sheet_name=PMT_DOMESTIC_SHEET)
+        # 2. SO_국내 로드
+        df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
 
-    # 1. PMT_국내에서 선수금_ID로 SO_ID 찾기
-    df_pmt = pd.read_excel(xl, sheet_name=PMT_DOMESTIC_SHEET)
     df_pmt = df_pmt[df_pmt['선수금_ID'].notna()].copy()
 
     pmt_row = df_pmt[df_pmt['선수금_ID'] == advance_id]
@@ -536,8 +500,7 @@ def load_so_for_advance(advance_id: str) -> tuple[pd.Series, pd.DataFrame] | Non
     so_id = pmt_data['SO_ID']
     logger.info(f"선수금_ID '{advance_id}' -> SO_ID: {so_id}")
 
-    # 2. SO_국내에서 해당 SO_ID의 모든 아이템 가져오기
-    df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
+    # SO_국내에서 해당 SO_ID의 모든 아이템 가져오기
     so_items = df_so[df_so['SO_ID'] == so_id].copy()
 
     if len(so_items) == 0:
@@ -568,10 +531,14 @@ def load_so_export_data() -> pd.DataFrame:
         raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
 
     logger.info(f"SO 해외 데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
-    xl = pd.ExcelFile(NOAH_SO_PO_DN_FILE)
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        # SO_해외 로드 (Model 컬럼을 문자열로 읽어 앞 0 보존)
+        df_so = pd.read_excel(
+            xl,
+            sheet_name=SO_EXPORT_SHEET,
+            dtype={'Model': str, 'Model number': str}
+        )
 
-    # SO_해외 로드
-    df_so = pd.read_excel(xl, sheet_name=SO_EXPORT_SHEET)
     df_so = df_so[df_so['SO_ID'].notna()].copy()
     df_so['_시트구분'] = '해외'
 
@@ -594,21 +561,162 @@ def find_so_export_data(
         - 다중 아이템: pd.DataFrame
         - 없음: None
     """
-    so_col = resolve_column(df.columns, 'so_id')
-    if so_col is None:
-        logger.error("SO_ID 컬럼을 찾을 수 없습니다.")
-        return None
+    return _find_data_by_id(df, 'so_id', so_id, 'SO_ID')
 
-    mask = df[so_col] == so_id
-    match_count = mask.sum()
 
-    if match_count == 0:
-        logger.warning(f"SO_ID '{so_id}'를 찾을 수 없습니다.")
-        return None
+# === DN 해외 데이터 로드 (Final Invoice용) ===
 
-    if match_count > 1:
-        logger.info(f"SO_ID '{so_id}': {match_count}개 아이템 발견 (다중 아이템)")
-        return df[mask]
+def load_dn_export_data() -> pd.DataFrame:
+    """DN_해외 데이터 로드 (SO_해외 + Customer_해외 JOIN)
 
-    logger.info(f"SO_ID '{so_id}': 단일 아이템")
-    return df[mask].iloc[0]
+    3시트 JOIN: DN_해외 → SO_해외(SO_ID) → Customer_해외(고객코드)
+    Bill to 1/2/3, Payment terms 컬럼이 추가됩니다.
+
+    Returns:
+        DN 해외 데이터 DataFrame (고객 청구 주소 포함)
+
+    Raises:
+        FileNotFoundError: 소스 파일이 없는 경우
+    """
+    if not NOAH_SO_PO_DN_FILE.exists():
+        raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
+
+    logger.info(f"DN 해외 데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        # 1. DN_해외 로드
+        df_dn = pd.read_excel(xl, sheet_name=DN_EXPORT_SHEET)
+        # 2. SO_해외 로드 (고객코드 추출용)
+        df_so = pd.read_excel(xl, sheet_name=SO_EXPORT_SHEET)
+        # 3. Customer_해외 로드 (Bill to, Payment terms)
+        df_cust = pd.read_excel(xl, sheet_name=CUSTOMER_EXPORT_SHEET)
+
+    # DN_ID가 있는 행만 사용
+    df_dn = df_dn[df_dn['DN_ID'].notna()].copy()
+
+    # SO_해외에서 SO_ID별 고객코드 + Customer PO + PO receipt date 추출
+    so_code_cols = ['SO_ID', 'Business registration number', 'Customer PO', 'PO receipt date']
+    so_code_cols = [c for c in so_code_cols if c in df_so.columns]
+    df_so_codes = df_so[so_code_cols].drop_duplicates(subset='SO_ID', keep='first')
+
+    # DN_해외 + SO_해외 JOIN (SO_ID) → 고객코드 획득
+    df_dn = df_dn.merge(df_so_codes, on='SO_ID', how='left', suffixes=('', '_SO'))
+
+    # Customer_해외에서 필요한 컬럼만 추출
+    cust_cols = ['C-code by 해외', 'Bill to 1', 'Bill to 2', 'Bill to 3', 'Payment terms']
+    cust_cols = [c for c in cust_cols if c in df_cust.columns]
+    df_cust_subset = df_cust[cust_cols].copy()
+
+    # DN_해외+SO → Customer_해외 JOIN (고객코드)
+    if 'Business registration number' in df_dn.columns and 'C-code by 해외' in df_cust_subset.columns:
+        df_dn = df_dn.merge(
+            df_cust_subset,
+            left_on='Business registration number',
+            right_on='C-code by 해외',
+            how='left',
+            suffixes=('', '_CUST'),
+        )
+
+    df_dn['_시트구분'] = '해외'
+    df_dn['_문서유형'] = 'FI'
+
+    logger.info(f"DN 해외 데이터 {len(df_dn)}건 로드 완료 (Customer JOIN 포함)")
+    return df_dn
+
+
+def find_dn_export_data(
+    df: pd.DataFrame,
+    dn_id: str
+) -> pd.Series | pd.DataFrame | None:
+    """DN_ID로 해외 DN 데이터 검색
+
+    Args:
+        df: DN 해외 데이터
+        dn_id: 검색할 DN_ID (예: DNO-2026-0001)
+
+    Returns:
+        - 단일 아이템: pd.Series
+        - 다중 아이템: pd.DataFrame
+        - 없음: None
+    """
+    return _find_data_by_id(df, 'dn_id', dn_id, 'DN_ID (해외)')
+
+
+# === 동적 사양/옵션 필드 추출 ===
+
+# 캐시: 시트별 필드 목록 저장
+_spec_option_fields_cache: dict[str, tuple[list[str], list[str]]] = {}
+
+
+def get_spec_option_fields(
+    sheet_type: str = '국내',
+    force_reload: bool = False,
+) -> tuple[list[str], list[str]]:
+    """PO 시트에서 동적으로 사양/옵션 필드 추출
+
+    META_COLUMNS에 정의된 메타 컬럼을 제외한 나머지를
+    SPEC_START_COLUMN ~ Status 전까지 → SPEC_FIELDS
+    OPTION_START_COLUMN ~ 끝까지 → OPTION_FIELDS
+    로 분류합니다.
+
+    Args:
+        sheet_type: '국내' 또는 '해외'
+        force_reload: True이면 캐시 무시하고 다시 로드
+
+    Returns:
+        (spec_fields, option_fields) 튜플
+    """
+    # 캐시 확인
+    if not force_reload and sheet_type in _spec_option_fields_cache:
+        return _spec_option_fields_cache[sheet_type]
+
+    # 시트명 결정
+    po_sheet = PO_DOMESTIC_SHEET if sheet_type == '국내' else PO_EXPORT_SHEET
+
+    try:
+        if not NOAH_SO_PO_DN_FILE.exists():
+            logger.warning(f"데이터 파일 없음, 기본 필드 사용: {NOAH_SO_PO_DN_FILE}")
+            return list(SPEC_FIELDS), list(OPTION_FIELDS)
+
+        # PO 시트 컬럼 목록 가져오기
+        with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+            df = pd.read_excel(xl, sheet_name=po_sheet, nrows=0)  # 헤더만 읽기
+            columns = list(df.columns)
+
+        # 마커 컬럼 위치 찾기
+        spec_start_idx = None
+        option_start_idx = None
+
+        for idx, col in enumerate(columns):
+            if col == SPEC_START_COLUMN:
+                spec_start_idx = idx
+            elif col == OPTION_START_COLUMN:
+                option_start_idx = idx
+
+        if spec_start_idx is None or option_start_idx is None:
+            logger.warning("마커 컬럼을 찾을 수 없음, 기본 필드 사용")
+            return list(SPEC_FIELDS), list(OPTION_FIELDS)
+
+        # SPEC: spec_start_idx ~ option_start_idx 전까지 (META 제외)
+        # OPTION: option_start_idx ~ 끝까지 (META 제외)
+        spec_fields = []
+        option_fields = []
+
+        for idx, col in enumerate(columns):
+            if col in META_COLUMNS:
+                continue
+
+            if spec_start_idx <= idx < option_start_idx:
+                spec_fields.append(col)
+            elif idx >= option_start_idx:
+                option_fields.append(col)
+
+        logger.info(f"동적 필드 추출 완료 ({sheet_type}): SPEC {len(spec_fields)}개, OPTION {len(option_fields)}개")
+
+        # 캐시 저장
+        _spec_option_fields_cache[sheet_type] = (spec_fields, option_fields)
+
+        return spec_fields, option_fields
+
+    except Exception as e:
+        logger.warning(f"동적 필드 추출 실패: {e}, 기본 필드 사용")
+        return list(SPEC_FIELDS), list(OPTION_FIELDS)

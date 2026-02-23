@@ -1,11 +1,11 @@
 """
-Proforma Invoice 생성 모듈 (xlwings 기반)
-==========================================
+Final Invoice 생성 모듈 (xlwings 기반)
+=======================================
 
-xlwings를 사용하여 템플릿 기반으로 Proforma Invoice를 생성합니다.
+xlwings를 사용하여 템플릿 기반으로 대금 청구용 Invoice를 생성합니다.
 이미지, 서식 등이 완벽하게 보존됩니다.
 
-SO_해외 데이터를 사용합니다.
+DN_해외 + Customer_해외 데이터를 사용합니다.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import xlwings as xw
 
-from po_generator.config import PI_TEMPLATE_FILE
+from po_generator.config import FI_TEMPLATE_FILE
 from po_generator.utils import get_value
 from po_generator.excel_helpers import (
     XlConstants,
@@ -55,46 +55,35 @@ def _to_text(value) -> str:
     return str(value)
 
 
-# === 셀 매핑 (Commercial Invoice 기준 - Proforma Invoice 동일) ===
+# === 셀 매핑 (Final Invoice) ===
 # Header
-CELL_CONSIGNED_TO = 'A9'        # 수취인 주소
-CELL_CONSIGNED_COUNTRY = 'A10'  # 수취인 국가
-CELL_CONSIGNED_TEL = 'C10'      # 수취인 전화번호
-CELL_CONSIGNED_FAX = 'E10'      # 수취인 팩스번호
-CELL_VESSEL = 'A12'             # 선박명/항공편
-CELL_FROM = 'B13'               # 출발지
-CELL_DESTINATION = 'B14'        # 도착 국가
-CELL_DEPARTS = 'D15'            # 출발 예정일
 CELL_INVOICE_NO = 'G4'          # Invoice No
-CELL_LC_NO = 'G5'               # L/C No
-CELL_INVOICE_DATE = 'I4'        # Invoice 발행일
-CELL_LC_DATE = 'I5'             # L/C 발행일
-CELL_HS_CODE = 'I11'            # HS CODE
-CELL_PO_NO = 'G15'              # Customer PO No
-CELL_PO_DATE = 'I15'            # Customer PO Date
-CELL_CUSTOMER_PAGE2 = 'A53'     # 2페이지 헤더용 Customer name
+CELL_INVOICE_DATE = 'I4'        # Invoice Date (출고일)
+CELL_BILL_TO_1 = 'A9'           # Bill to 주소 1줄
+CELL_BILL_TO_2 = 'A10'          # Bill to 주소 2줄
+CELL_BILL_TO_3 = 'A11'          # Bill to 주소 3줄
+CELL_PAYMENT_TERMS = 'G8'       # Payment Terms 값 (G8:G9 병합)
+CELL_DUE_DATE = 'I8'            # Due date 값 (I8:I9 병합)
+CELL_PO_NO = 'G10'              # Customer PO No (G10:G11 병합)
+CELL_PO_DATE = 'I10'            # Customer PO Date (I10:I11 병합)
 
-# 아이템 시작 행
-ITEM_START_ROW = 18
+# 아이템 시작 행 (헤더가 Row 13, 데이터는 Row 14부터)
+ITEM_START_ROW = 14
 
-# 아이템 열
+# 아이템 열 (PI와 동일)
 COL_ITEM_NAME = 'A'     # 품목명
 COL_QTY = 'E'           # 수량
 COL_UNIT_PRICE = 'G'    # 단가
 COL_AMOUNT = 'I'        # 금액 (수량 * 단가)
 
-# Incoterms / Currency 관련 셀
-CELL_INCOTERMS = 'G17'          # Incoterms (단가 헤더 옆)
-CELL_CURRENCY_TOTAL = 'H26'     # 합계 옆 통화 (템플릿 기준, 동적으로 조정됨)
 
-
-def create_pi_xlwings(
+def create_fi_xlwings(
     template_path: Path,
     output_path: Path,
     order_data: pd.Series,
     items_df: pd.DataFrame | None = None,
 ) -> None:
-    """xlwings로 Proforma Invoice 생성
+    """xlwings로 Final Invoice 생성
 
     Args:
         template_path: 템플릿 파일 경로
@@ -103,11 +92,7 @@ def create_pi_xlwings(
         items_df: 다중 아이템인 경우 전체 아이템 DataFrame
     """
     # 템플릿 준비 (임시 폴더로 복사)
-    temp_template, temp_output = prepare_template(template_path, "pi")
-
-    # 날짜
-    today = datetime.now()
-    today_str = today.strftime("%Y-%m-%d")
+    temp_template, temp_output = prepare_template(template_path, "fi")
 
     try:
         # xlwings App 생명주기 관리
@@ -117,14 +102,14 @@ def create_pi_xlwings(
             ws = wb.sheets[0]
 
             # 1. 헤더 정보 채우기
-            _fill_header(ws, order_data, today_str)
+            _fill_header(ws, order_data)
 
             # 2. 아이템 데이터 채우기
             inserted_rows = _fill_items(ws, order_data, items_df)
 
             # 임시 위치에 저장
             wb.save(str(temp_output))
-            logger.info(f"Proforma Invoice 생성 완료 (임시): {temp_output}")
+            logger.info(f"Final Invoice 생성 완료 (임시): {temp_output}")
 
     finally:
         # 임시 템플릿 삭제
@@ -132,69 +117,60 @@ def create_pi_xlwings(
 
     # 최종 출력 경로로 이동
     shutil.move(str(temp_output), str(output_path))
-    logger.info(f"Proforma Invoice 저장 완료: {output_path}")
+    logger.info(f"Final Invoice 저장 완료: {output_path}")
 
 
-def _fill_header(ws: xw.Sheet, order_data: pd.Series, today_str: str) -> None:
+def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
     """헤더 정보 채우기
 
     Args:
         ws: xlwings Sheet 객체
         order_data: 주문 데이터
-        today_str: 오늘 날짜 문자열
     """
-    # Invoice No (so_id 키 사용)
-    so_id = get_value(order_data, 'so_id', '')
-    ws.range(CELL_INVOICE_NO).value = so_id
+    # Invoice No (DN_ID 사용)
+    dn_id = get_value(order_data, 'dn_id', '')
+    ws.range(CELL_INVOICE_NO).value = dn_id
 
-    # Invoice Date
-    ws.range(CELL_INVOICE_DATE).value = today_str
+    # Invoice Date (출고일)
+    dispatch_date = get_value(order_data, 'dispatch_date', '')
+    if dispatch_date and pd.notna(dispatch_date):
+        if isinstance(dispatch_date, datetime):
+            ws.range(CELL_INVOICE_DATE).value = dispatch_date.strftime("%Y-%m-%d")
+        else:
+            ws.range(CELL_INVOICE_DATE).value = str(dispatch_date)
+    else:
+        # 출고일이 없으면 오늘 날짜
+        ws.range(CELL_INVOICE_DATE).value = datetime.now().strftime("%Y-%m-%d")
 
-    # Customer 정보 (내부 키 사용)
-    customer_name = get_value(order_data, 'customer_name', '')
-    customer_address = get_value(order_data, 'customer_address', '')
-    customer_country = get_value(order_data, 'customer_country', '')
-    customer_tel = get_value(order_data, 'customer_tel', '')
-    customer_fax = get_value(order_data, 'customer_fax', '')
+    # Bill to (Customer_해외에서 JOIN된 데이터)
+    bill_to_1 = get_value(order_data, 'bill_to_1', '')
+    bill_to_2 = get_value(order_data, 'bill_to_2', '')
+    bill_to_3 = get_value(order_data, 'bill_to_3', '')
+    ws.range(CELL_BILL_TO_1).value = bill_to_1
+    ws.range(CELL_BILL_TO_2).value = bill_to_2
+    ws.range(CELL_BILL_TO_3).value = bill_to_3
 
-    # Consigned to (고객명 + 주소)
-    consigned_to = f"{customer_name}\n{customer_address}" if customer_address else customer_name
-    ws.range(CELL_CONSIGNED_TO).value = consigned_to
-    ws.range(CELL_CONSIGNED_COUNTRY).value = customer_country
-    ws.range(CELL_CONSIGNED_TEL).value = customer_tel
-    ws.range(CELL_CONSIGNED_FAX).value = customer_fax
+    # Payment Terms (Customer_해외에서 가져온 기본값)
+    payment_terms = get_value(order_data, 'payment_terms', '')
+    if payment_terms:
+        ws.range(CELL_PAYMENT_TERMS).value = payment_terms
 
-    # 운송 정보
-    ws.range(CELL_FROM).value = "INCHEON, KOREA"
-    ws.range(CELL_DESTINATION).value = customer_country
+    # Due date (비워둠 - 수동 입력)
+    # ws.range(CELL_DUE_DATE).value = ''
 
-    # Customer PO (내부 키 사용)
+    # Customer PO (SO_해외에서 JOIN된 Customer PO)
     customer_po = get_value(order_data, 'customer_po', '')
-    po_date = get_value(order_data, 'po_receipt_date', '')
     ws.range(CELL_PO_NO).value = customer_po
+
+    # PO Date (SO_해외에서 JOIN된 PO receipt date)
+    po_date = get_value(order_data, 'po_receipt_date', '')
     if po_date and pd.notna(po_date):
         if isinstance(po_date, datetime):
             ws.range(CELL_PO_DATE).value = po_date.strftime("%Y-%m-%d")
         else:
             ws.range(CELL_PO_DATE).value = str(po_date)
 
-    # Incoterms (G17)
-    incoterms = get_value(order_data, 'incoterms', '')
-    if incoterms:
-        ws.range(CELL_INCOTERMS).value = incoterms
-
-    # L/C 정보 (내부 키 사용)
-    lc_no = get_value(order_data, 'lc_no', '')
-    lc_date = get_value(order_data, 'lc_date', '')
-    if lc_no:
-        ws.range(CELL_LC_NO).value = lc_no
-    if lc_date and pd.notna(lc_date):
-        if isinstance(lc_date, datetime):
-            ws.range(CELL_LC_DATE).value = lc_date.strftime("%Y-%m-%d")
-        else:
-            ws.range(CELL_LC_DATE).value = str(lc_date)
-
-
+    logger.debug(f"헤더 채우기 완료: DN_ID={dn_id}, Bill to={bill_to_1}")
 
 
 def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
@@ -207,7 +183,7 @@ def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
     # 마지막 아이템 행 (Total 바로 위)
     last_item_row = ITEM_START_ROW + num_items - 1
 
-    # 헤더 아래 행 (첫 번째 아이템 행 바로 위 = Row 17)의 아래 테두리
+    # 헤더 아래 행 (첫 번째 아이템 행 바로 위 = Row 12)의 아래 테두리
     header_bottom_row = ITEM_START_ROW - 1
     ws.range(f'A{header_bottom_row}:I{header_bottom_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlContinuous
     ws.range(f'A{header_bottom_row}:I{header_bottom_row}').api.Borders(XlConstants.xlEdgeBottom).Weight = XlConstants.xlThin
@@ -249,7 +225,7 @@ def _fill_items(
         items_df: 다중 아이템인 경우 DataFrame
 
     Returns:
-        삽입된 행 수 (원래 1개 아이템 제외)
+        삽입된 행 수
     """
     # 아이템 준비
     if items_df is None:
@@ -275,7 +251,6 @@ def _fill_items(
         rows_to_insert = num_items - template_item_count
 
         # 삽입 전: 템플릿 원래 마지막 행의 하단 테두리 제거
-        # (이 테두리가 그대로 남아 중간에 선이 생기는 문제 방지)
         original_last_row = ITEM_START_ROW + template_item_count - 1
         ws.range(f'A{original_last_row}:I{original_last_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlNone
 
@@ -289,7 +264,7 @@ def _fill_items(
         # 테두리 복원: 새 마지막 아이템 행에 하단 테두리 추가
         _restore_item_borders(ws, num_items)
 
-    # 아이템 데이터 배치 쓰기 (N개 아이템 * 4열 COM 호출 → 1회로 감소)
+    # 아이템 데이터 배치 쓰기
     _fill_items_batch(ws, items_df)
 
     # Total 행 수식 및 Currency 업데이트
@@ -310,6 +285,10 @@ def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> No
     total_row = ITEM_START_ROW + num_items
     last_item_row = total_row - 1
 
+    # E열: Qty 합계 수식 업데이트
+    qty_formula = f"=SUM(E{ITEM_START_ROW}:E{last_item_row})"
+    ws.range(f'E{total_row}').formula = qty_formula
+
     # I열: Amount 합계 수식 업데이트
     sum_formula = f"=SUM(I{ITEM_START_ROW}:I{last_item_row})"
     ws.range(f'I{total_row}').formula = sum_formula
@@ -328,7 +307,7 @@ def _fill_items_batch(
 ) -> None:
     """아이템 데이터 배치 쓰기 (성능 최적화)
 
-    PI는 열이 불연속적이므로(A, E, G, I) 열별로 배치 쓰기 수행
+    FI는 열이 불연속적이므로(A, E, G, I) 열별로 배치 쓰기 수행
 
     Args:
         ws: xlwings Sheet 객체
@@ -344,20 +323,17 @@ def _fill_items_batch(
     amounts = []
 
     for item_idx, (_, item) in enumerate(items_df.iterrows()):
-        # 품목명: Model + Item name (Model은 텍스트로 변환하여 앞 0 보존)
-        raw_model = get_value(item, 'model', '')
-        model = _to_text(raw_model)
+        # 품목명: Item 컬럼 사용 (DN_해외는 'Item' 컬럼)
         item_name = get_value(item, 'item_name', '')
-        if model and item_name:
-            full_name = f"{model} {item_name}"
-        elif model:
-            full_name = model
-        else:
-            full_name = str(item_name) if item_name else ''
-        names.append(full_name)
+        if not item_name:
+            # DN_해외의 'Item' 컬럼 직접 참조
+            item_name = item.get('Item', '') if 'Item' in item.index else ''
+        names.append(str(item_name) if item_name else '')
 
-        # 수량
-        raw_qty = get_value(item, 'item_qty', 1)
+        # 수량 (DN_해외는 'Qty' 컬럼)
+        raw_qty = get_value(item, 'item_qty', '')
+        if not raw_qty or (isinstance(raw_qty, str) and raw_qty == ''):
+            raw_qty = item.get('Qty', 1) if 'Qty' in item.index else 1
         try:
             qty = int(raw_qty) if pd.notna(raw_qty) else 1
         except (ValueError, TypeError):
@@ -365,8 +341,10 @@ def _fill_items_batch(
             qty = 1
         qtys.append(qty)
 
-        # 단가
-        raw_price = get_value(item, 'sales_unit_price', 0)
+        # 단가 (DN_해외는 'Unit Price' 컬럼)
+        raw_price = get_value(item, 'unit_price', '')
+        if not raw_price or (isinstance(raw_price, float) and raw_price == 0):
+            raw_price = get_value(item, 'sales_unit_price', 0)
         try:
             unit_price = float(raw_price) if pd.notna(raw_price) else 0
         except (ValueError, TypeError):
@@ -378,7 +356,6 @@ def _fill_items_batch(
         amounts.append(qty * unit_price)
 
     # 열별 배치 쓰기 (4회 COM 호출 - 아이템 수에 관계없이 고정)
-    # xlwings는 1D 리스트를 수직으로 쓰려면 2D로 변환해야 함
     ws.range(f'{COL_ITEM_NAME}{ITEM_START_ROW}:{COL_ITEM_NAME}{end_row}').value = [[n] for n in names]
     ws.range(f'{COL_QTY}{ITEM_START_ROW}:{COL_QTY}{end_row}').value = [[q] for q in qtys]
     ws.range(f'{COL_UNIT_PRICE}{ITEM_START_ROW}:{COL_UNIT_PRICE}{end_row}').value = [[p] for p in prices]
@@ -387,4 +364,4 @@ def _fill_items_batch(
     # 아이템 영역 행 높이 자동 조정
     ws.range(f'{ITEM_START_ROW}:{end_row}').rows.autofit()
 
-    logger.debug(f"PI 아이템 배치 쓰기 완료: {num_items}개")
+    logger.debug(f"FI 아이템 배치 쓰기 완료: {num_items}개")

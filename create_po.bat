@@ -27,6 +27,7 @@ echo   [2] 거래명세표 생성 (DN/선수금)
 echo.
 echo   [해외]
 echo   [3] Proforma Invoice 생성 (PI)
+echo   [4] Final Invoice 생성 (대금 청구)
 echo.
 echo   [기타]
 echo   [8] 발주 이력 조회
@@ -41,6 +42,7 @@ set /p CHOICE="선택 (0-9): "
 if "%CHOICE%"=="1" goto create_po
 if "%CHOICE%"=="2" goto create_ts
 if "%CHOICE%"=="3" goto create_pi
+if "%CHOICE%"=="4" goto create_fi
 if "%CHOICE%"=="8" goto view_history
 if "%CHOICE%"=="9" goto export_history
 if "%CHOICE%"=="0" goto end
@@ -107,7 +109,23 @@ echo ----------------------------------------
 echo   거래명세표 생성 (국내 전용)
 echo ----------------------------------------
 echo.
-echo   - 납품: DN_ID (예: DN-2026-0001)
+echo   [1] 단건 거래명세표 (DN 1건)
+echo   [2] 월합 거래명세표 (여러 DN을 한 장으로)
+echo   [0] 메뉴로 돌아가기
+echo.
+
+set /p TS_MODE="선택: "
+
+if "%TS_MODE%"=="1" goto ts_single
+if "%TS_MODE%"=="2" goto ts_merge
+if "%TS_MODE%"=="0" goto menu
+echo [오류] 올바른 번호를 입력하세요.
+pause
+goto create_ts
+
+:ts_single
+echo.
+echo   - 납품: DN_ID (예: DND-2026-0001)
 echo   - 선수금: 선수금_ID (예: ADV_2026-0001)
 echo.
 
@@ -129,6 +147,22 @@ echo.
 echo ----------------------------------------
 set /p TS_CONTINUE="다른 거래명세표를 생성하시겠습니까? (Y/N): "
 if /i "%TS_CONTINUE%"=="Y" goto ts_input
+goto menu
+
+:ts_merge
+echo.
+echo ----------------------------------------
+echo   월합 거래명세표 (여러 DN을 한 장으로)
+echo ----------------------------------------
+echo.
+echo   DN_ID 목록을 세로로 붙여넣기 하세요.
+echo   (빈 줄 입력하면 생성 시작)
+echo.
+
+"%PYTHON_PATH%" "%~dp0create_ts.py" --interactive --merge
+
+echo.
+pause
 goto menu
 
 :create_pi
@@ -158,6 +192,35 @@ echo.
 echo ----------------------------------------
 set /p PI_CONTINUE="다른 Proforma Invoice를 생성하시겠습니까? (Y/N): "
 if /i "%PI_CONTINUE%"=="Y" goto pi_input
+goto menu
+
+:create_fi
+echo.
+echo ----------------------------------------
+echo   Final Invoice 생성 (대금 청구)
+echo ----------------------------------------
+echo.
+echo   DN_ID 입력 (예: DNO-2026-0001)
+echo.
+
+:fi_input
+set /p FI_DN_ID="DN_ID 입력: "
+
+if "%FI_DN_ID%"=="" (
+    echo [오류] DN_ID를 입력하세요.
+    goto fi_input
+)
+
+echo.
+echo Final Invoice 생성 중...
+echo.
+
+"%PYTHON_PATH%" "%~dp0create_fi.py" %FI_DN_ID%
+
+echo.
+echo ----------------------------------------
+set /p FI_CONTINUE="다른 Final Invoice를 생성하시겠습니까? (Y/N): "
+if /i "%FI_CONTINUE%"=="Y" goto fi_input
 goto menu
 
 :end

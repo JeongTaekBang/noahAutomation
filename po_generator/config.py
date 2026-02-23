@@ -58,6 +58,10 @@ PI_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_pi"
 CI_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "commercial_invoice.xlsx"
 CI_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_ci"
 
+# === Final Invoice 설정 (대금 청구용) ===
+FI_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "final_invoice.xlsx"
+FI_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_fi"
+
 
 # === 시트 설정 (NOAH_SO_PO_DN.xlsx) ===
 # 국내 시트
@@ -69,6 +73,7 @@ PMT_DOMESTIC_SHEET: Final[str] = 'PMT_국내'
 SO_EXPORT_SHEET: Final[str] = 'SO_해외'
 PO_EXPORT_SHEET: Final[str] = 'PO_해외'
 DN_EXPORT_SHEET: Final[str] = 'DN_해외'
+CUSTOMER_EXPORT_SHEET: Final[str] = 'Customer_해외'
 
 # 기존 설정 (하위 호환 - deprecated)
 DOMESTIC_SHEET_INDEX: Final[int] = 0  # 국내
@@ -124,7 +129,26 @@ REQUIRED_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
-# === 액추에이터 사양 필드 (Description 시트) ===
+# === 메타 컬럼 (Description 시트에서 제외) ===
+# PO 시트에서 사양/옵션이 아닌 메타 정보 컬럼들
+META_COLUMNS: Final[frozenset[str]] = frozenset({
+    'PO_ID', 'SO_ID', 'NOAH O.C No.', 'Customer name', 'Customer PO',
+    'Item name', 'Item qty', 'ICO Unit', 'Total ICO',
+    '예상 납품 날짜', '예상 EXW date', 'Status',
+    # 내부 컬럼
+    '_시트구분', '_문서유형',
+})
+
+# === 사양 필드 시작 마커 ===
+# 이 컬럼부터 사양 필드 시작 (동적 추출 시 사용)
+SPEC_START_COLUMN: Final[str] = 'Power supply'
+
+# === 옵션 필드 시작 마커 ===
+# 이 컬럼부터 옵션 필드 시작 (Status 다음 컬럼)
+OPTION_START_COLUMN: Final[str] = 'Model'
+
+# === 액추에이터 사양 필드 (Description 시트) - Fallback용 ===
+# 동적 추출 실패 시 사용되는 기본값
 SPEC_FIELDS: Final[tuple[str, ...]] = (
     'Power supply', 'Motor(kW)', 'BASE', 'ACT Flange', 'Operating time',
     'Handwheel', 'RPM', 'Turns', 'Bushing', 'MOV', 'Gearbox model',
@@ -134,11 +158,13 @@ SPEC_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
-# === 옵션 필드 (Y 체크 시 가격 반영) ===
+# === 옵션 필드 (Y 체크 시 가격 반영) - Fallback용 ===
+# 동적 추출 실패 시 사용되는 기본값
 OPTION_FIELDS: Final[tuple[str, ...]] = (
     'Model', 'Bush', 'ALS', 'EXT', 'DC24V', 'Modbus, Profibus', 'LCU', 'PIU',
     'CPT+PIU', 'PCU+PIU', '-40', '-60', 'SCP', 'EXP', 'Bush-SQ', 'Bush-STAR',
     'INTEGRAL', 'IMS', 'BLDC', 'HART, Foundation Fieldbus', 'ATS',
+    'MOV사양', 'VALVE 사양',
 )
 
 
@@ -209,6 +235,7 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'als': ('ALS', 'als'),
     # DN (납품) 필드
     'dn_id': ('DN_ID', 'DN ID', 'dn_id', '납품번호'),
+    'dispatch_date': ('출고일', 'Dispatch Date', 'dispatch_date', '출하일'),
     'unit_price': ('Unit Price', 'unit price', '단가'),
     'total_sales': ('Total Sales', 'total sales', '판매금액'),
     'tax_invoice_no': ('세금계산서', '세금계산서번호', 'Tax Invoice No'),
@@ -227,6 +254,13 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'po_receipt_date': ('PO receipt date', 'PO Receipt Date', 'po receipt date', 'PO수령일'),
     'lc_no': ('L/C No', 'LC No', 'lc no', 'LC번호'),
     'lc_date': ('L/C date', 'LC date', 'lc date', 'LC발행일'),
+    # Final Invoice (대금 청구) 필드
+    'customer_code': ('Business registration number', 'C-code by 해외', '고객코드'),
+    'bill_to_1': ('Bill to 1', 'bill to 1'),
+    'bill_to_2': ('Bill to 2', 'bill to 2'),
+    'bill_to_3': ('Bill to 3', 'bill to 3'),
+    'payment_terms': ('Payment terms', 'Payment Terms', 'payment terms', '결제조건'),
+    'rck_po': ('RCK PO', 'RCK PO No', 'rck_po'),
 }
 
 
