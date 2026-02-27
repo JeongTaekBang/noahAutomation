@@ -334,13 +334,16 @@ let
     // ========== DN 통합 ==========
     DN_Combined = Table.Combine({DN_국내_Tagged, DN_해외_Tagged}),
 
-    // ========== PO 원가 (SO_ID + Line item 기준 중복 제거) ==========
+    // ========== PO 원가 (SO_ID + Line item 기준 합산) ==========
     PO_국내_Raw = Excel.CurrentWorkbook(){[Name="PO_국내"]}[Content],
     PO_해외_Raw = Excel.CurrentWorkbook(){[Name="PO_해외"]}[Content],
 
     PO_국내 = Table.SelectColumns(PO_국내_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
     PO_해외 = Table.SelectColumns(PO_해외_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
-    PO_Combined = Table.Distinct(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}),
+    PO_Combined = Table.Group(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}, {
+        {"ICO Unit", each List.Average([ICO Unit]), type number},
+        {"Total ICO", each List.Sum([Total ICO]), type number}
+    }),
 
     // ========== SO (SO_ID 기준 중복 제거) ==========
     SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
@@ -490,13 +493,17 @@ let
     // DN 통합
     DN_Combined = Table.Combine({DN_국내_Tagged, DN_해외_Tagged}),
 
-    // ========== PO 원가 (SO_ID + Line item 기준 중복 제거) ==========
+    // ========== PO 원가 (SO_ID + Line item 기준 합산) ==========
     PO_국내_Raw = Excel.CurrentWorkbook(){[Name="PO_국내"]}[Content],
     PO_해외_Raw = Excel.CurrentWorkbook(){[Name="PO_해외"]}[Content],
 
     PO_국내 = Table.SelectColumns(PO_국내_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO", "AX PO"}),
     PO_해외 = Table.SelectColumns(PO_해외_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO", "AX PO"}),
-    PO_Combined = Table.Distinct(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}),
+    PO_Combined = Table.Group(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}, {
+        {"ICO Unit", each List.Average([ICO Unit]), type number},
+        {"Total ICO", each List.Sum([Total ICO]), type number},
+        {"AX PO", each Text.Combine(List.Distinct(List.RemoveNulls([AX PO])), ", "), type text}
+    }),
 
     // ========== SO (SO_ID + Line item 기준 중복 제거) ==========
     SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
@@ -591,13 +598,16 @@ let
     SO_Filtered = Table.SelectRows(SO_Combined, each [Status] = null or [Status] <> "Cancelled"),
     SO_Final = Table.RemoveColumns(SO_Filtered, {"Status"}),
 
-    // ========== PO 원가 (SO_ID + Line item 기준) ==========
+    // ========== PO 원가 (SO_ID + Line item 기준 합산) ==========
     PO_국내_Raw = Excel.CurrentWorkbook(){[Name="PO_국내"]}[Content],
     PO_해외_Raw = Excel.CurrentWorkbook(){[Name="PO_해외"]}[Content],
 
     PO_국내 = Table.SelectColumns(PO_국내_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
     PO_해외 = Table.SelectColumns(PO_해외_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
-    PO_Combined = Table.Distinct(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}),
+    PO_Combined = Table.Group(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}, {
+        {"ICO Unit", each List.Average([ICO Unit]), type number},
+        {"Total ICO", each List.Sum([Total ICO]), type number}
+    }),
 
     // ========== DN 출고 (SO_ID + Line item 기준) - 출고일 포함 ==========
     DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
@@ -1713,6 +1723,29 @@ P02: SOD-0001, IQ3, Line item 2, qty=-2, amount=-100만  (조정분)
   결과: 정확히 매칭 → 미출고 0
   ```
 - **참고**: 2026-02-07부터 모든 쿼리의 조인 키를 `SO_ID + Item name` → `SO_ID + Line item`으로 변경. Line item이 행의 유니크 키 역할을 하므로 Item name(설명 필드)보다 정확한 매칭 가능. 단, 분할 출고 시 SO/DN의 Line item은 여전히 일치시켜야 함.
+
+### PO 사양 분리 시 원가 누락 (2026-02-27 수정)
+- **증상**: SOO-2026-0041처럼 SO Line item 1개에 PO가 사양별로 여러 행인 경우, 원가가 첫 번째 행만 반영됨
+  - Line 1: SO qty=3, PO에 SQ19×19(1개)+SQ17×17(2개) → 원가 3,624,865만 표시 (10,874,595여야 함)
+  - Line 3: SO qty=21, PO에 SQ14×14(14개)+SQ17×17(7개) → 원가 28,393,442만 표시 (42,590,163여야 함)
+- **원인**: `Table.Distinct(... {"SO_ID", "Line item"})` 가 같은 Line item의 PO 행 중 첫 번째만 남기고 나머지를 버림
+  ```
+  PO: Line 1, SQ19*19, qty=1, ICO=3,624,865  ← 이것만 남음
+  PO: Line 1, SQ17*17, qty=2, ICO=7,249,730  ← 버려짐
+  ```
+- **해결**: `Table.Distinct` → `Table.Group` 으로 변경하여 같은 Line item의 원가를 합산
+  ```
+  // Before (첫 번째 행만 유지)
+  PO_Combined = Table.Distinct(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}),
+
+  // After (합산)
+  PO_Combined = Table.Group(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}, {
+      {"ICO Unit", each List.Average([ICO Unit]), type number},
+      {"Total ICO", each List.Sum([Total ICO]), type number}
+  }),
+  ```
+- **영향 범위**: SO_통합, DN_원가포함, Inventory_Transaction 세 쿼리 모두 수정
+- **배경**: SO는 제품 레벨로 Line item을 관리하지만, PO는 같은 Line item 내에서 사양(밸브 사이즈 등)별로 행을 분리하는 경우가 있음 (1:N 관계)
 
 ---
 
