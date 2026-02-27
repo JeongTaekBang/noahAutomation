@@ -609,7 +609,7 @@ let
         {"Total ICO", each List.Sum([Total ICO]), type number}
     }),
 
-    // ========== DN 출고 (SO_ID + Line item 기준) - 출고일 포함 ==========
+    // ========== DN 출고 (SO_ID + Line item 기준 합산) - 분할 출고 대응 ==========
     DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
     DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
 
@@ -617,7 +617,10 @@ let
     DN_국내_Renamed = Table.RenameColumns(DN_국내, {{"Total Sales", "출고금액"}}),
     DN_해외 = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Total Sales KRW", "선적일"}),
     DN_해외_Renamed = Table.RenameColumns(DN_해외, {{"Total Sales KRW", "출고금액"}, {"선적일", "출고일"}}),
-    DN_Combined = Table.Distinct(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}),
+    DN_Combined = Table.Group(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}, {
+        {"출고금액", each List.Sum([출고금액]), type number},
+        {"출고일", each List.Max([출고일]), type nullable date}
+    }),
 
     // ========== SO에 원가 조인 (SO_ID + Line item) ==========
     WithCost = Table.NestedJoin(SO_Final, {"SO_ID", "Line item"}, PO_Combined, {"SO_ID", "Line item"}, "PO", JoinKind.LeftOuter),
@@ -1708,21 +1711,33 @@ P02: SOD-0001, IQ3, Line item 2, qty=-2, amount=-100만  (조정분)
 - **해결**: `[출고금액] <> null` 로 수정
   - DN에 조인되면 (출고 기록이 있으면) 출고완료 = Y
 
-### 분할 출고 시 출고금액 일부만 매칭 (2026-02-05 수정 → 2026-02-07 조인 키 변경)
-- **증상**: SOO-2026-0011처럼 SO에 Line item 1개인데, DN에서 무게 등의 이유로 Line item 1, 2로 분할 출고 시 Line item 1의 출고금액만 매칭됨
-- **원인**: SO_통합 쿼리가 `SO_ID + Line item` 기준으로 조인하므로, SO에 없는 Line item 2는 매칭 안 됨
+### 분할 출고 시 출고금액 일부만 매칭 (2026-02-05 수정 → 2026-02-07 조인 키 변경 → 2026-02-28 쿼리 수정)
+- **증상**: SOO-2026-0011처럼 SO에 Line item 1개인데, DN에서 무게 등의 이유로 분할 출고 시 출고금액 일부만 매칭됨
+- **원인**: SO_통합 쿼리의 `Table.Distinct(... {"SO_ID", "Line item"})`가 같은 Line item의 DN 행 중 첫 번째만 유지
   ```
   SO: Line item 1 (매출 300)
-  DN: Line item 1 (출고 150), Line item 2 (출고 150)
-  결과: Line item 1만 매칭 → 출고금액 150 → 미출고 150 (오류)
+  DN: Line item 1 (출고 150)  ← 이것만 남음
+  DN: Line item 1 (출고 150)  ← Table.Distinct가 버림
+  결과: 출고금액 150 → 미출고 150 (오류)
   ```
-- **해결**: **데이터 입력 규칙으로 해결** - 분할 출고 시 SO에도 Line item을 DN과 동일하게 맞춤
+- **해결**: `Table.Distinct` → `Table.Group`으로 변경하여 같은 Line item의 출고를 합산
   ```
-  SO: Line item 1 (매출 150), Line item 2 (매출 150)  ← SO도 분할
-  DN: Line item 1 (출고 150), Line item 2 (출고 150)
-  결과: 정확히 매칭 → 미출고 0
+  // Before (첫 번째 행만 유지)
+  DN_Combined = Table.Distinct(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}),
+
+  // After (합산)
+  DN_Combined = Table.Group(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}, {
+      {"출고금액", each List.Sum([출고금액]), type number},
+      {"출고일", each List.Max([출고일]), type nullable date}
+  }),
   ```
-- **참고**: 2026-02-07부터 모든 쿼리의 조인 키를 `SO_ID + Item name` → `SO_ID + Line item`으로 변경. Line item이 행의 유니크 키 역할을 하므로 Item name(설명 필드)보다 정확한 매칭 가능. 단, 분할 출고 시 SO/DN의 Line item은 여전히 일치시켜야 함.
+- **데이터 입력 규칙**: 분할 출고 시 DN의 Line item을 SO와 동일하게 유지 (SO를 분할할 필요 없음)
+  ```
+  SO: Line item 1 (매출 300)
+  DN: Line item 1 (출고 150), Line item 1 (출고 150)  ← SO Line item 유지
+  결과: Table.Group으로 합산 → 출고금액 300 → 미출고 0
+  ```
+- **참고**: 2026-02-07부터 모든 쿼리의 조인 키를 `SO_ID + Item name` → `SO_ID + Line item`으로 변경. Line item이 행의 유니크 키 역할을 하므로 Item name(설명 필드)보다 정확한 매칭 가능.
 
 ### PO 사양 분리 시 원가 누락 (2026-02-27 수정)
 - **증상**: SOO-2026-0041처럼 SO Line item 1개에 PO가 사양별로 여러 행인 경우, 원가가 첫 번째 행만 반영됨
