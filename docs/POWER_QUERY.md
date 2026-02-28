@@ -1154,11 +1154,11 @@ in
 | POO-2026-0008 | SOO-2026-0003 | ABC Corp | PO-2026-001 | CVA | 2 | 1,600,000 | Invoiced P01 | 해외 |
 
 ### 점검 방법
-1. 결과 목록의 SO_ID + Item name 확인
+1. 결과 목록의 SO_ID + Line item 확인
 2. DN 시트에서 해당 조합 검색
 3. 불일치 원인 파악:
    - DN 기록 누락 → DN 시트에 추가
-   - Item name 오타 → PO 또는 DN 수정
+   - Line item 불일치 → PO 또는 DN 수정
    - 출고일 비어있음 → DN 시트에서 출고일 입력
 
 ---
