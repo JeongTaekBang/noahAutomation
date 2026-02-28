@@ -69,6 +69,8 @@ Shared: config.py (paths, constants, aliases), utils.py (data loading), validato
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
 | `docs/DATA_STRUCTURE_DESIGN.md` | Excel schema (8 sheets), Power Query setup |
 | `docs/POWER_QUERY.md` | Power Query 수식, Power Pivot 관계 — 데이터 소스 구조 이해 시 참고 |
+| `docs/CHANGELOG.md` | 버전별 변경 이력 |
+| `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
 
 ## Business Rules
 
