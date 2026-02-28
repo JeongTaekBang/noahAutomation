@@ -81,6 +81,7 @@ NOAH 엑셀 원가 계산:
 | SO_통합 | 주문 현황 + 원가 + 마진 + 출고 상태 |
 | PO_현황 | 발주 현황 + Status별 집계 + 매입금액 |
 | **PO_매입월별** | **월별 매입 집계 (IC Balance Confirmation용)** |
+| **PO_AX대사** | **Period + AX PO(PXXXXXX)별 GRN 금액 집계 (회계 마감 대사용)** |
 | **PO_미출고** | **Invoiced인데 DN 미매칭 건 (데이터 점검용)** |
 | Inventory_Transaction | 입출고 트랜잭션 (감사 추적용) |
 | **Order_Book** | **월별 수주잔고 (Backlog) 롤링 원장 - AX 오더북 형식** |
@@ -927,6 +928,137 @@ in
 **IC Balance 확인 방법**:
 ```
 NOAH AR Statement (2026-01월)  vs  PO_매입월별 (매입월 = 2026-01) 매입금액 합계
+```
+
+---
+
+## PO_AX대사
+
+### 목적
+- **회계 마감 시 AX GRN 대사** 용도
+- Invoiced(GRN 처리 완료) 건만 대상
+- Period + AX PO(PXXXXXX)별 금액 집계
+- AX에 입력된 GRN 금액과 엑셀 매입금액 비교
+
+### 대사 프로세스
+```
+엑셀 (PO_AX대사 쿼리)                          AX (D365 F&O) GRN
+┌─────────────────────────────────┐        ┌─────────────────────────────────┐
+│ 2026-01  P000001  ₩7,500,000   │  ──→   │ 2026-01  P000001  ₩7,500,000   │  ✓ 일치
+│ 2026-01  P000002  ₩8,000,000   │  ──→   │ 2026-01  P000002  ₩8,000,000   │  ✓ 일치
+│ 2026-02  P000003  ₩6,000,000   │  ──→   │ 2026-02  P000003  ₩4,000,000   │  ✗ 불일치
+└─────────────────────────────────┘        └─────────────────────────────────┘
+```
+
+### 결과 컬럼
+
+| 컬럼 | 설명 |
+|------|------|
+| Period | 출고일 기준 월 (yyyy-MM 형식) |
+| AX PO | AX 발주번호 (PXXXXXX) |
+| 구분 | 국내/해외 |
+| PO_ID | 포함된 NOAH PO 번호 (여러 개면 콤마로 연결) |
+| 건수 | Invoiced PO Line 수 |
+| 수량 | Invoiced 수량 합계 |
+| 금액 | Invoiced Total ICO 합계 (= AX GRN 금액과 대사 대상) |
+
+### M 코드
+
+```
+let
+    // ========== PO 원본 (Invoiced 건만 = GRN 처리 완료) ==========
+    PO_국내_Raw = Excel.CurrentWorkbook(){[Name="PO_국내"]}[Content],
+    PO_해외_Raw = Excel.CurrentWorkbook(){[Name="PO_해외"]}[Content],
+
+    PO_국내 = Table.SelectColumns(PO_국내_Raw, {"PO_ID", "SO_ID", "Line item", "Item qty", "Total ICO", "Status", "AX PO"}),
+    PO_국내_Tagged = Table.AddColumn(PO_국내, "구분", each "국내"),
+
+    PO_해외 = Table.SelectColumns(PO_해외_Raw, {"PO_ID", "SO_ID", "Line item", "Item qty", "Total ICO", "Status", "AX PO"}),
+    PO_해외_Tagged = Table.AddColumn(PO_해외, "구분", each "해외"),
+
+    PO_Combined = Table.Combine({PO_국내_Tagged, PO_해외_Tagged}),
+
+    // Invoiced만 필터 (GRN 처리 완료 건)
+    PO_Invoiced = Table.SelectRows(PO_Combined, each [Status] <> null and Text.StartsWith([Status], "Invoiced")),
+
+    // AX PO 있는 건만 (AX에 입력되어 대사 가능한 건)
+    PO_WithAX = Table.SelectRows(PO_Invoiced, each [#"AX PO"] <> null and [#"AX PO"] <> ""),
+
+    // ========== DN 원본 (출고일 → Period 산정) ==========
+    DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
+    DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
+
+    DN_국내 = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "출고일"}),
+    DN_해외 = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "출고일"}),
+
+    DN_Combined = Table.Combine({DN_국내, DN_해외}),
+
+    // SO_ID + Line item 기준 출고일 집계 (같은 조합에 여러 DN이 있으면 최신 출고일)
+    DN_Grouped = Table.Group(DN_Combined, {"SO_ID", "Line item"}, {
+        {"출고일", each List.Max([출고일]), type date}
+    }),
+
+    // ========== PO + DN 조인 (출고일 가져오기) ==========
+    WithDate = Table.NestedJoin(PO_WithAX, {"SO_ID", "Line item"}, DN_Grouped, {"SO_ID", "Line item"}, "DN_Data", JoinKind.LeftOuter),
+    WithDateExpanded = Table.ExpandTableColumn(WithDate, "DN_Data", {"출고일"}, {"출고일"}),
+
+    // 출고일 있는 건만 (Period 산정 가능한 건)
+    WithValidDate = Table.SelectRows(WithDateExpanded, each
+        [출고일] <> null and
+        (try Date.Year([출고일]) otherwise null) <> null
+    ),
+
+    // ========== Period 추출 ==========
+    WithPeriod = Table.AddColumn(WithValidDate, "Period", each
+        Text.From(Date.Year([출고일])) & "-" & Text.PadStart(Text.From(Date.Month([출고일])), 2, "0"),
+        type text),
+
+    // ========== Period + AX PO 기준 그룹화 ==========
+    Grouped = Table.Group(WithPeriod, {"Period", "AX PO", "구분"}, {
+        {"PO_ID", each Text.Combine(List.Distinct([PO_ID]), ", "), type text},
+        {"건수", each Table.RowCount(_), Int64.Type},
+        {"수량", each List.Sum([Item qty]), type number},
+        {"금액", each List.Sum([Total ICO]), type number}
+    }),
+
+    // ========== 정렬 ==========
+    Sorted = Table.Sort(Grouped, {
+        {"Period", Order.Descending},
+        {"AX PO", Order.Ascending}
+    }),
+
+    // ========== 타입 변환 ==========
+    Result = Table.TransformColumnTypes(Sorted, {
+        {"건수", Int64.Type},
+        {"수량", Int64.Type},
+        {"금액", Currency.Type}
+    })
+in
+    Result
+```
+
+### 결과 예시
+
+| Period | AX PO | 구분 | PO_ID | 건수 | 수량 | 금액 |
+|--------|-------|------|-------|------|------|------|
+| 2026-02 | P000003 | 국내 | POD-0007 | 2 | 10 | 4,000,000 |
+| 2026-02 | P000005 | 해외 | POO-0003 | 1 | 5 | 3,500,000 |
+| 2026-01 | P000001 | 국내 | POD-0001, POD-0005 | 4 | 15 | 7,500,000 |
+| 2026-01 | P000002 | 국내 | POD-0002 | 2 | 10 | 8,000,000 |
+| 2026-01 | P000004 | 해외 | POO-0001 | 3 | 20 | 6,000,000 |
+
+### 용도
+
+| 필터/분석 | 용도 |
+|----------|------|
+| Period = "2026-01" | 해당 월 마감 대사 (월별 필터링) |
+| 특정 AX PO | AX GRN 금액과 1:1 비교 |
+| 구분별 소계 | 국내/해외 AP 분리 확인 |
+
+**AX 대사 방법**:
+```
+PO_AX대사 (Period = 2026-01) 금액 합계  vs  AX D365 F&O GRN (2026-01월) 금액
+→ PXXXXXX별 1:1 대사, 불일치 시 PO_ID로 라인별 추적
 ```
 
 ---
