@@ -483,6 +483,162 @@ PO 상태:  Open → Sent → Confirmed → Invoiced (→ Cancelled)
 
 ---
 
+## 6.2 ERP 모듈별 관계 구조 (학습 참고)
+
+ERP 시스템의 핵심은 **하나의 키(SO_ID)가 모든 하위 문서에 FK로 관통**하는 구조이다. 현재 엑셀 시스템도 이 원리를 동일하게 따른다.
+
+### SO_ID 중심의 1:N 관계 — ERP vs 현재 시스템
+
+#### Sales Module (판매)
+
+```
+ERP (SAP/D365):
+  Sales Order Header (VBELN/SalesId) ← PK
+      ├── SO Line Items (N)       ← 분할 품목
+      ├── Deliveries (N)          ← 분할 출고
+      ├── Invoices (N)            ← 분할 청구
+      └── Payments (N)            ← 분할 입금
+
+현재 시스템:
+  SO_header_국내 (SO_ID) ← PK
+      ├── SO_국내 (N)              ← Line item으로 분할
+      ├── PO_국내 (N)              ← 추가 발주 시 새 행
+      ├── DN_국내 (N)              ← 분할 납품
+      └── PMT_국내 (N)             ← 선수금/잔금
+```
+
+**동일한 구조.** SO_ID 하나로 주문의 모든 트랜잭션을 추적할 수 있다.
+
+#### Procurement Module (구매/발주)
+
+```
+ERP:
+  Purchase Requisition (1) → Purchase Orders (N)    ← 분할 발주
+  PO Header (1)            → PO Line Items (N)
+                           → Goods Receipts (N)     ← 분할 입고
+                           → Vendor Invoices (N)    ← 분할 청구
+
+현재 시스템:
+  SO (1)                   → PO (N)                 ← 추가/분할 발주
+  PO 각 행                 → 사양/옵션 컬럼          ← ERP의 PO Line 속성
+```
+
+ERP에서 구매요청(PR) 1건에 대해 여러 PO를 발행할 수 있듯이, 현재 시스템에서도 SO 수량 변경 시 PO에 새 행을 추가한다 (섹션 7.0 참조).
+
+#### Inventory Module (재고/창고)
+
+```
+ERP:
+  Delivery Note (1)  → Transfer Orders (N)   ← 창고 내 이동
+                     → Picking Lists (N)      ← 출고 지시
+                     → Packing Slips (N)      ← 포장 단위
+```
+
+현재 시스템에서는 DN_국내가 이 역할을 단순화하여 처리한다.
+
+#### Finance Module (재무/수금)
+
+```
+ERP:
+  Invoice (1) → Payment Allocations (N)    ← 분할 입금
+  Customer (1) → Open Items (N)            ← 미수금 잔액 관리
+
+현재 시스템:
+  SO (1) → PMT (N)    ← 선수금/잔금 분리
+  SO_통합 쿼리         ← 미출고금액 = Sales amount - 출고금액
+```
+
+### Header-Line 패턴 — 모든 ERP 문서의 기본 구조
+
+ERP의 거의 모든 문서는 **Header(1) → Line(N)** 구조를 따른다:
+
+```
+SAP:   VBAK (SO Header)       → VBAP (SO Item)          ← 1:N
+       EKKO (PO Header)       → EKPO (PO Item)          ← 1:N
+       LIKP (Delivery Header)  → LIPS (Delivery Item)    ← 1:N
+
+D365:  SalesOrderHeader       → SalesOrderLine           ← 1:N
+       PurchaseOrderHeader    → PurchaseOrderLine         ← 1:N
+
+현재:  SO_header_국내          → SO_국내 (Line item)      ← 1:N  ✅
+```
+
+### Document Flow — 문서 체인
+
+ERP에서는 문서 간 연결을 별도 테이블로 추적한다:
+
+```
+SAP:  VBFA (Document Flow) 테이블
+      SO 10001 → DN 80001 → Invoice 90001 → Payment 14001
+      모든 연결이 VBFA에 기록됨
+
+D365: InventTransOrigin 테이블
+      SO → Packing Slip → Invoice → Payment Journal
+
+현재 시스템:
+      SO_ID를 FK로 사용하여 동일한 효과
+      SO_ID = SOD-2026-0001 → PO, DN, PMT 모두 조회 가능
+```
+
+SAP은 별도 추적 테이블(VBFA)을 두지만, 현재 시스템은 SO_ID FK만으로 충분하다. 문서 유형이 4개(SO/PO/DN/PMT)로 단순하기 때문.
+
+### 다대다(M:N) 관계 — ERP의 마스터 데이터
+
+위의 트랜잭션(SO→PO→DN→PMT)은 모두 **1:N** 관계이다. ERP에서 **다대다** 관계는 주로 마스터 데이터 간에 발생하며, 중간 테이블(Junction Table)로 분해한다:
+
+| 다대다 관계 | 중간 테이블 | 추가 속성 |
+|------------|-----------|----------|
+| 사용자 ↔ 권한 | User_Role | 부여일, 만료일 |
+| 제품 ↔ 공급업체 | Item_Vendor | 단가, 리드타임, 우선순위 |
+| 완제품 ↔ 부품 (BOM) | BOM_Line | 수량, 공정순서 |
+| 창고 ↔ 제품 | Inventory | 수량, 로트번호 |
+| 주문 ↔ 할인/프로모션 | Order_Discount | 적용 금액 |
+
+```
+다대다 분해 원리:
+
+  Product (1) ──→ BOM_Line (N) ←── Part (1)
+                  제품ID(FK)        부품ID(PK)
+                  부품ID(FK)
+                  수량, 공정순서
+
+  → 다대다를 1:N + N:1 두 개로 분해
+  → 중간 테이블이 양쪽 PK를 FK로 보유
+  → 관계 자체의 속성(수량, 단가 등)도 중간 테이블에 저장
+```
+
+현재 시스템에서 ICO 테이블이 이 패턴에 가깝다:
+
+```
+  Model ↔ Option → ICO가 중간 테이블 역할
+  IQ10 + Bush 옵션 → ICO 단가
+  IQ10 + ALS 옵션 → ICO 단가
+  모델과 옵션의 조합마다 가격이 다름
+```
+
+BOM 테이블 구현 계획은 섹션 13 참조.
+
+### 스냅샷 보존 = 전기(Posting) 불변성
+
+ERP에서 가장 중요한 원칙 중 하나:
+
+```
+SAP:  전기(Posting) 후 문서는 수정 불가
+      → 수정이 필요하면 반대 전기(Reversal)로 취소 후 재생성
+
+D365: Posted documents are immutable
+      → 수정 시 Credit Note / Correction Journal 생성
+
+현재 시스템:
+      PO는 값 복사(스냅샷) → 원본 SO 수정해도 기발주 영향 없음
+      취소 시 Status=Cancelled → 행 삭제 X (기록 보존)
+      추가 발주 시 새 행 추가 → 기존 행 수정 X
+```
+
+**핵심**: 한번 확정된 트랜잭션은 절대 수정하지 않는다. 변경이 필요하면 새 트랜잭션을 만든다.
+
+---
+
 ## 7. 운영 규칙
 
 ### 7.0 SO 수량 변경 시 운용 방식
@@ -699,6 +855,89 @@ python create_packing.py SO-2026-0001
 - [ ] create_ts.py SO_ID 기반으로 수정
 - [ ] create_invoice.py 구현 (해외용)
 - [ ] create_packing.py 구현 (해외용)
+- [ ] BOM (Bill of Materials) 테이블 구현 (아래 상세 설계 참조)
+
+---
+
+## 13. 향후 구현: BOM (Bill of Materials)
+
+### 배경
+
+현재 PO_국내의 사양/옵션 컬럼(Model, Bush, ALS, EXT 등)은 **완제품 단위**로만 관리된다. 완제품을 구성하는 부품 정보(모터, 기어박스, 플랜지 등)는 시스템에 없으므로 부품별 원가 계산이나 소요량 산출이 불가능하다.
+
+### 핵심 개념: 다대다 관계
+
+완제품과 부품은 **다대다(M:N)** 관계이다:
+- 하나의 완제품에 여러 부품이 들어간다
+- 하나의 부품이 여러 완제품에 쓰인다
+
+이를 **중간 테이블(BOM_Line)**로 1:N + N:1로 분해한다.
+
+### 테이블 설계
+
+**BOM_Part (부품 마스터)**:
+```
+┌────────┬────────────┬──────────┬────────┐
+│ 부품ID  │ 부품명      │ 단가      │ 비고    │
+├────────┼────────────┼──────────┼────────┤
+│ P001   │ 모터A      │ ₩50,000  │        │
+│ P002   │ 기어박스B   │ ₩80,000  │        │
+│ P003   │ 플랜지C    │ ₩30,000  │        │
+│ P004   │ 기어박스D   │ ₩90,000  │        │
+└────────┴────────────┴──────────┴────────┘
+```
+
+**BOM_Line (중간 테이블 — 완제품↔부품 연결)**:
+```
+┌────────┬────────┬──────┬────────┐
+│ 제품ID  │ 부품ID  │ 수량  │ 공정순서 │
+├────────┼────────┼──────┼────────┤
+│ IQ10   │ P001   │ 1    │ 1      │  ← IQ10에 모터A 1개
+│ IQ10   │ P002   │ 1    │ 2      │  ← IQ10에 기어박스B 1개
+│ IQ10   │ P003   │ 2    │ 3      │  ← IQ10에 플랜지C 2개
+│ IQ18   │ P001   │ 1    │ 1      │  ← IQ18에 모터A 1개
+│ IQ18   │ P004   │ 1    │ 2      │  ← IQ18에 기어박스D 1개
+│ IQ18   │ P003   │ 4    │ 3      │  ← IQ18에 플랜지C 4개
+└────────┴────────┴──────┴────────┘
+```
+
+### 관계도
+
+```
+Product/ITEM (1) ──→ BOM_Line (N) ←── BOM_Part (1)
+ 제품ID(PK)           제품ID(FK)        부품ID(PK)
+                      부품ID(FK)
+                      수량
+                      공정순서
+```
+
+### 기존 시트와의 연결
+
+```
+NOAH_PO_Lists.xlsx
+├── 기존 시트들...
+├── ITEM          ← 기존 제품 마스터 (제품ID = Model number)
+├── BOM_Part      ← 신규: 부품 마스터
+└── BOM_Line      ← 신규: 중간 테이블 (ITEM.제품ID + BOM_Part.부품ID)
+```
+
+### 활용 예시
+
+| 질문 | 조회 방법 |
+|------|----------|
+| IQ10 만드는데 부품 뭐 필요해? | `BOM_Line WHERE 제품ID = IQ10` |
+| 모터A 쓰는 완제품이 뭐야? | `BOM_Line WHERE 부품ID = P001` |
+| IQ10 1대 원가? | `BOM_Line JOIN BOM_Part → SUM(수량 × 단가)` |
+| SO 주문 전체 부품 소요량? | `SO JOIN BOM_Line → GROUP BY 부품ID, SUM(SO수량 × BOM수량)` |
+| 모터A 100개로 IQ10 몇 대? | `BOM_Line WHERE 부품ID=P001, 제품ID=IQ10 → 100 ÷ 수량` |
+
+### 구현 단계
+
+1. BOM_Part 시트 생성 + 표(Table) 변환 (`tbl_BOM_Part`)
+2. BOM_Line 시트 생성 + 표(Table) 변환 (`tbl_BOM_Line`)
+3. 파워피벗 관계 설정: ITEM(1)→BOM_Line(N), BOM_Part(1)→BOM_Line(N)
+4. 부품 데이터 입력
+5. 원가 계산 파워쿼리 또는 피벗테이블 구성
 
 ---
 
@@ -712,3 +951,5 @@ python create_packing.py SO-2026-0001
 | 2026-01-31 | **SO↔PO 관계 변경**: 행 1:1 → 1:N 관계로 전환, SO 수량 변경 시 PO에 새 행 추가 방식 채택, PO_현황 Power Query 추가 |
 | 2026-02-23 | **SO 컬럼 추가**: AX Period, AX Item number 컬럼을 SO_국내/SO_해외 공통 컬럼에 추가, SO_해외 컬럼 수 문서화 (32개) |
 | 2026-02-28 | **ERP 매핑 섹션 추가**: 섹션 6.1 - 테이블 관계, 조인, 집계, 상태 관리, 스냅샷 보존 등 ERP 원리와의 대응 관계 문서화 |
+| 2026-02-28 | **BOM 설계 추가**: 섹션 13 - 완제품↔부품 다대다 관계, BOM_Part/BOM_Line 중간 테이블 설계, 원가 계산/소요량 산출 활용 방안 |
+| 2026-02-28 | **ERP 모듈 비교 추가**: 섹션 6.2 - 모듈별 1:N 관계, Header-Line 패턴, Document Flow, 다대다 관계, 스냅샷 불변성 등 ERP 원리 학습 참고 자료 |
