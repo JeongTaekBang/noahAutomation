@@ -7,7 +7,7 @@ NOAH_SO_PO_DN.xlsx (데이터 소스)
        │
        ├── 국내 시트 ─→ PO (발주서), 거래명세표
        │
-       └── 해외 시트 ─→ PO (발주서), Proforma Invoice
+       └── 해외 시트 ─→ PO (발주서), Proforma Invoice, Final Invoice
 ```
 
 | 문서 | 용도 | CLI |
@@ -15,6 +15,7 @@ NOAH_SO_PO_DN.xlsx (데이터 소스)
 | **PO** (Purchase Order) | RCK→NOAH 발주서 | `create_po.py` |
 | **거래명세표** | 국내 납품/선수금 명세 | `create_ts.py` |
 | **PI** (Proforma Invoice) | 해외 견적서 | `create_pi.py` |
+| **FI** (Final Invoice) | 해외 대금 청구서 | `create_fi.py` |
 
 ---
 
@@ -42,12 +43,22 @@ NOAH_SO_PO_DN.xlsx (데이터 소스)
 `create_po.bat` 파일을 더블클릭하면 대화형 메뉴가 나옵니다.
 
 ```
-==============================
- NOAH 문서 생성기
-==============================
-[1] 발주서(PO) 생성
-[2] 거래명세표 생성
-[3] Proforma Invoice 생성
+========================================
+   NOAH Document Generator
+========================================
+
+  [국내]
+  [1] 발주서 생성 (PO)
+  [2] 거래명세표 생성 (DN/선수금)
+
+  [해외]
+  [3] Proforma Invoice 생성 (PI)
+  [4] Final Invoice 생성 (대금 청구)
+
+  [기타]
+  [8] 발주 이력 조회
+  [9] 발주 이력 Excel 내보내기
+  [0] 종료
 ```
 
 또는 명령 프롬프트에서 직접 실행:
@@ -84,7 +95,12 @@ python create_ts.py --interactive --merge
 
 #### Proforma Invoice
 ```bash
-python create_pi.py NO-0001
+python create_pi.py SOO-2026-0001
+```
+
+#### Final Invoice
+```bash
+python create_fi.py DNO-2026-0001
 ```
 
 ### 3단계: 결과 확인
@@ -95,6 +111,7 @@ python create_pi.py NO-0001
 generated_po/   ← 발주서
 generated_ts/   ← 거래명세표
 generated_pi/   ← Proforma Invoice
+generated_fi/   ← Final Invoice
 ```
 
 ---
@@ -128,14 +145,18 @@ noahAutomation/
 ├── create_po.py             ← PO CLI
 ├── create_ts.py             ← 거래명세표 CLI
 ├── create_pi.py             ← Proforma Invoice CLI
+├── create_fi.py             ← Final Invoice CLI
 ├── po_generator/            ← 핵심 패키지
 ├── templates/               ← 문서 템플릿 (Excel)
 │   ├── purchase_order.xlsx
-│   ├── transaction_statement.xlsx
-│   └── proforma_invoice.xlsx
+│   ├── ts_template_local.xlsx
+│   ├── proforma_invoice.xlsx
+│   ├── commercial_invoice.xlsx
+│   └── final_invoice.xlsx
 ├── generated_po/            ← 생성된 발주서
 ├── generated_ts/            ← 생성된 거래명세표
 ├── generated_pi/            ← 생성된 Proforma Invoice
+├── generated_fi/            ← 생성된 Final Invoice
 └── po_history/              ← 발주 이력 (월별)
     └── YYYY/M월/
         └── YYYYMMDD_주문번호_고객명.xlsx

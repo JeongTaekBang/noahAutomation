@@ -6,9 +6,10 @@
 
 ## TODO (미완료 항목)
 
-### 템플릿 확장 (해외 오더)
-- [ ] Commercial Invoice 템플릿 (xlwings 기반)
-- [ ] Packing List 템플릿 (xlwings 기반)
+### 템플릿 확장
+- [x] Proforma Invoice (PI) 구현 완료 ✓
+- [x] Final Invoice (FI) 구현 완료 ✓
+- [ ] Packing List 생성기 구현
 
 ### SQL 기반 데이터 분석
 - [ ] NOAH_SO_PO_DN.xlsx → 로컬 SQL DB 연동
@@ -19,6 +20,49 @@
     - `po_generator/data_layer.py` - 데이터 레이어 모듈
     - `queries/` 폴더 - 자주 쓰는 분석 쿼리 저장
     - CLI 확장 (`--analyze` 옵션 또는 `create_report.py`)
+
+---
+
+## 2026-02-28: Power Query 개선 및 문서 정비
+
+### Power Query 수정
+- PO 원가 계산: `Table.Distinct` → `Table.Group` 변경 (사양 분리 시 중복 합산 방지)
+- DN 분할납품: `Table.Distinct` → `Table.Group` 변경 (분할 출고 금액 정확 집계)
+- SO_통합 출고 상태: 3단계 → 4단계 세분화 (미출고/부분 출고/출고 완료/선적 완료)
+- PO_AX대사 쿼리 추가: Period + AX PO별 GRN 금액 집계
+
+### 문서 정비
+- `DATA_STRUCTURE_DESIGN.md`: ERP 매핑 섹션 추가 (테이블 관계, 조인, 상태 관리)
+- `CLAUDE.md`: 아키텍처, 커맨드, 키 패턴 섹션 확장
+- `POWER_QUERY.md`: Key Files에 추가
+
+---
+
+## 2026-02-15: Final Invoice 및 Power Query 문서화
+
+### Final Invoice (FI) 생성기 추가
+- `create_fi.py` CLI 진입점 추가 (DN_해외 기반)
+- `fi_generator.py` 구현 (xlwings) — Bill-to, Payment Terms, Due Date 등
+- `create_po.bat` 메뉴에 [4] Final Invoice 추가
+- `OPERATION_GUIDE.md` 운용 가이드 추가
+- `config.py`: `FI_TEMPLATE_FILE`, `FI_OUTPUT_DIR` 추가
+
+### Power Query 문서화
+- `docs/POWER_QUERY.md` 신규 작성 (SO_통합, PO_현황, Order_Book 쿼리)
+- Order_Book 파이프라인 다이어그램 및 단계별 데이터 흐름 예시
+
+### 데이터 구조
+- SO 컬럼: `Customer PO`, `Expected delivery date` 추가
+- Order_Book: 분할 납품 처리 (DN 월별 조인)
+
+---
+
+## 2026-02-08: TS/PI 기능 및 테스트 추가
+
+### 거래명세표/PI 기능 확장
+- TS/PI 관련 기능 정리 및 테스트 추가
+- `.gitignore` 업데이트 (generated_ts, po_history, Claude 임시 파일)
+- README 갱신 (PO, TS, PI 문서 유형 반영)
 
 ---
 
@@ -272,9 +316,10 @@ elif not isinstance(formulas, (list, tuple)):
 - [x] po_history 월별 폴더 방식으로 변경 ✓
 
 ### 템플릿 기반 문서 생성
-- [x] PO (Purchase Order) - xlwings 기반 ✓
+- [x] PO (Purchase Order) - openpyxl 기반 ✓
 - [x] 거래명세표 (Transaction Statement) - xlwings 기반 ✓
 - [x] PI (Proforma Invoice) - xlwings 기반 ✓
+- [x] FI (Final Invoice) - xlwings 기반 ✓
 
 ---
 
@@ -282,7 +327,8 @@ elif not isinstance(formulas, (list, tuple)):
 
 | 용도 | 라이브러리 | 이유 |
 |------|-----------|------|
-| 문서 생성 (PO/TS/PI) | xlwings | 로고/도장 이미지, 복잡한 서식 완벽 보존 |
+| PO 생성 | openpyxl | 이미지 불필요, 빠른 생성 |
+| TS/PI/FI 생성 | xlwings | 로고/도장 이미지, 복잡한 서식 완벽 보존 |
 | 이력 조회/테스트 검증 | openpyxl | COM 인터페이스 없이 안정적인 읽기 |
 
 ### 템플릿 동작 방식

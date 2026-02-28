@@ -149,6 +149,52 @@
 
 ---
 
+## 문서 생성 CLI
+
+### PO (발주서)
+```bash
+python create_po.py ND-0001                  # 단일 발주
+python create_po.py ND-0001 ND-0002          # 여러 건 동시
+python create_po.py ND-0001 --force          # 중복/검증 오류 무시
+python create_po.py --history                # 현재 월 이력 조회
+python create_po.py --history --export       # 이력 Excel 내보내기
+```
+
+### 거래명세표 (국내)
+```bash
+python create_ts.py DND-2026-0001            # 단건 (납품)
+python create_ts.py ADV_2026-0001            # 선수금
+python create_ts.py DND-2026-0001 DND-2026-0002 --merge  # 월합 (여러 DN → 1장)
+python create_ts.py --interactive --merge    # 대화형 모드 (DN 목록 붙여넣기)
+```
+
+### Proforma Invoice (해외 견적)
+```bash
+python create_pi.py SOO-2026-0001            # SO_ID 기반
+```
+
+### Final Invoice (해외 대금 청구)
+```bash
+python create_fi.py DNO-2026-0001            # DN_ID 기반 (DN_해외 + Customer_해외)
+```
+
+### 주요 CLI 옵션
+
+| 옵션 | 대상 | 설명 |
+|------|------|------|
+| `--force` (`-f`) | PO | 중복 체크 및 검증 오류 무시하고 강제 생성 |
+| `--merge` (`-m`) | TS | 여러 DN을 한 장의 거래명세표로 합침 |
+| `--interactive` (`-i`) | TS | DN 목록을 세로로 붙여넣기할 수 있는 대화형 모드 |
+| `--history` | PO | 현재 월 발주 이력 조회 |
+| `--export` | PO | 이력을 Excel 파일로 내보내기 (`--history`와 함께 사용) |
+| `--verbose` (`-v`) | 전체 | DEBUG 레벨 로깅 활성화 |
+
+### 또는 배치 파일로 실행
+
+`create_po.bat` 더블클릭 → 대화형 메뉴에서 문서 유형 선택 (PO, TS, PI, FI)
+
+---
+
 ## 현황 확인 방법
 
 | 확인할 내용 | 방법 |

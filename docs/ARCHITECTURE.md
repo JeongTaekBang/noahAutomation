@@ -1,4 +1,4 @@
-# NOAH PO Auto-Generator 아키텍처 문서
+# NOAH Document Auto-Generator 아키텍처 문서
 
 > 이 프로젝트가 어떻게 동작하는지 쉽게 설명하는 문서입니다.
 
@@ -32,28 +32,37 @@
     [1] 데이터 입력                [2] 처리                    [3] 출력
     ─────────────            ──────────────────           ─────────────
 
-┌─────────────────┐      ┌─────────────────────┐      ┌─────────────────┐
-│                 │      │                     │      │                 │
-│ NOAH_SO_PO_DN   │─────▶│    create_po.py     │─────▶│  발주서 Excel   │
-│    .xlsx        │      │    (CLI 진입점)      │      │  (Purchase      │
-│                 │      │                     │      │   Order)        │
-│  ┌───────────┐  │      └─────────────────────┘      │                 │
-│  │ SO_국내   │  │              │                    └────────┬────────┘
-│  │ SO_해외   │  │              │                             │
-│  │ PO_국내   │  │              ▼                             ▼
-│  │ PO_해외   │  │      ┌─────────────────────┐      ┌─────────────────┐
-│  │ DN_국내   │  │      │                     │      │                 │
-│  │ PMT_국내  │  │      │   po_generator/     │      │   이력 파일     │
-│  └───────────┘  │      │   (핵심 로직)       │      │  (DB 형식)      │
-│                 │      │                     │      │                 │
-└─────────────────┘      └─────────────────────┘      └─────────────────┘
-                                  │
-                                  │ 템플릿 사용
-                                  ▼
+                         ┌─────────────────────┐
+                         │  CLI 진입점          │
+┌─────────────────┐      │  create_po.py (PO)  │      ┌─────────────────┐
+│                 │      │  create_ts.py (TS)  │      │  문서 출력       │
+│ NOAH_SO_PO_DN   │─────▶│  create_pi.py (PI)  │─────▶│  generated_po/  │
+│    .xlsx        │      │  create_fi.py (FI)  │      │  generated_ts/  │
+│                 │      └─────────┬───────────┘      │  generated_pi/  │
+│  ┌───────────┐  │                │                   │  generated_fi/  │
+│  │ SO_국내   │  │                ▼                   └────────┬────────┘
+│  │ SO_해외   │  │      ┌─────────────────────┐               │
+│  │ PO_국내   │  │      │  services/          │               ▼
+│  │ PO_해외   │  │      │  DocumentService    │      ┌─────────────────┐
+│  │ DN_국내   │  │      │  FinderService      │      │   이력 파일     │
+│  │ DN_해외   │  │      └─────────┬───────────┘      │  (DB 형식)      │
+│  │ PMT_국내  │  │                │                   └─────────────────┘
+│  │Customer_해외│ │                ▼
+│  └───────────┘  │      ┌─────────────────────┐
+│                 │      │  generators          │
+└─────────────────┘      │  excel_generator.py  │
+                         │  ts_generator.py     │
+                         │  pi_generator.py     │
+                         │  fi_generator.py     │
+                         └─────────┬───────────┘
+                                   │ 템플릿 사용
+                                   ▼
                          ┌─────────────────────┐
                          │    templates/       │
-                         │  purchase_order     │
-                         │     .xlsx           │
+                         │  purchase_order.xlsx │
+                         │  ts_template_local   │
+                         │  proforma_invoice    │
+                         │  final_invoice.xlsx  │
                          └─────────────────────┘
 ```
 
@@ -67,23 +76,40 @@ noahAutomation/
 ├── 📄 create_po.py          # CLI 진입점 (발주서 생성)
 ├── 📄 create_ts.py          # CLI 진입점 (거래명세표 생성)
 ├── 📄 create_pi.py          # CLI 진입점 (Proforma Invoice)
+├── 📄 create_fi.py          # CLI 진입점 (Final Invoice)
 │
 ├── 📁 po_generator/         # ⭐ 핵심 패키지
 │   ├── config.py            # 설정/상수 (경로, 필드, 색상)
 │   ├── utils.py             # 유틸리티 (데이터 로드, 값 추출)
 │   ├── validators.py        # 데이터 검증
 │   ├── history.py           # 이력 관리 (중복 체크, 저장)
-│   ├── template_engine.py   # 템플릿 처리 (행 복제, 공식 조정)
+│   ├── cli_common.py        # CLI 공통 함수
+│   ├── logging_config.py    # 로깅 설정 (verbose/normal)
+│   ├── excel_helpers.py     # Excel COM 헬퍼 (배치 연산, 템플릿 관리)
 │   ├── excel_generator.py   # PO Excel 생성 (openpyxl)
 │   ├── ts_generator.py      # 거래명세표 생성 (xlwings)
-│   └── cli_common.py        # CLI 공통 함수
+│   ├── pi_generator.py      # Proforma Invoice 생성 (xlwings)
+│   ├── fi_generator.py      # Final Invoice 생성 (xlwings)
+│   ├── template_engine.py   # 템플릿 처리 (레거시, 폴백용)
+│   └── 📁 services/         # 서비스 레이어
+│       ├── result.py        # DocumentResult, GenerationStatus
+│       ├── finder_service.py # 데이터 조회 (OrderData 래퍼)
+│       └── document_service.py # 문서 생성 오케스트레이터
 │
-├── 📁 templates/            # 템플릿 파일 (로고/도장 추가 가능)
+├── 📁 templates/            # 템플릿 파일 (로고/도장 포함)
 │   ├── purchase_order.xlsx
-│   └── transaction_statement.xlsx
+│   ├── ts_template_local.xlsx
+│   ├── proforma_invoice.xlsx
+│   ├── commercial_invoice.xlsx
+│   ├── final_invoice.xlsx
+│   ├── packing_list.xlsx
+│   ├── logo_rotork.png
+│   └── sign_rotork.png
 │
 ├── 📁 generated_po/         # 생성된 발주서 출력 폴더
 ├── 📁 generated_ts/         # 생성된 거래명세표 출력 폴더
+├── 📁 generated_pi/         # 생성된 Proforma Invoice 출력 폴더
+├── 📁 generated_fi/         # 생성된 Final Invoice 출력 폴더
 ├── 📁 po_history/           # 발주 이력 (월별 폴더)
 │   └── 2026/
 │       └── 1월/
@@ -101,39 +127,49 @@ noahAutomation/
 │                          모듈 의존 관계도                                │
 └─────────────────────────────────────────────────────────────────────────┘
 
-                        ┌─────────────────┐
-                        │  create_po.py   │  ◀── 사용자 실행
-                        │   (CLI 진입점)   │
-                        └────────┬────────┘
-                                 │
-           ┌─────────────────────┼─────────────────────┐
-           │                     │                     │
-           ▼                     ▼                     ▼
-┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
-│    utils.py     │   │  validators.py  │   │   history.py    │
-│  ─────────────  │   │  ─────────────  │   │  ─────────────  │
-│ • 데이터 로드   │   │ • 필수필드 체크 │   │ • 중복 발주체크 │
-│ • 주문번호 검색 │   │ • ICO Unit 검증 │   │ • 이력 저장     │
-│ • 값 추출      │   │ • 납기일 검증   │   │ • 이력 조회     │
-└────────┬────────┘   └─────────────────┘   └────────┬────────┘
-         │                                           │
-         │            ┌─────────────────┐            │
-         └───────────▶│    config.py    │◀───────────┘
-                      │  ─────────────  │
-                      │ • 경로 설정     │
-                      │ • 컬럼 별칭     │
-                      │ • 상수 정의     │
-                      └────────┬────────┘
-                               │
-           ┌───────────────────┼───────────────────┐
-           ▼                   ▼                   ▼
+  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+  │ create_po.py │ │ create_ts.py │ │ create_pi.py │ │ create_fi.py │
+  │  (PO CLI)    │ │  (TS CLI)    │ │  (PI CLI)    │ │  (FI CLI)    │
+  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
+         │                │                │                │
+         └────────────────┼────────────────┼────────────────┘
+                          ▼
+              ┌───────────────────────┐
+              │  services/            │
+              │  document_service.py  │ ◀── 문서 생성 오케스트레이터
+              │  finder_service.py    │ ◀── 데이터 조회 (OrderData)
+              │  result.py           │ ◀── DocumentResult 패턴
+              └───────────┬───────────┘
+                          │
+       ┌──────────────────┼──────────────────┐
+       │                  │                  │
+       ▼                  ▼                  ▼
 ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│template_engine  │ │excel_generator  │ │  ts_generator   │
+│    utils.py     │ │  validators.py  │ │   history.py    │
 │  ─────────────  │ │  ─────────────  │ │  ─────────────  │
-│ • 템플릿 로드   │ │ • PO 시트 생성  │ │ • 거래명세표    │
-│ • 행 복제      │ │ • Desc 시트     │ │   생성 (xlwings)│
-│ • 공식 조정    │ │ • 다중아이템    │ │ • 이미지 보존   │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
+│ • 데이터 로드   │ │ • 필수필드 체크 │ │ • 중복 발주체크 │
+│ • 주문번호 검색 │ │ • ICO Unit 검증 │ │ • 이력 저장     │
+│ • 값 추출      │ │ • 납기일 검증   │ │ • 이력 조회     │
+└────────┬────────┘ └─────────────────┘ └────────┬────────┘
+         │                                       │
+         │           ┌─────────────────┐         │
+         └──────────▶│    config.py    │◀────────┘
+                     │  ─────────────  │
+                     │ • 경로 설정     │
+                     │ • 컬럼 별칭     │
+                     │ • 상수 정의     │
+                     └────────┬────────┘
+                              │
+    ┌─────────────────────────┼──────────────────────────┐
+    ▼                         ▼                          ▼
+┌──────────────┐  ┌────────────────────┐  ┌──────────────────────┐
+│excel_generator│  │ excel_helpers.py   │  │ ts/pi/fi_generator   │
+│ ────────────  │  │ ────────────────   │  │ ──────────────────   │
+│ • PO (openpyxl)│  │ • XlConstants     │  │ • TS (거래명세표)    │
+│ • Desc 시트   │  │ • 배치 연산       │  │ • PI (Proforma Inv)  │
+│ • 다중아이템  │  │ • 템플릿 관리     │  │ • FI (Final Invoice) │
+└──────────────┘  │ • 동적 헤더 탐지   │  │ • 모두 xlwings 기반  │
+                  └────────────────────┘  └──────────────────────┘
 ```
 
 ---
@@ -346,23 +382,24 @@ po_history/
 ## 9. CLI 사용법 요약
 
 ```bash
-# 기본 사용
-python create_po.py ND-0001
+# === PO (발주서) ===
+python create_po.py ND-0001                       # 단일 발주
+python create_po.py ND-0001 ND-0002 ND-0003       # 여러 건 동시
+python create_po.py ND-0001 --force                # 강제 생성
+python create_po.py --history                      # 이력 조회
+python create_po.py --history --export             # 이력 Excel 내보내기
 
-# 여러 건 동시 생성
-python create_po.py ND-0001 ND-0002 ND-0003
+# === 거래명세표 (국내) ===
+python create_ts.py DND-2026-0001                  # 단건 (DN)
+python create_ts.py ADV_2026-0001                  # 선수금
+python create_ts.py DND-2026-0001 DND-2026-0002 --merge  # 월합
+python create_ts.py --interactive --merge           # 대화형 월합
 
-# 강제 생성 (중복/검증 오류 무시)
-python create_po.py ND-0001 --force
+# === Proforma Invoice (해외) ===
+python create_pi.py SOO-2026-0001                  # SO_ID 기반
 
-# 이력 조회 (현재 월)
-python create_po.py --history
-
-# 이력 Excel 내보내기
-python create_po.py --history --export
-
-# 도움말
-python create_po.py --help
+# === Final Invoice (해외 대금 청구) ===
+python create_fi.py DNO-2026-0001                  # DN_ID 기반
 ```
 
 ---
@@ -397,30 +434,37 @@ python create_po.py --help
 ## 11. 라이브러리 선택
 
 ```
-┌──────────────────┬─────────────┬─────────────────────────────────┐
-│ 문서 유형        │ 라이브러리  │ 이유                             │
-├──────────────────┼─────────────┼─────────────────────────────────┤
-│ Purchase Order   │ openpyxl    │ 이미지 없어도 OK, 빠름           │
-├──────────────────┼─────────────┼─────────────────────────────────┤
-│ 거래명세표       │ xlwings     │ 로고/도장 이미지 필수            │
-│ Invoice          │             │ Excel 기본 기능으로 서식 보존    │
-│ Packing List     │             │                                 │
-└──────────────────┴─────────────┴─────────────────────────────────┘
+┌──────────────────────────┬─────────────┬─────────────────────────────────┐
+│ 문서 유형                │ 라이브러리  │ 이유                             │
+├──────────────────────────┼─────────────┼─────────────────────────────────┤
+│ Purchase Order (PO)      │ openpyxl    │ 이미지 없어도 OK, 빠름           │
+├──────────────────────────┼─────────────┼─────────────────────────────────┤
+│ 거래명세표 (TS)          │ xlwings     │ 로고/도장 이미지 필수            │
+│ Proforma Invoice (PI)    │             │ Excel COM으로 서식/이미지 보존  │
+│ Final Invoice (FI)       │             │                                 │
+└──────────────────────────┴─────────────┴─────────────────────────────────┘
 ```
 
 ---
 
 ## 12. 주요 함수 Quick Reference
 
-| 함수 | 위치 | 역할 |
-|------|------|------|
+| 함수/클래스 | 위치 | 역할 |
+|-------------|------|------|
+| `DocumentService` | services/document_service.py | 문서 생성 오케스트레이터 |
+| `FinderService` | services/finder_service.py | 데이터 조회 (lazy loading) |
+| `DocumentResult` | services/result.py | 생성 결과 구조체 |
 | `load_noah_po_lists()` | utils.py | Excel 데이터 로드 (SO+PO 병합) |
 | `find_order_data()` | utils.py | 주문번호로 데이터 검색 |
 | `get_value()` | utils.py | 컬럼 별칭 지원하는 값 추출 |
+| `get_spec_option_fields()` | utils.py | 동적 사양/옵션 필드 추출 |
 | `validate_order_data()` | validators.py | 단일 아이템 검증 |
 | `validate_multiple_items()` | validators.py | 다중 아이템 검증 |
 | `check_duplicate_order()` | history.py | 중복 발주 체크 |
 | `save_to_history()` | history.py | 이력 저장 (DB 형식) |
-| `load_template()` | template_engine.py | 템플릿 파일 로드 |
-| `clone_row()` | template_engine.py | 행 복제 (스타일 포함) |
-| `create_po_workbook()` | excel_generator.py | PO 워크북 생성 (메인) |
+| `xlwings_app_context()` | excel_helpers.py | Excel COM 생명주기 관리 |
+| `batch_write_rows()` | excel_helpers.py | 배치 쓰기 (COM 호출 최소화) |
+| `create_po_workbook()` | excel_generator.py | PO 워크북 생성 (openpyxl) |
+| `create_ts_xlwings()` | ts_generator.py | 거래명세표 생성 (xlwings) |
+| `create_pi_xlwings()` | pi_generator.py | Proforma Invoice 생성 (xlwings) |
+| `create_fi_xlwings()` | fi_generator.py | Final Invoice 생성 (xlwings) |

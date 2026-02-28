@@ -197,6 +197,7 @@ SO_국내 표에 새 SO_ID 추가 시:
 - 같은 주문의 여러 품목은 **같은 SO_ID + 다른 Line item** 사용
 - **복합 키**: `SO_ID + Line item`으로 개별 아이템 고유 식별
 - 피벗테이블로 SO_ID 기준 그룹핑 가능
+- **참고**: 코드에서는 `SO_ID` 단독으로 조인 (DN/PMT 조회 시 Line item 없이 SO_ID만 사용)
 
 **예시**:
 ```
@@ -240,6 +241,21 @@ SO_국내 표에 새 SO_ID 추가 시:
 | 가격 | ICO Unit, Total ICO | 수식 계산 |
 | 사양 | Power supply, Motor(kW), BASE, ACT Flange, Operating time, Handwheel, RPM, Turns, Bushing, MOV, Gearbox model/Flange/ratio/position, Operating mode, Fail action, Enclosure, Cable entry, Paint, Cover tube(mm), WD code, Test report, Version, Note | 직접 입력 |
 | 옵션 (Y/N) | Model, Bush, ALS, EXT, DC24V, Modbus/Profibus, LCU, PIU, CPT+PIU, PCU+PIU, -40, -60, SCP, EXP, Bush-SQ, Bush-STAR, INTEGRAL, IMS, BLDC, HART/Foundation Fieldbus, ATS | 직접 입력 |
+
+**동적 사양/옵션 필드 감지**:
+
+코드에서 사양/옵션 컬럼을 하드코딩하지 않고 `get_spec_option_fields()` 함수로 동적으로 감지합니다:
+
+```
+PO 시트 전체 컬럼
+├── META_COLUMNS (config.py에 정의된 메타 컬럼) → 제외
+├── SPEC_START_COLUMN ~ Status 전까지 → SPEC_FIELDS (사양)
+└── OPTION_START_COLUMN ~ 끝까지 → OPTION_FIELDS (옵션 Y/N)
+```
+
+- `META_COLUMNS`: SO_ID, Customer name, Model 등 메타데이터 컬럼 (frozenset)
+- 사양/옵션 컬럼은 PO 시트에 새 컬럼이 추가되면 자동으로 반영됨
+- Description 시트 생성 시 동적 감지된 필드 목록 사용
 
 **ICO Unit 계산 수식** (기존 유지):
 ```
@@ -307,7 +323,7 @@ SO_국내 표에 새 SO_ID 추가 시:
 **컬럼 목록**:
 | 컬럼명 | 설명 |
 |--------|------|
-| PMT_ID | 키 (자동 또는 수동) |
+| 선수금_ID | 키 (ADV_YYYY-NNNN 형식, `create_ts.py`에서 사용) |
 | SO_ID | Sales Order 참조 |
 | 구분 | 선수금 / 잔금 / 완납 |
 | 금액 | 입금 금액 |
