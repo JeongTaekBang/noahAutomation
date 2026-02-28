@@ -371,6 +371,102 @@ SO_국내 수정 → PO_국내 영향 없음 (이미 발주된 내역 보존)
 
 ---
 
+## 6.1 ERP 관점에서 본 데이터 구조
+
+이 엑셀 기반 시스템은 ERP의 핵심 원리를 그대로 구현하고 있다.
+
+### 테이블 관계 = ERP의 FK/PK 관계
+
+| ERP 개념 | 엑셀 구현 | 설명 |
+|----------|----------|------|
+| Primary Key | `SO_ID + Line item` | 각 시트의 행을 고유 식별하는 복합 키 |
+| Foreign Key | SO_ID (DN, PMT에서 참조) | 트랜잭션 간 연결 |
+| Dimension Table | SO_header (파워쿼리 생성) | SO_ID 고유값 → 1:N 관계의 1 쪽 |
+| Fact Table | SO, PO, DN, PMT | 실제 트랜잭션 데이터 |
+| Master Table | Customer master, ICO, ITEM | 참조 데이터 |
+
+### 데이터 참조 = ERP의 FK Lookup
+
+```
+엑셀 수식:
+=XLOOKUP(SO_ID, SO_국내[SO_ID], SO_국내[Customer name])
+
+ERP SQL:
+SELECT c.customer_name FROM sales_order s JOIN customer c ON s.customer_id = c.id
+```
+
+둘 다 **키 기반으로 다른 테이블의 값을 참조**하는 동일한 원리.
+
+### 데이터 집계 = ERP의 SQL GROUP BY
+
+```
+Power Query:
+Table.Group(PO_Combined, {"SO_ID", "Line item"}, {
+    {"Total ICO", each List.Sum([Total ICO]), type number}
+})
+
+ERP SQL:
+SELECT SO_ID, Line_item, SUM(Total_ICO) FROM PO GROUP BY SO_ID, Line_item
+```
+
+같은 키의 여러 행을 합산하는 로직. PO 사양 분리(1:N)나 DN 분할 출고(N:1) 모두 이 패턴으로 처리.
+
+### 테이블 간 관계 유형
+
+```
+SO ──(1:1)── PO     기본 관계 (SO Line 1개 = PO Line 1개)
+SO ──(1:N)── PO     사양 분리 시 (SO Line 1개 → PO 여러 행, Table.Group으로 합산)
+SO ──(1:N)── DN     분할 출고 시 (SO Line 1개 → DN 여러 행, Table.Group으로 합산)
+SO ──(1:N)── PMT    분할 입금 시 (SO 1건 → 선수금/잔금 여러 행)
+```
+
+ERP에서도 SO-DN, SO-PO는 1:N이 기본이며, 집계 시 GROUP BY로 합산한다.
+
+### 상태 관리 = ERP Workflow
+
+```
+PO 상태:  Open → Sent → Confirmed → Invoiced (→ Cancelled)
+출고 상태: 미출고 → 부분 출고 → 출고 완료
+```
+
+| ERP 개념 | 엑셀 구현 |
+|----------|----------|
+| Order Status | PO의 Status 컬럼 (Open/Sent/Confirmed/Invoiced/Cancelled) |
+| Delivery Status | SO_통합 쿼리의 출고완료 (미출고/부분 출고/출고 완료) |
+| 미출고금액 | Sales amount - 출고금액 (ERP의 "Deliver remainder") |
+
+### 스냅샷 보존 = ERP의 트랜잭션 불변성
+
+| ERP 원칙 | 엑셀 구현 |
+|----------|----------|
+| 발주서는 발주 시점의 기록 | PO는 SO에서 **값 복사** (수식 참조 X) |
+| SO 변경이 기발주에 영향 없음 | PO 행은 발주 후 수정하지 않음 |
+| 추가 발주는 새 트랜잭션 | PO에 새 행 추가 (기존 행 수정 X) |
+| 취소도 기록으로 남김 | Status=Cancelled (행 삭제 X) |
+
+### 조인 방식 = ERP의 테이블 조인
+
+| Power Query | SQL | 용도 |
+|-------------|-----|------|
+| `Table.NestedJoin(..., JoinKind.LeftOuter)` | `LEFT OUTER JOIN` | SO 기준으로 PO/DN 매칭 (없어도 SO는 표시) |
+| `Table.Group(..., List.Sum)` | `GROUP BY + SUM` | 같은 키의 금액 합산 (분할 출고/사양 분리) |
+| `Table.Distinct(..., {"SO_ID"})` | `SELECT DISTINCT` | 중복 제거 (SO_header 생성) |
+| `Table.SelectRows(..., [Status] <> "Cancelled")` | `WHERE Status <> 'Cancelled'` | 취소 건 필터링 |
+
+### 차이점: ERP vs 엑셀
+
+| 항목 | ERP | 현재 엑셀 시스템 |
+|------|-----|-----------------|
+| 데이터 무결성 | RDBMS 제약조건 (NOT NULL, FK, UNIQUE) | 수동 입력에 의존 |
+| 트랜잭션 보장 | ACID 트랜잭션 | 없음 (동시 편집 시 충돌 가능) |
+| 권한 관리 | 역할별 접근 제어 | 시트 보호 수준 |
+| 감사 추적 | 변경 이력 자동 기록 | po_history로 부분 추적 |
+| 자동 채번 | 시퀀스/Auto-increment | 수동 ID 입력 |
+
+> **결론**: 테이블 관계, 조인, 집계, 상태 관리, 스냅샷 보존 등 **데이터 처리 원리는 ERP와 동일**하다. 차이는 무결성 보장 수준뿐이며, 이는 ERP 통합 전까지 운용 규칙으로 보완한다.
+
+---
+
 ## 7. 운영 규칙
 
 ### 7.0 SO 수량 변경 시 운용 방식
@@ -599,3 +695,4 @@ python create_packing.py SO-2026-0001
 | 2026-01-30 | **데이터 구조 변경**: Line item 컬럼 추가 (SO_국내, SO_해외, PO_국내), PO_국내 값 복사 방식으로 전환 (발주 스냅샷 보존), 복합 키(SO_ID + Line item) 기반 아이템 식별 |
 | 2026-01-31 | **SO↔PO 관계 변경**: 행 1:1 → 1:N 관계로 전환, SO 수량 변경 시 PO에 새 행 추가 방식 채택, PO_현황 Power Query 추가 |
 | 2026-02-23 | **SO 컬럼 추가**: AX Period, AX Item number 컬럼을 SO_국내/SO_해외 공통 컬럼에 추가, SO_해외 컬럼 수 문서화 (32개) |
+| 2026-02-28 | **ERP 매핑 섹션 추가**: 섹션 6.1 - 테이블 관계, 조인, 집계, 상태 관리, 스냅샷 보존 등 ERP 원리와의 대응 관계 문서화 |
