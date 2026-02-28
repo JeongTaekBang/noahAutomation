@@ -68,6 +68,7 @@ Shared: config.py (paths, constants, aliases), utils.py (data loading), validato
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
 | `docs/DATA_STRUCTURE_DESIGN.md` | Excel schema (8 sheets), Power Query setup |
+| `docs/POWER_QUERY.md` | Power Query 수식, Power Pivot 관계 — 데이터 소스 구조 이해 시 참고 |
 
 ## Business Rules
 
