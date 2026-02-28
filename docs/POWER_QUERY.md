@@ -1811,12 +1811,12 @@ P02: SOD-0001, IQ3, Line item 2, qty=-2, amount=-100만  (조정분)
 ## 트러블슈팅
 
 ### 중복 행 발생
-- **원인**: 조인 키(SO_ID, Item name)에 중복 데이터 존재
+- **원인**: 조인 키(SO_ID, Line item)에 중복 데이터 존재
 - **해결**: `Table.Distinct()` 사용하여 중복 제거
 
 ### 원가/출고금액이 null
-- **원인**: PO 또는 DN에 해당 SO_ID + Item 조합이 없음
-- **확인**: 원본 시트에서 Item name 일치 여부 확인 (띄어쓰기, 괄호 등)
+- **원인**: PO 또는 DN에 해당 SO_ID + Line item 조합이 없음
+- **확인**: 원본 시트에서 Line item 일치 여부 확인
 
 ### GL대상 판단 기준
 - AX Project number가 없거나 빈 문자열이면 `Y`
@@ -2096,15 +2096,15 @@ DN_국내 (기준)
     │ 1차 JOIN: PO에서 원가 가져오기
     ▼
 ┌─────────────────────────────────────────────────────────┐
-│ Table.NestedJoin(DN, {"SO_ID", "Item"},                 │
-│                  PO, {"SO_ID", "Item name"}, "PO_Data") │
+│ Table.NestedJoin(DN, {"SO_ID", "Line item"},             │
+│                  PO, {"SO_ID", "Line item"}, "PO_Data") │
 └─────────────────────────────────────────────────────────┘
     │
     │ 2차 JOIN: SO에서 AX 정보 가져오기
     ▼
 ┌─────────────────────────────────────────────────────────┐
-│ Table.NestedJoin(Result, {"SO_ID", "Item"},             │
-│                  SO, {"SO_ID", "Item name"}, "SO_Data") │
+│ Table.NestedJoin(Result, {"SO_ID", "Line item"},         │
+│                  SO, {"SO_ID", "Line item"}, "SO_Data") │
 └─────────────────────────────────────────────────────────┘
     │
     ▼
