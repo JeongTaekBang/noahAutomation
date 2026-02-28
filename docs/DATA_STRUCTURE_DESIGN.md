@@ -550,18 +550,59 @@ ERP:
 
 ### Header-Line 패턴 — 모든 ERP 문서의 기본 구조
 
-ERP의 거의 모든 문서는 **Header(1) → Line(N)** 구조를 따른다:
+ERP의 거의 모든 문서는 **Header(1) → Line(N)** 구조를 따르며, **Header ID + Line 번호**가 복합 키(Composite Key)로 개별 행을 식별한다:
 
 ```
 SAP:   VBAK (SO Header)       → VBAP (SO Item)          ← 1:N
+       복합 키: VBELN + POSNR  (예: 10001 + 10, 10001 + 20, 10001 + 30)
        EKKO (PO Header)       → EKPO (PO Item)          ← 1:N
+       복합 키: EBELN + EBELP  (예: 45001 + 10, 45001 + 20)
        LIKP (Delivery Header)  → LIPS (Delivery Item)    ← 1:N
+       복합 키: VBELN + POSNR
 
 D365:  SalesOrderHeader       → SalesOrderLine           ← 1:N
+       복합 키: SalesId + LineNum  (예: SO-0001 + 1, SO-0001 + 2)
        PurchaseOrderHeader    → PurchaseOrderLine         ← 1:N
+       복합 키: PurchId + LineNum
 
-현재:  SO_header_국내          → SO_국내 (Line item)      ← 1:N  ✅
+현재:  SO_header_국내          → SO_국내 (Line item)      ← 1:N
+       복합 키: SO_ID + Line item  (예: SOD-2026-0001 + 1, SOD-2026-0001 + 2)
 ```
+
+> **SAP 채번 방식**: Line 번호를 10 단위(10, 20, 30...)로 부여한다. 나중에 기존 라인 사이에 행을 삽입할 수 있도록 간격을 두는 것. 현재 시스템은 1, 2, 3 순번이지만, 엑셀에서는 행 삽입이 자유로우므로 문제없다.
+
+#### 현재 시스템과의 차이: Flat Table 방식
+
+ERP는 Header 테이블과 Line 테이블이 **물리적으로 분리**되어 있다:
+
+```
+ERP (물리적 2개 테이블):
+  VBAK (Header): VBELN=10001, 고객명=A사, 주문일=2026-01-15
+  VBAP (Line):   VBELN=10001, POSNR=10, 모델=IQ10, 수량=10
+                 VBELN=10001, POSNR=20, 모델=IQ18, 수량=20
+  → 고객명을 보려면 Header JOIN 필요
+```
+
+현재 시스템은 엑셀 직접 입력이므로 **Flat Table(단일 시트)** 방식이다. Header 정보가 매 행마다 반복된다:
+
+```
+현재 (Flat Table — 1개 시트):
+  SO_국내:  SOD-0001, Line 1, A사, IQ10, 10   ← 고객명 반복
+            SOD-0001, Line 2, A사, IQ18, 20   ← 고객명 반복
+            SOD-0002, Line 1, B사, NA038, 100
+  → 조인 없이 한 행에 모든 정보가 있음
+```
+
+**Flat Table의 장단점**:
+
+| 항목 | ERP (Header-Line 분리) | 현재 (Flat Table) |
+|------|----------------------|-------------------|
+| 데이터 중복 | 없음 (정규화) | 고객명 등 Header 정보 반복 |
+| 입력 편의성 | Header 먼저 → Line 입력 | 한 행에 모두 입력 (엑셀에 자연스러움) |
+| 수정 시 일관성 | Header 1곳만 수정 | 같은 SO_ID의 모든 행 수정 필요 |
+| 조회 편의성 | JOIN 필요 | 바로 보임 |
+
+> **SO_header_국내** 시트(파워쿼리로 생성)가 ERP의 Header 테이블 역할을 대신한다. Flat Table에서 SO_ID 고유값을 추출하여 Dim 테이블로 만든 것이므로, 파워피벗에서는 ERP와 동일한 1:N 관계가 성립한다.
 
 ### Document Flow — 문서 체인
 
