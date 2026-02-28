@@ -633,7 +633,11 @@ let
     // ========== 계산 컬럼 추가 ==========
     WithMargin = Table.AddColumn(WithShipExpanded, "마진", each [Sales amount KRW] - (if [원가] = null then 0 else [원가]), type number),
     WithMarginRate = Table.AddColumn(WithMargin, "마진율", each if [Sales amount KRW] = 0 or [Sales amount KRW] = null then null else [마진] / [Sales amount KRW], Percentage.Type),
-    WithShipStatus = Table.AddColumn(WithMarginRate, "출고완료", each if [출고금액] <> null then "Y" else "N", type text),
+    WithShipStatus = Table.AddColumn(WithMarginRate, "출고완료", each
+        if [출고금액] = null then "미출고"
+        else if [Sales amount KRW] - [출고금액] > 0 then "부분 출고"
+        else "출고 완료",
+        type text),
     WithSalesMonth = Table.AddColumn(WithShipStatus, "매출연월", each
         if [출고일] = null then null
         else Text.From(Date.Year([출고일])) & "-" & Text.PadStart(Text.From(Date.Month([출고일])), 2, "0"),
