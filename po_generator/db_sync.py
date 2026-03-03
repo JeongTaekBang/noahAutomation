@@ -41,6 +41,8 @@ class SheetSyncResult:
     unchanged: int = 0
     inserted_pks: list[tuple] = field(default_factory=list)
     updated_pks: list[tuple] = field(default_factory=list)
+    # 신규 상세: [{pk: tuple, values: {col: value}}] — 비어있지 않은 값만
+    inserted_details: list[dict] = field(default_factory=list)
     # 수정 상세: [{pk: tuple, changes: {col: (old, new)}}]
     updated_details: list[dict] = field(default_factory=list)
 
@@ -307,6 +309,16 @@ class SyncEngine:
                         )
                         result.inserted += 1
                         result.inserted_pks.append(tuple(pk_vals))
+                        # 신규 행의 비어있지 않은 값 기록
+                        non_empty = {}
+                        for i, c in enumerate(columns):
+                            v = new_values[i]
+                            if v is not None and str(v).strip() != '':
+                                non_empty[c] = v
+                        result.inserted_details.append({
+                            'pk': tuple(pk_vals),
+                            'values': non_empty,
+                        })
 
                 except Exception as e:
                     result.errors += 1

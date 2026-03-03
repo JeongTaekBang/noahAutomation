@@ -80,21 +80,23 @@ def _format_val(val) -> str:
 
 def print_changes(summary: SyncSummary) -> None:
     """신규/수정된 레코드 상세 출력"""
-    has_changes = any(r.inserted_pks or r.updated_details for r in summary.results)
+    has_changes = any(r.inserted_details or r.updated_details for r in summary.results)
     if not has_changes:
         print("\n변경 사항 없음")
         return
 
     for r in summary.results:
-        if not r.inserted_pks and not r.updated_details:
+        if not r.inserted_details and not r.updated_details:
             continue
 
         print(f"\n--- {r.sheet_name} ---")
 
-        if r.inserted_pks:
-            print(f"  [신규] {len(r.inserted_pks)}건:")
-            for pk in r.inserted_pks:
-                print(f"    + {_format_pk(pk)}")
+        if r.inserted_details:
+            print(f"  [신규] {len(r.inserted_details)}건:")
+            for detail in r.inserted_details:
+                print(f"    + {_format_pk(detail['pk'])}")
+                for col, val in detail['values'].items():
+                    print(f"        {col}: {_format_val(val)}")
 
         if r.updated_details:
             print(f"  [수정] {len(r.updated_details)}건:")
@@ -120,7 +122,7 @@ def _csv_escape(val) -> str:
 
 def write_sync_log(summary: SyncSummary) -> None:
     """동기화 변경 내역을 CSV 로그 파일에 기록"""
-    has_changes = any(r.inserted_pks or r.updated_details for r in summary.results)
+    has_changes = any(r.inserted_details or r.updated_details for r in summary.results)
     if not has_changes:
         return
 
@@ -133,12 +135,13 @@ def write_sync_log(summary: SyncSummary) -> None:
             f.write(CSV_HEADER)
 
         for r in summary.results:
-            pk_col_names = ' | '.join(r.sheet_name for _ in [1])  # just for context
-
-            # 신규
-            for pk in r.inserted_pks:
-                pk_str = _csv_escape(_format_pk(pk))
-                f.write(f"{now},{r.sheet_name},신규,{pk_str},,,,\n")
+            # 신규 (필드별 1행 — 비어있지 않은 값만)
+            for detail in r.inserted_details:
+                pk_str = _csv_escape(_format_pk(detail['pk']))
+                for col, val in detail['values'].items():
+                    col_esc = _csv_escape(col)
+                    val_esc = _csv_escape(val)
+                    f.write(f"{now},{r.sheet_name},신규,{pk_str},{col_esc},,{val_esc}\n")
 
             # 수정 (필드별 1행)
             for detail in r.updated_details:
