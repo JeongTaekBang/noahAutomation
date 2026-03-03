@@ -29,6 +29,9 @@ echo   [해외]
 echo   [3] Proforma Invoice 생성 (PI)
 echo   [4] Final Invoice 생성 (대금 청구)
 echo.
+echo   [데이터]
+echo   [5] Excel → DB 동기화
+echo.
 echo   [기타]
 echo   [8] 발주 이력 조회
 echo   [9] 발주 이력 Excel 내보내기
@@ -43,6 +46,7 @@ if "%CHOICE%"=="1" goto create_po
 if "%CHOICE%"=="2" goto create_ts
 if "%CHOICE%"=="3" goto create_pi
 if "%CHOICE%"=="4" goto create_fi
+if "%CHOICE%"=="5" goto sync_db
 if "%CHOICE%"=="8" goto view_history
 if "%CHOICE%"=="9" goto export_history
 if "%CHOICE%"=="0" goto end
@@ -222,6 +226,20 @@ echo ----------------------------------------
 set /p FI_CONTINUE="다른 Final Invoice를 생성하시겠습니까? (Y/N): "
 if /i "%FI_CONTINUE%"=="Y" goto fi_input
 goto menu
+
+:sync_db
+echo.
+echo ----------------------------------------
+echo   Excel → SQLite DB 동기화
+echo ----------------------------------------
+echo.
+
+"%PYTHON_PATH%" "%~dp0sync_db.py" --changes
+
+echo.
+pause
+goto menu
+
 
 :end
 echo.

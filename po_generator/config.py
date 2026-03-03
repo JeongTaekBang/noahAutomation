@@ -33,6 +33,8 @@ _output_base_dir = _load_user_setting('OUTPUT_BASE_DIR', None)
 _OUTPUT_BASE: Path | None = Path(_output_base_dir) if _output_base_dir else None
 # 새 데이터베이스 파일 (SO/PO/DN 분리 구조)
 NOAH_SO_PO_DN_FILE: Final[Path] = DATA_DIR / "NOAH_SO_PO_DN.xlsx"
+# SQLite 백업 DB
+DB_FILE: Final[Path] = DATA_DIR / "noah_data.db"
 # 기존 파일 (하위 호환 - deprecated)
 NOAH_PO_LISTS_FILE: Final[Path] = DATA_DIR / "NOAH_PO_Lists.xlsx"
 

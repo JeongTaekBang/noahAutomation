@@ -12,14 +12,56 @@
 - [ ] Packing List 생성기 구현
 
 ### SQL 기반 데이터 분석
-- [ ] NOAH_SO_PO_DN.xlsx → 로컬 SQL DB 연동
-  - **배경**: Power Pivot의 양방향 JOIN 제한으로 복잡한 분석 어려움
-  - **목표**: Python에서 데이터 로드 → SQL로 자유로운 분석
-  - **추천 라이브러리**: DuckDB (설치 불필요, pandas 직접 연동, 분석 특화)
-  - **구현 방향**:
-    - `po_generator/data_layer.py` - 데이터 레이어 모듈
-    - `queries/` 폴더 - 자주 쓰는 분석 쿼리 저장
-    - CLI 확장 (`--analyze` 옵션 또는 `create_report.py`)
+- [x] NOAH_SO_PO_DN.xlsx → SQLite DB 동기화 구현 완료 ✓
+  - **배경**: Excel 형식의 데이터 유실/변형 취약점 → SQLite 백업
+  - DuckDB 분석 연동은 추후 확장 예정
+
+---
+
+## 2026-03-03: Excel → SQLite DB 동기화 구현
+
+### 배경
+NOAH_SO_PO_DN.xlsx가 사실상 ERP 역할을 하고 있으나, Excel 형식 특성상 데이터 유실/변형에 취약. 수동 입력 시트(SO, PO, DN, PMT)를 SQLite DB에 upsert 방식으로 업로드하여 데이터를 안전하게 백업하고 관리.
+
+### 신규 파일
+| 파일 | 역할 |
+|------|------|
+| `sync_db.py` | CLI 진입점 (--dry-run, --sheets, --info, -v) |
+| `po_generator/db_schema.py` | 테이블/PK 정의, DDL 생성, 스키마 관리 |
+| `po_generator/db_sync.py` | SyncEngine — upsert 동기화 엔진 |
+
+### 수정 파일
+| 파일 | 변경 |
+|------|------|
+| `po_generator/config.py` | `DB_FILE` 상수 1줄 추가 |
+
+### 테이블 설계 (7개)
+
+| 테이블명 | 소스 시트 | PK | 행 수 |
+|----------|----------|-----|------|
+| `so_domestic` | SO_국내 | `(SO_ID, Customer PO, Line item)` | 590 |
+| `so_export` | SO_해외 | `(SO_ID, Customer PO, Line item)` | 233 |
+| `po_domestic` | PO_국내 | `(SO_ID, Customer PO, Line item)` | 589 |
+| `po_export` | PO_해외 | `(SO_ID, Customer PO, Line item, _row_seq)` | 235 |
+| `dn_domestic` | DN_국내 | `(DN_ID, Line item)` | 283 |
+| `dn_export` | DN_해외 | `(DN_ID, SO_ID, Line item)` | 88 |
+| `pmt_domestic` | PMT_국내 | `(선수금_ID)` | 33 |
+
+### 사용법
+```bash
+python sync_db.py                           # 전체 동기화
+python sync_db.py -v                        # 상세 로그
+python sync_db.py --sheets SO_국내 PO_국내  # 특정 시트만
+python sync_db.py --dry-run                 # 시뮬레이션
+python sync_db.py --info                    # DB 현황 조회
+```
+
+### 핵심 설계
+- **DB**: SQLite (Python 내장, 서버 불필요). 위치: `DATA_DIR / "noah_data.db"`
+- **Upsert**: PK 기준 INSERT or UPDATE — 재실행 시 기존 데이터 업데이트
+- **PO_해외 `_row_seq`**: 같은 SO Line item에 사양 변형 시 자동 순번 부여
+- **스키마 진화**: `ensure_columns_exist()`로 Excel 컬럼 추가 시 자동 대응
+- **메타 테이블**: `_sync_meta`에 테이블별 마지막 동기화 시간/행 수 기록
 
 ---
 

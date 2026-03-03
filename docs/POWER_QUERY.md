@@ -81,7 +81,7 @@ NOAH 엑셀 원가 계산:
 | SO_통합 | 주문 현황 + 원가 + 마진 + 출고 상태 |
 | PO_현황 | 발주 현황 + Status별 집계 + 매입금액 |
 | **PO_매입월별** | **월별 매입 집계 (IC Balance Confirmation용)** |
-| **PO_AX대사** | **Period + AX PO(PXXXXXX)별 GRN 금액 집계 (회계 마감 대사용)** |
+| **PO_AX대사** | **Period + AX Project + AX PO별 GRN 금액 집계 (회계 마감 대사용)** |
 | **PO_미출고** | **Invoiced인데 DN 미매칭 건 (데이터 점검용)** |
 | Inventory_Transaction | 입출고 트랜잭션 (감사 추적용) |
 | **Order_Book** | **월별 수주잔고 (Backlog) 롤링 원장 - AX 오더북 형식** |
@@ -937,17 +937,20 @@ NOAH AR Statement (2026-01월)  vs  PO_매입월별 (매입월 = 2026-01) 매입
 ### 목적
 - **회계 마감 시 AX GRN 대사** 용도
 - Invoiced(GRN 처리 완료) 건만 대상
-- Period + AX PO(PXXXXXX)별 금액 집계
+- SO_ID 기준 flat 구조 — AX Project number, AX PO를 LEFT JOIN으로 나열
 - AX에 입력된 GRN 금액과 엑셀 매입금액 비교
 
 ### 대사 프로세스
 ```
-엑셀 (PO_AX대사 쿼리)                          AX (D365 F&O) GRN
-┌─────────────────────────────────┐        ┌─────────────────────────────────┐
-│ 2026-01  P000001  ₩7,500,000   │  ──→   │ 2026-01  P000001  ₩7,500,000   │  ✓ 일치
-│ 2026-01  P000002  ₩8,000,000   │  ──→   │ 2026-01  P000002  ₩8,000,000   │  ✓ 일치
-│ 2026-02  P000003  ₩6,000,000   │  ──→   │ 2026-02  P000003  ₩4,000,000   │  ✗ 불일치
-└─────────────────────────────────┘        └─────────────────────────────────┘
+엑셀 (PO_AX대사 쿼리)                                              AX (D365 F&O) GRN
+┌─────────────────────────────────────────────────────────┐    ┌─────────────────────────────────┐
+│ 2026-01  PRJ-001  P000001  SOD-0001  ₩5,000,000        │──→ │                                 │
+│ 2026-01  PRJ-001  P000001  SOD-0005  ₩2,500,000        │──→ │ 2026-01  P000001  ₩7,500,000   │ ✓ 합계 일치
+│ 2026-01  PRJ-001  P000002  SOD-0002  ₩8,000,000        │──→ │ 2026-01  P000002  ₩8,000,000   │ ✓ 일치
+│ 2026-02  PRJ-002  P000003  SOD-0007  ₩6,000,000        │──→ │ 2026-02  P000003  ₩4,000,000   │ ✗ 불일치
+└─────────────────────────────────────────────────────────┘    └─────────────────────────────────┘
+  ※ SO_ID별 행이 분리되어 불일치 시 어떤 SO에서 차이인지 즉시 파악 가능
+  ※ AX PO별 합계는 Excel 피벗/필터로 확인
 ```
 
 ### 결과 컬럼
@@ -955,8 +958,10 @@ NOAH AR Statement (2026-01월)  vs  PO_매입월별 (매입월 = 2026-01) 매입
 | 컬럼 | 설명 |
 |------|------|
 | Period | 출고일 기준 월 (yyyy-MM 형식) |
+| AX Project number | AX 프로젝트번호 (SO에서 LEFT JOIN) |
 | AX PO | AX 발주번호 (PXXXXXX) |
 | 구분 | 국내/해외 |
+| SO_ID | NOAH SO 번호 (행 기준 키) |
 | PO_ID | 포함된 NOAH PO 번호 (여러 개면 콤마로 연결) |
 | 건수 | Invoiced PO Line 수 |
 | 수량 | Invoiced 수량 합계 |
@@ -984,6 +989,18 @@ let
     // AX PO 있는 건만 (AX에 입력되어 대사 가능한 건)
     PO_WithAX = Table.SelectRows(PO_Invoiced, each [#"AX PO"] <> null and [#"AX PO"] <> ""),
 
+    // ========== SO 원본 (AX Project number 조인용) ==========
+    SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
+    SO_해외_Raw = Excel.CurrentWorkbook(){[Name="SO_해외"]}[Content],
+
+    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Line item", "AX Project number"}),
+    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Line item", "AX Project number"}),
+    SO_Combined = Table.Combine({SO_국내, SO_해외}),
+
+    // ========== PO + SO 조인 (AX Project number 가져오기) ==========
+    WithProject = Table.NestedJoin(PO_WithAX, {"SO_ID", "Line item"}, SO_Combined, {"SO_ID", "Line item"}, "SO_Data", JoinKind.LeftOuter),
+    WithProjectExpanded = Table.ExpandTableColumn(WithProject, "SO_Data", {"AX Project number"}, {"AX Project number"}),
+
     // ========== DN 원본 (출고일 → Period 산정) ==========
     DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
     DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
@@ -999,7 +1016,7 @@ let
     }),
 
     // ========== PO + DN 조인 (출고일 가져오기) ==========
-    WithDate = Table.NestedJoin(PO_WithAX, {"SO_ID", "Line item"}, DN_Grouped, {"SO_ID", "Line item"}, "DN_Data", JoinKind.LeftOuter),
+    WithDate = Table.NestedJoin(WithProjectExpanded, {"SO_ID", "Line item"}, DN_Grouped, {"SO_ID", "Line item"}, "DN_Data", JoinKind.LeftOuter),
     WithDateExpanded = Table.ExpandTableColumn(WithDate, "DN_Data", {"출고일"}, {"출고일"}),
 
     // 출고일 있는 건만 (Period 산정 가능한 건)
@@ -1013,18 +1030,23 @@ let
         Text.From(Date.Year([출고일])) & "-" & Text.PadStart(Text.From(Date.Month([출고일])), 2, "0"),
         type text),
 
-    // ========== Period + AX PO 기준 그룹화 ==========
-    Grouped = Table.Group(WithPeriod, {"Period", "AX PO", "구분"}, {
+    // ========== SO_ID 기준 그룹화 (AX PO, AX Project number는 LEFT JOIN으로 유지) ==========
+    Grouped = Table.Group(WithPeriod, {"Period", "AX Project number", "AX PO", "구분", "SO_ID"}, {
         {"PO_ID", each Text.Combine(List.Distinct([PO_ID]), ", "), type text},
         {"건수", each Table.RowCount(_), Int64.Type},
         {"수량", each List.Sum([Item qty]), type number},
         {"금액", each List.Sum([Total ICO]), type number}
     }),
 
+    // ========== 컬럼 순서 정리 ==========
+    Reordered = Table.ReorderColumns(Grouped, {"Period", "AX Project number", "AX PO", "구분", "SO_ID", "PO_ID", "건수", "수량", "금액"}),
+
     // ========== 정렬 ==========
-    Sorted = Table.Sort(Grouped, {
+    Sorted = Table.Sort(Reordered, {
         {"Period", Order.Descending},
-        {"AX PO", Order.Ascending}
+        {"AX Project number", Order.Ascending},
+        {"AX PO", Order.Ascending},
+        {"SO_ID", Order.Ascending}
     }),
 
     // ========== 타입 변환 ==========
@@ -1039,26 +1061,31 @@ in
 
 ### 결과 예시
 
-| Period | AX PO | 구분 | PO_ID | 건수 | 수량 | 금액 |
-|--------|-------|------|-------|------|------|------|
-| 2026-02 | P000003 | 국내 | POD-0007 | 2 | 10 | 4,000,000 |
-| 2026-02 | P000005 | 해외 | POO-0003 | 1 | 5 | 3,500,000 |
-| 2026-01 | P000001 | 국내 | POD-0001, POD-0005 | 4 | 15 | 7,500,000 |
-| 2026-01 | P000002 | 국내 | POD-0002 | 2 | 10 | 8,000,000 |
-| 2026-01 | P000004 | 해외 | POO-0001 | 3 | 20 | 6,000,000 |
+| Period | AX Project number | AX PO | 구분 | SO_ID | PO_ID | 건수 | 수량 | 금액 |
+|--------|-------------------|-------|------|-------|-------|------|------|------|
+| 2026-02 | PRJ-002 | P000003 | 국내 | SOD-0007 | POD-0007 | 2 | 10 | 4,000,000 |
+| 2026-02 | PRJ-003 | P000005 | 해외 | SOO-0003 | POO-0003 | 1 | 5 | 3,500,000 |
+| 2026-01 | PRJ-001 | P000001 | 국내 | SOD-0001 | POD-0001 | 2 | 8 | 5,000,000 |
+| 2026-01 | PRJ-001 | P000001 | 국내 | SOD-0005 | POD-0005 | 2 | 7 | 2,500,000 |
+| 2026-01 | PRJ-001 | P000002 | 국내 | SOD-0002 | POD-0002 | 2 | 10 | 8,000,000 |
+| 2026-01 | PRJ-003 | P000004 | 해외 | SOO-0001 | POO-0001 | 3 | 20 | 6,000,000 |
 
 ### 용도
 
 | 필터/분석 | 용도 |
 |----------|------|
 | Period = "2026-01" | 해당 월 마감 대사 (월별 필터링) |
-| 특정 AX PO | AX GRN 금액과 1:1 비교 |
+| 특정 AX Project number | 프로젝트 단위 금액 합계 확인 (하위 PO들 합산) |
+| 특정 AX PO | AX GRN 금액과 비교 (SO별 행 합산 = AX PO 금액) |
+| 특정 SO_ID | 불일치 시 어떤 SO에서 차이인지 즉시 파악 |
 | 구분별 소계 | 국내/해외 AP 분리 확인 |
 
 **AX 대사 방법**:
 ```
 PO_AX대사 (Period = 2026-01) 금액 합계  vs  AX D365 F&O GRN (2026-01월) 금액
-→ PXXXXXX별 1:1 대사, 불일치 시 PO_ID로 라인별 추적
+→ AX PO 필터 후 SO별 행 합산 = PXXXXXX GRN 금액과 대사
+→ 불일치 시 SO_ID별로 어디서 차이인지 바로 추적 가능
+→ AX Project number로 동일 프로젝트 내 PO들을 묶어 합산 대사 가능
 ```
 
 ---
@@ -1286,6 +1313,7 @@ SO_ID = SOD-0001
 | 컬럼 | 설명 |
 |------|------|
 | Period | 해당 월 (yyyy-MM, 텍스트) |
+| 등록Period | 주문 등록 월 — SO 원본 Period (yyyy-MM, 텍스트) |
 | 구분 | 국내/해외 |
 | SO_ID | 주문 번호 |
 | Customer name | 고객명 |
@@ -1613,6 +1641,7 @@ let
         {"Customer PO", each List.First([Customer PO]), type text},
         {"Item name", each List.First([Item name]), type text},
         {"구분", each List.First([구분]), type text},
+        {"등록Period", each List.First([등록Period]), type text},
         {"Sector", each List.First([Sector]), type text},
         {"Business registration number", each List.First([Business registration number]), type text},
         {"Industry code", each List.First([Industry code]), type text},
@@ -1639,6 +1668,7 @@ let
                     state & {[
                         Period = r[Period],
                         구분 = r[구분],
+                        #"등록Period" = r[#"등록Period"],
                         SO_ID = r[SO_ID],
                         #"Customer name" = r[#"Customer name"],
                         #"Customer PO" = r[#"Customer PO"],
@@ -1675,7 +1705,7 @@ let
 
     // ========== 정렬 + 컬럼 정리 + 타입 ==========
     Reordered = Table.ReorderColumns(ResultTable, {
-        "Period", "구분", "SO_ID", "Customer name", "Customer PO", "Item name", "OS name",
+        "Period", "등록Period", "구분", "SO_ID", "Customer name", "Customer PO", "Item name", "OS name",
         "Expected delivery date", "AX Period", "AX Project number", "Sector", "Business registration number", "Industry code",
         "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty",
         "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount"
