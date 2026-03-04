@@ -38,28 +38,26 @@ SYNC_SHEETS: list[SheetConfig] = [
     SheetConfig(
         sheet_name=SO_DOMESTIC_SHEET,
         table_name='so_domestic',
-        pk_columns=('SO_ID', 'Customer PO', 'Line item'),
+        pk_columns=('SO_ID', 'Line item'),
         required_column='SO_ID',
     ),
     SheetConfig(
         sheet_name=SO_EXPORT_SHEET,
         table_name='so_export',
-        pk_columns=('SO_ID', 'Customer PO', 'Line item'),
+        pk_columns=('SO_ID', 'Line item'),
         required_column='SO_ID',
     ),
     SheetConfig(
         sheet_name=PO_DOMESTIC_SHEET,
         table_name='po_domestic',
-        pk_columns=('SO_ID', 'Customer PO', 'Line item'),
+        pk_columns=('PO_ID', 'Line item'),
         required_column='SO_ID',
     ),
     SheetConfig(
         sheet_name=PO_EXPORT_SHEET,
         table_name='po_export',
-        pk_columns=('SO_ID', 'Customer PO', 'Line item', '_row_seq'),
+        pk_columns=('PO_ID', 'Line item'),
         required_column='SO_ID',
-        needs_row_seq=True,
-        row_seq_group=('SO_ID', 'Customer PO', 'Line item'),
     ),
     SheetConfig(
         sheet_name=DN_DOMESTIC_SHEET,
@@ -70,7 +68,7 @@ SYNC_SHEETS: list[SheetConfig] = [
     SheetConfig(
         sheet_name=DN_EXPORT_SHEET,
         table_name='dn_export',
-        pk_columns=('DN_ID', 'SO_ID', 'Line item'),
+        pk_columns=('DN_ID', 'Line item'),
         required_column='DN_ID',
     ),
     SheetConfig(
