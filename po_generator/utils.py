@@ -593,13 +593,24 @@ def load_dn_export_data() -> pd.DataFrame:
     # DN_ID가 있는 행만 사용
     df_dn = df_dn[df_dn['DN_ID'].notna()].copy()
 
-    # SO_해외에서 SO_ID별 고객코드 + Customer PO + PO receipt date 추출
-    so_code_cols = ['SO_ID', 'Business registration number', 'Customer PO', 'PO receipt date']
+    # SO_해외에서 가져올 컬럼 (SO가 Single Source of Truth인 필드)
+    # 고객코드 컬럼명은 시트마다 다를 수 있으므로 resolve_column()으로 동적 탐지
+    so_cust_code_col = resolve_column(df_so.columns, 'customer_code')
+    so_code_cols = ['SO_ID', 'Customer PO', 'PO receipt date', 'Currency', 'Incoterms']
+    if so_cust_code_col:
+        so_code_cols.insert(1, so_cust_code_col)
     so_code_cols = [c for c in so_code_cols if c in df_so.columns]
     df_so_codes = df_so[so_code_cols].drop_duplicates(subset='SO_ID', keep='first')
 
-    # DN_해외 + SO_해외 JOIN (SO_ID) → 고객코드 획득
-    df_dn = df_dn.merge(df_so_codes, on='SO_ID', how='left', suffixes=('', '_SO'))
+    # DN_해외에 동일 컬럼명이 있으면 merge 전에 제거 (SO 값을 우선 사용)
+    # SO_ID는 JOIN 키이므로 제외
+    overlap_cols = [c for c in so_code_cols if c != 'SO_ID' and c in df_dn.columns]
+    if overlap_cols:
+        df_dn.drop(columns=overlap_cols, inplace=True)
+        logger.debug(f"DN-SO 컬럼 충돌 해소 (SO 우선): {overlap_cols}")
+
+    # DN_해외 + SO_해외 JOIN (SO_ID)
+    df_dn = df_dn.merge(df_so_codes, on='SO_ID', how='left')
 
     # Customer_해외에서 필요한 컬럼만 추출
     cust_cols = ['C-code by 해외', 'Bill to 1', 'Bill to 2', 'Bill to 3', 'Payment terms']
@@ -607,14 +618,18 @@ def load_dn_export_data() -> pd.DataFrame:
     df_cust_subset = df_cust[cust_cols].copy()
 
     # DN_해외+SO → Customer_해외 JOIN (고객코드)
-    if 'Business registration number' in df_dn.columns and 'C-code by 해외' in df_cust_subset.columns:
+    # 고객코드 컬럼명을 동적으로 찾기 (Business registration number, C-code by 해외 등)
+    dn_cust_code_col = resolve_column(df_dn.columns, 'customer_code')
+    if dn_cust_code_col and 'C-code by 해외' in df_cust_subset.columns:
         df_dn = df_dn.merge(
             df_cust_subset,
-            left_on='Business registration number',
+            left_on=dn_cust_code_col,
             right_on='C-code by 해외',
             how='left',
             suffixes=('', '_CUST'),
         )
+    else:
+        logger.warning(f"Customer JOIN 실패: dn_cust_code_col={dn_cust_code_col}")
 
     df_dn['_시트구분'] = '해외'
     df_dn['_문서유형'] = 'FI'

@@ -55,26 +55,31 @@ def _to_text(value) -> str:
     return str(value)
 
 
-# === 셀 매핑 (Final Invoice) ===
+# === 셀 매핑 (Final Invoice - 새 템플릿) ===
 # Header
-CELL_INVOICE_NO = 'G4'          # Invoice No
-CELL_INVOICE_DATE = 'I4'        # Invoice Date (출고일)
-CELL_BILL_TO_1 = 'A9'           # Bill to 주소 1줄
-CELL_BILL_TO_2 = 'A10'          # Bill to 주소 2줄
-CELL_BILL_TO_3 = 'A11'          # Bill to 주소 3줄
-CELL_PAYMENT_TERMS = 'G8'       # Payment Terms 값 (G8:G9 병합)
-CELL_DUE_DATE = 'I8'            # Due date 값 (I8:I9 병합)
-CELL_PO_NO = 'G10'              # Customer PO No (G10:G11 병합)
-CELL_PO_DATE = 'I10'            # Customer PO Date (I10:I11 병합)
+CELL_PO_NO = 'C7'               # Customer PO (C7:E7 병합)
+CELL_INVOICE_NO = 'H7'          # Invoice No = DN_ID (H7:I7 병합)
+CELL_PO_DATE = 'C8'             # Customer PO Date (C8:E8 병합)
+CELL_INVOICE_DATE = 'H8'        # Invoice Date = 선적일 (H8:I8 병합)
+CELL_PAYMENT_TERMS = 'H9'       # Payment Terms (H9:I9 병합)
+CELL_DELIVERY_TERMS = 'H10'     # Delivery Terms = Incoterms (H10:I10 병합)
+# Customer Address (A12~14)
+CELL_CUST_ADDR_1 = 'A12'
+CELL_CUST_ADDR_2 = 'A13'
+CELL_CUST_ADDR_3 = 'A14'
+# Delivery Address (G12~14)
+CELL_DELV_ADDR_1 = 'G12'
+CELL_DELV_ADDR_2 = 'G13'
+CELL_DELV_ADDR_3 = 'G14'
 
-# 아이템 시작 행 (헤더가 Row 13, 데이터는 Row 14부터)
-ITEM_START_ROW = 14
+# 아이템 (헤더 Row 16, 데이터 Row 17~)
+ITEM_START_ROW = 17
 
-# 아이템 열 (PI와 동일)
-COL_ITEM_NAME = 'A'     # 품목명
+COL_ITEM_NAME = 'A'     # 품목명 (A:D 병합)
 COL_QTY = 'E'           # 수량
-COL_UNIT_PRICE = 'G'    # 단가
-COL_AMOUNT = 'I'        # 금액 (수량 * 단가)
+COL_UNIT_PRICE = 'F'    # 단가 (G→F)
+COL_CURRENCY = 'G'      # 통화 (신규)
+COL_AMOUNT = 'I'        # 금액 (I 유지, H:I는 헤더만 병합)
 
 
 def create_fi_xlwings(
@@ -127,42 +132,15 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
         ws: xlwings Sheet 객체
         order_data: 주문 데이터
     """
-    # Invoice No (DN_ID 사용)
-    dn_id = get_value(order_data, 'dn_id', '')
-    ws.range(CELL_INVOICE_NO).value = dn_id
-
-    # Invoice Date (출고일)
-    dispatch_date = get_value(order_data, 'dispatch_date', '')
-    if dispatch_date and pd.notna(dispatch_date):
-        if isinstance(dispatch_date, datetime):
-            ws.range(CELL_INVOICE_DATE).value = dispatch_date.strftime("%Y-%m-%d")
-        else:
-            ws.range(CELL_INVOICE_DATE).value = str(dispatch_date)
-    else:
-        # 출고일이 없으면 오늘 날짜
-        ws.range(CELL_INVOICE_DATE).value = datetime.now().strftime("%Y-%m-%d")
-
-    # Bill to (Customer_해외에서 JOIN된 데이터)
-    bill_to_1 = get_value(order_data, 'bill_to_1', '')
-    bill_to_2 = get_value(order_data, 'bill_to_2', '')
-    bill_to_3 = get_value(order_data, 'bill_to_3', '')
-    ws.range(CELL_BILL_TO_1).value = bill_to_1
-    ws.range(CELL_BILL_TO_2).value = bill_to_2
-    ws.range(CELL_BILL_TO_3).value = bill_to_3
-
-    # Payment Terms (Customer_해외에서 가져온 기본값)
-    payment_terms = get_value(order_data, 'payment_terms', '')
-    if payment_terms:
-        ws.range(CELL_PAYMENT_TERMS).value = payment_terms
-
-    # Due date (비워둠 - 수동 입력)
-    # ws.range(CELL_DUE_DATE).value = ''
-
-    # Customer PO (SO_해외에서 JOIN된 Customer PO)
+    # Customer PO → C7
     customer_po = get_value(order_data, 'customer_po', '')
     ws.range(CELL_PO_NO).value = customer_po
 
-    # PO Date (SO_해외에서 JOIN된 PO receipt date)
+    # Invoice No (DN_ID) → H7
+    dn_id = get_value(order_data, 'dn_id', '')
+    ws.range(CELL_INVOICE_NO).value = dn_id
+
+    # PO Date → C8
     po_date = get_value(order_data, 'po_receipt_date', '')
     if po_date and pd.notna(po_date):
         if isinstance(po_date, datetime):
@@ -170,7 +148,38 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
         else:
             ws.range(CELL_PO_DATE).value = str(po_date)
 
-    logger.debug(f"헤더 채우기 완료: DN_ID={dn_id}, Bill to={bill_to_1}")
+    # Invoice Date (선적일) → H8
+    dispatch_date = get_value(order_data, 'dispatch_date', '')
+    if dispatch_date and pd.notna(dispatch_date):
+        if isinstance(dispatch_date, datetime):
+            ws.range(CELL_INVOICE_DATE).value = dispatch_date.strftime("%Y-%m-%d")
+        else:
+            ws.range(CELL_INVOICE_DATE).value = str(dispatch_date)
+    else:
+        ws.range(CELL_INVOICE_DATE).value = datetime.now().strftime("%Y-%m-%d")
+
+    # Payment Terms → H9
+    payment_terms = get_value(order_data, 'payment_terms', '')
+    if payment_terms:
+        ws.range(CELL_PAYMENT_TERMS).value = payment_terms
+
+    # Delivery Terms (Incoterms) → H10 (SO_해외에서 JOIN된 값, 템플릿 기존값 덮어쓰기)
+    incoterms = get_value(order_data, 'incoterms', '')
+    ws.range(CELL_DELIVERY_TERMS).value = incoterms
+
+    # Customer Address → A12/A13/A14
+    bill_to_1 = get_value(order_data, 'bill_to_1', '')
+    bill_to_2 = get_value(order_data, 'bill_to_2', '')
+    bill_to_3 = get_value(order_data, 'bill_to_3', '')
+    ws.range(CELL_CUST_ADDR_1).value = bill_to_1
+    ws.range(CELL_CUST_ADDR_2).value = bill_to_2
+    ws.range(CELL_CUST_ADDR_3).value = bill_to_3
+
+    # Delivery Address → G12 (DN_해외의 Delivery Address)
+    delivery_addr = get_value(order_data, 'delivery_address', '')
+    ws.range(CELL_DELV_ADDR_1).value = delivery_addr
+
+    logger.debug(f"헤더 채우기 완료: DN_ID={dn_id}, Customer={bill_to_1}")
 
 
 def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
@@ -289,16 +298,19 @@ def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> No
     qty_formula = f"=SUM(E{ITEM_START_ROW}:E{last_item_row})"
     ws.range(f'E{total_row}').formula = qty_formula
 
-    # I열: Amount 합계 수식 업데이트
-    sum_formula = f"=SUM(I{ITEM_START_ROW}:I{last_item_row})"
-    ws.range(f'I{total_row}').formula = sum_formula
-    logger.debug(f"Total 수식 업데이트: I{total_row} = {sum_formula}")
+    # F열: 단위 "EA"
+    ws.range(f'F{total_row}').value = "EA"
 
     # H열: Currency
     currency = get_value(order_data, 'currency', '')
     if currency:
         ws.range(f'H{total_row}').value = currency
         logger.debug(f"Currency 업데이트: H{total_row} = {currency}")
+
+    # I열: Amount 합계 수식 업데이트
+    sum_formula = f"=SUM(I{ITEM_START_ROW}:I{last_item_row})"
+    ws.range(f'I{total_row}').formula = sum_formula
+    logger.debug(f"Total 수식 업데이트: I{total_row} = {sum_formula}")
 
 
 def _fill_items_batch(
@@ -307,7 +319,7 @@ def _fill_items_batch(
 ) -> None:
     """아이템 데이터 배치 쓰기 (성능 최적화)
 
-    FI는 열이 불연속적이므로(A, E, G, I) 열별로 배치 쓰기 수행
+    FI는 열이 불연속적이므로(A, E, F, G, I) 열별로 배치 쓰기 수행
 
     Args:
         ws: xlwings Sheet 객체
@@ -320,6 +332,7 @@ def _fill_items_batch(
     names = []
     qtys = []
     prices = []
+    currencies = []
     amounts = []
 
     for item_idx, (_, item) in enumerate(items_df.iterrows()):
@@ -352,13 +365,18 @@ def _fill_items_batch(
             unit_price = 0
         prices.append(unit_price)
 
+        # 통화 (SO_해외에서 JOIN된 Currency)
+        currency = get_value(item, 'currency', '')
+        currencies.append(str(currency) if currency else '')
+
         # 금액
         amounts.append(qty * unit_price)
 
-    # 열별 배치 쓰기 (4회 COM 호출 - 아이템 수에 관계없이 고정)
+    # 열별 배치 쓰기 (5회 COM 호출 - 아이템 수에 관계없이 고정)
     ws.range(f'{COL_ITEM_NAME}{ITEM_START_ROW}:{COL_ITEM_NAME}{end_row}').value = [[n] for n in names]
     ws.range(f'{COL_QTY}{ITEM_START_ROW}:{COL_QTY}{end_row}').value = [[q] for q in qtys]
     ws.range(f'{COL_UNIT_PRICE}{ITEM_START_ROW}:{COL_UNIT_PRICE}{end_row}').value = [[p] for p in prices]
+    ws.range(f'{COL_CURRENCY}{ITEM_START_ROW}:{COL_CURRENCY}{end_row}').value = [[c] for c in currencies]
     ws.range(f'{COL_AMOUNT}{ITEM_START_ROW}:{COL_AMOUNT}{end_row}').value = [[a] for a in amounts]
 
     # 아이템 영역 행 높이 자동 조정

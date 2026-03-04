@@ -83,32 +83,44 @@
 ## Final Invoice (`templates/final_invoice.xlsx`)
 
 **생성기**: `fi_generator.py` (xlwings)
-**데이터 소스**: DN_해외 + Customer_해외 (JOIN)
+**데이터 소스**: DN_해외 + SO_해외 + Customer_해외 (3-way JOIN)
 
 ### 고정 필드 (Header)
 
 | 셀 | 필드명 | 설명 | 데이터 소스 |
 |----|--------|------|-------------|
-| G4 | Invoice No | 인보이스 번호 | 자동생성 |
-| I4 | Invoice Date | 인보이스 발행일 | 출고일 (dispatch_date) |
-| A9 | Bill to (1줄) | 청구처 주소 1행 | bill_to_1 |
-| A10 | Bill to (2줄) | 청구처 주소 2행 | bill_to_2 |
-| A11 | Bill to (3줄) | 청구처 주소 3행 | bill_to_3 |
-| G8 | Payment Terms | 결제 조건 | payment_terms (G8:G9 병합) |
-| I8 | Due Date | 결제 기한 | due_date (I8:I9 병합) |
-| G10 | PO No | 고객 PO 번호 | customer_po (G10:G11 병합) |
-| I10 | PO Date | 고객 PO 일자 | po_date (I10:I11 병합) |
+| C7 | Customer PO | 고객 PO 번호 (C7:E7 병합) | SO_해외.Customer PO |
+| H7 | Invoice No | 인보이스 번호 = DN_ID (H7:I7 병합) | DN_해외.DN_ID |
+| C8 | PO Date | 고객 PO 일자 (C8:E8 병합) | SO_해외.PO receipt date |
+| H8 | Invoice Date | 인보이스 발행일 = 선적일 (H8:I8 병합) | DN_해외.선적일 (dispatch_date) |
+| H9 | Payment Terms | 결제 조건 (H9:I9 병합) | Customer_해외.Payment terms |
+| H10 | Delivery Terms | 인코텀즈 (H10:I10 병합) | SO_해외.Incoterms (DN merge 시 SO 우선) |
+| A12 | Customer Address 1 | 청구처 주소 1행 | Customer_해외.Bill to 1 |
+| A13 | Customer Address 2 | 청구처 주소 2행 | Customer_해외.Bill to 2 |
+| A14 | Customer Address 3 | 청구처 주소 3행 | Customer_해외.Bill to 3 |
+| G12 | Delivery Address | 배송 주소 | DN_해외.Delivery Address |
 
-### 동적 필드 (Item List - Row 14~)
+### 동적 필드 (Item List - Row 17~)
 
-헤더 행은 Row 13, 데이터는 Row 14부터.
+헤더 행은 Row 16, 데이터는 Row 17부터.
 
 | 열 | 필드명 | 설명 |
 |----|--------|------|
-| A | Item name | 품목명 |
+| A (A:D 병합) | Item name | 품목명 |
 | E | Quantity | 수량 |
-| G | Unit Price | 단가 |
+| F | Unit Price | 단가 |
+| G | Currency | 통화 (신규) |
 | I | Amount | 금액 (수량 × 단가) |
+
+### Total 행
+
+| 열 | 내용 |
+|----|------|
+| E | SUM(Qty) |
+| F | "EA" |
+| H | Currency |
+| I | SUM(Amount) |
+
 
 ---
 

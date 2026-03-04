@@ -18,6 +18,47 @@
 
 ---
 
+## 2026-03-04: FI 새 템플릿 대응 업데이트
+
+### 배경
+`templates/final_invoice.xlsx` 양식 전면 개편으로 셀 매핑, 아이템 열 구조, 신규 필드 대응 필요.
+
+### 변경 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `config.py` | `dispatch_date` alias에 `'선적일'` 추가, `delivery_address` alias에 `'Delivery address'` 추가 |
+| `utils.py` | `load_dn_export_data()` — SO_해외 merge 컬럼에 `Currency`, `Incoterms` 추가, Customer_해외 JOIN 키를 `resolve_column()`으로 동적 탐지, DN-SO 컬럼 충돌 시 SO 우선 (overlap drop) |
+| `fi_generator.py` | 셀 매핑 전면 교체, `_fill_header()` 재작성, `_fill_items_batch()` Currency 열 추가, `_update_total_row()` F열 "EA" 추가 |
+| `docs/TEMPLATE_MAPPINGS.md` | FI 섹션 새 템플릿 구조로 업데이트 |
+
+### 셀 매핑 변경 요약
+| 필드 | OLD → NEW | 데이터 소스 |
+|------|-----------|------------|
+| Customer PO | G10 → C7 | SO_해외.Customer PO |
+| Invoice No | G4 → H7 | DN_해외.DN_ID |
+| PO Date | I10 → C8 | SO_해외.PO receipt date |
+| Invoice Date | I4 → H8 | DN_해외.선적일 |
+| Payment Terms | G8 → H9 | Customer_해외.Payment terms |
+| Delivery Terms | (신규) H10 | SO_해외.Incoterms |
+| Customer Address | A9~11 → A12~14 | Customer_해외.Bill to 1/2/3 |
+| Delivery Address | (신규) G12 | DN_해외.Delivery address |
+| Due Date | I8 → (삭제) | — |
+
+### 아이템 열 변경
+| 항목 | OLD → NEW |
+|------|-----------|
+| ITEM_START_ROW | 14 → 17 |
+| Unit Price 열 | G → F |
+| Currency 열 | (신규) G |
+
+### 데이터 로드 개선 (`load_dn_export_data`)
+- **Customer_해외 JOIN 키**: 하드코딩(`'Business registration number'`) → `resolve_column()`으로 동적 탐지
+- **DN-SO 컬럼 충돌**: SO_해외에서 가져올 컬럼이 DN_해외에도 존재하면 merge 전 DN쪽 drop (SO 우선)
+- **alias 대소문자**: `'Delivery address'`(소문자 a) 추가 — DN_해외 실제 컬럼명과 매칭
+
+---
+
+
 ## 2026-03-03: Excel → SQLite DB 동기화 구현
 
 ### 배경

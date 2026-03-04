@@ -223,7 +223,7 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'sales_unit_price': ('Sales Unit Price', 'Sales unit price', 'sales unit price', '판매단가'),
     'model': ('Model', 'MODEL', 'model', '모델', 'Model number'),
     'delivery_date': ('예상 EXW date', '예상 납품 날짜', 'Requested delivery date', 'Delivery Date', 'delivery date', '납기일', '요청납기일'),
-    'delivery_address': ('납품 주소', '납품주소', 'Delivery Address', 'delivery address', '배송주소', '배송 주소'),
+    'delivery_address': ('납품 주소', '납품주소', 'Delivery Address', 'Delivery address', 'delivery address', '배송주소', '배송 주소'),
     'item_name': ('Item name', 'Item Name', 'item name', 'Item', '품목명'),
     'remark': ('Note', 'Remark', 'REMARK', 'remark', '비고'),
     'incoterms': ('Incoterms', 'INCOTERMS', 'incoterms', '인코텀즈'),
@@ -237,7 +237,7 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'als': ('ALS', 'als'),
     # DN (납품) 필드
     'dn_id': ('DN_ID', 'DN ID', 'dn_id', '납품번호'),
-    'dispatch_date': ('출고일', 'Dispatch Date', 'dispatch_date', '출하일'),
+    'dispatch_date': ('출고일', 'Dispatch Date', 'dispatch_date', '출하일', '선적일'),
     'unit_price': ('Unit Price', 'unit price', '단가'),
     'total_sales': ('Total Sales', 'total sales', '판매금액'),
     'tax_invoice_no': ('세금계산서', '세금계산서번호', 'Tax Invoice No'),
