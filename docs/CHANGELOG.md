@@ -9,12 +9,137 @@
 ### 템플릿 확장
 - [x] Proforma Invoice (PI) 구현 완료 ✓
 - [x] Final Invoice (FI) 구현 완료 ✓
-- [ ] Packing List 생성기 구현
+- [x] Order Confirmation (OC) 구현 완료 ✓
+- [x] Commercial Invoice (CI) 구현 완료 ✓
+- [x] Packing List (PL) 구현 완료 ✓
 
 ### SQL 기반 데이터 분석
 - [x] NOAH_SO_PO_DN.xlsx → SQLite DB 동기화 구현 완료 ✓
   - **배경**: Excel 형식의 데이터 유실/변형 취약점 → SQLite 백업
   - DuckDB 분석 연동은 추후 확장 예정
+
+---
+
+## 2026-03-06: 내부 코드 최적화 (데이터 조회/서비스 캐시)
+
+### 배경
+데이터 조회 병목 분석 후, 출력 결과에 영향 없는 내부 구현 최적화 수행. 기능 회귀 없음 확인 (58 passed, 0 failed).
+
+### 변경 내용
+
+#### 1. `resolve_column()` 캐시 추가 (`utils.py`)
+- `id(columns)` + `key` 기반 dict 캐시 도입
+- `get_value()` 매 호출마다 반복되던 별칭 검색을 O(1) 조회로 전환
+- 문서 1건 생성 시 수십~백 회 불필요한 선형 검색 제거
+
+#### 2. `get_available_*_ids()` O(n²) → O(n) (`finder_service.py`)
+- 4개 메서드(`get_available_po_ids`, `get_available_dn_ids`, `get_available_dn_export_ids`, `get_available_so_export_ids`)
+- 기존: `unique()` 루프 안에서 `df[df[col] == id]` 반복 필터 → O(n²)
+- 변경: `drop_duplicates(subset=..., keep='first').head(limit)` 단일 패스 → O(n)
+
+#### 3. `find_so_for_advance()` 캐시 재사용 (`finder_service.py`)
+- 기존: `load_so_for_advance()`가 Excel 파일을 독립적으로 다시 오픈 (PMT+SO 2시트 재로드)
+- 변경: `FinderService`의 캐시된 `_pmt_df`와 신규 `_so_domestic_df` 활용, 중복 Excel I/O 제거
+- `_load_so_domestic()` 프라이빗 메서드 추가 (SO_국내 lazy cache)
+
+#### 4. `create_po.py` 다건 처리 서비스 공유
+- `generate_po()`에 `service` 파라미터 추가 (기본값 `None` → 하위 호환)
+- `main()`에서 여러 주문번호 처리 시 단일 `DocumentService` 인스턴스 공유
+- DataFrame 재로드 방지
+
+### 검토 후 제외된 항목
+| 제안 | 제외 사유 |
+|------|----------|
+| `iterrows()` → `itertuples()` | 아이템 1~50건 수준이라 마이크로초 차이. 한글 컬럼명이 namedtuple 필드로 변환 실패 → 코드 복잡도만 증가 |
+| xlwings COM 호출 추가 축소 | 이미 `batch_write_rows()` 등으로 96~97% 감소 완료. 남은 row insertion은 Excel API 제약으로 배치화 불가 |
+| `get_value()` 배치 API | `resolve_column()` 캐시만으로 병목 해소. 별도 API는 blast radius가 큼 |
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `po_generator/utils.py` | `_RESOLVE_SENTINEL`, `_resolve_cache` 추가, `resolve_column()` 캐시 적용 |
+| `po_generator/services/finder_service.py` | `_so_domestic_df` 캐시, `_load_so_domestic()` 추가, `get_available_*_ids()` 4개 single-pass 교체, `find_so_for_advance()` 캐시 재사용, `load_so_for_advance` import 제거 |
+| `create_po.py` | `generate_po()` 시그니처에 `service` 파라미터 추가, `main()` 서비스 공유 |
+
+---
+
+## 2026-03-06: Commercial Invoice (CI) & Packing List (PL) 생성기 추가
+
+### 배경
+해외 출하 시 필요한 Commercial Invoice와 Packing List 생성 기능 추가. 둘 다 DN_해외 데이터를 사용하며, PI/FI와 유사한 셀 레이아웃.
+
+### CI (Commercial Invoice)
+PI와 동일한 셀 구조이나, 데이터 소스가 DN_해외이며 아래 차이점 있음:
+- `ITEM_START_ROW = 19` (Row 18 = 카테고리 라벨 유지)
+- `CELL_INCOTERMS = G18` (PI는 G17)
+- A9 = Delivery Address, Shipping Mark (A31=Customer Name, C33=Customer PO)
+- H열에 각 행 currency 표시, Total에 Qty 합계(E) + "EA"(F)
+- **Model number 보강**: SO_해외에서 Item name 매칭으로 Model number 조회, 품목명 앞에 추가
+- **Model number 오름차순 정렬**
+
+### PL (Packing List)
+CI와 동일한 헤더 구조이나, 아이템 열이 다름 (단가/금액 대신 Weight/CBM):
+- F열: Net Weight (KG/PC), H열: Gross Weight (Kg), I열: CBM
+- Shipping Mark: A31=Customer Name, A32=Customer Country, C33=Customer PO
+- Model number 보강 및 정렬: CI와 동일
+
+### 신규 파일
+| 파일 | 역할 |
+|------|------|
+| `create_ci.py` | CI CLI 진입점 (`python create_ci.py DNO-2026-0001`) |
+| `create_pl.py` | PL CLI 진입점 (`python create_pl.py DNO-2026-0001`) |
+| `po_generator/ci_generator.py` | CI 생성기 (xlwings, PI 기반) |
+| `po_generator/pl_generator.py` | PL 생성기 (xlwings, CI 기반 + Weight/CBM) |
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `config.py` | `CI_TEMPLATE_FILE`, `CI_OUTPUT_DIR`, `PL_TEMPLATE_FILE`, `PL_OUTPUT_DIR`, weight/cbm 컬럼 별칭 추가 |
+| `utils.py` | `load_dn_export_data()`, `load_so_export_with_customer()` — Customer_해외 merge 시 `drop_duplicates()` 추가 (중복 행 방지) |
+| `services/document_service.py` | `_enrich_with_model_number()`, `generate_ci()`, `generate_pl()` 메서드 추가 |
+| `create_po.bat` | 메뉴에 [6] CI, [7] PL 추가 (기존 DB동기화 [8], 이력조회 [9]) |
+| `docs/TEMPLATE_MAPPINGS.md` | CI/PL 셀 매핑 섹션 추가, PI 섹션 분리 |
+
+### 데이터 흐름
+```
+DN_해외 → Customer_해외 (customer_code JOIN)
+       → SO_해외 (SO_ID + Item name → Model number 보강)
+```
+
+### Customer_해외 중복 행 수정
+`load_dn_export_data()`와 `load_so_export_with_customer()`에서 Customer_해외 merge 시 `drop_duplicates(subset='C-code by 해외', keep='first')` 추가. Customer_해외에 동일 고객코드 중복 행이 있을 때 DN 행이 배수로 늘어나는 버그 수정.
+
+---
+
+## 2026-03-05: Order Confirmation (OC) 생성기 추가
+
+### 배경
+해외 고객에게 주문 확인서(Order Confirmation)를 발행하는 기능 추가. Final Invoice와 동일한 레이아웃이지만, H열에 **Dispatch date** 컬럼이 추가된 형태. Dispatch date는 SO_해외의 `EXW NOAH` 컬럼 값을 사용.
+
+### 신규 파일
+| 파일 | 역할 |
+|------|------|
+| `create_oc.py` | CLI 진입점 (`python create_oc.py SOO-2026-0001`) |
+| `po_generator/oc_generator.py` | OC 생성기 (xlwings, FI 기반 + Dispatch date) |
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `config.py` | `OC_TEMPLATE_FILE`, `OC_OUTPUT_DIR` 추가, `exw_noah` 컬럼 별칭 추가 |
+| `utils.py` | `load_so_export_with_customer()` 신규 (SO_해외+Customer_해외 JOIN) |
+| `services/finder_service.py` | `find_so_export_with_customer()` 메서드 추가 |
+| `services/document_service.py` | `generate_oc(so_id)` 메서드 추가 |
+| `create_po.bat` | 메뉴에 [5] Order Confirmation 추가 (기존 DB동기화 [5]→[6]으로 이동) |
+
+### OC vs FI 차이점
+| 항목 | FI | OC |
+|------|----|----|
+| 제목 | Invoice | Confirmation of Order |
+| H열 (Row 17~) | (없음) | Dispatch date = SO_해외.EXW NOAH |
+| 나머지 | 동일 | 동일 |
+
+### 데이터 흐름
+`SO_해외` → `Customer_해외` (고객코드 JOIN, Bill to/Payment terms 포함)
 
 ---
 
@@ -402,6 +527,9 @@ elif not isinstance(formulas, (list, tuple)):
 - [x] 거래명세표 (Transaction Statement) - xlwings 기반 ✓
 - [x] PI (Proforma Invoice) - xlwings 기반 ✓
 - [x] FI (Final Invoice) - xlwings 기반 ✓
+- [x] OC (Order Confirmation) - xlwings 기반 ✓
+- [x] CI (Commercial Invoice) - xlwings 기반 ✓
+- [x] PL (Packing List) - xlwings 기반 ✓
 
 ---
 
@@ -410,7 +538,7 @@ elif not isinstance(formulas, (list, tuple)):
 | 용도 | 라이브러리 | 이유 |
 |------|-----------|------|
 | PO 생성 | openpyxl | 이미지 불필요, 빠른 생성 |
-| TS/PI/FI 생성 | xlwings | 로고/도장 이미지, 복잡한 서식 완벽 보존 |
+| TS/PI/FI/OC 생성 | xlwings | 로고/도장 이미지, 복잡한 서식 완벽 보존 |
 | 이력 조회/테스트 검증 | openpyxl | COM 인터페이스 없이 안정적인 읽기 |
 
 ### 템플릿 동작 방식

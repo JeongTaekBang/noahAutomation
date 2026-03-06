@@ -88,6 +88,10 @@ def _get_safe_value(
 get_safe_value = _get_safe_value
 
 
+_RESOLVE_SENTINEL = object()
+_resolve_cache: dict[tuple[int, str], str | None] = {}
+
+
 def resolve_column(
     columns: pd.Index | list[str],
     key: str,
@@ -101,8 +105,14 @@ def resolve_column(
     Returns:
         실제 컬럼명 또는 None (찾지 못한 경우)
     """
+    cache_key = (id(columns), key)
+    cached = _resolve_cache.get(cache_key, _RESOLVE_SENTINEL)
+    if cached is not _RESOLVE_SENTINEL:
+        return cached
+
     # 1. key가 이미 실제 컬럼명인 경우
     if key in columns:
+        _resolve_cache[cache_key] = key
         return key
 
     # 2. key가 내부 키인 경우, 별칭에서 찾기
@@ -110,14 +120,17 @@ def resolve_column(
     if aliases:
         for alias in aliases:
             if alias in columns:
+                _resolve_cache[cache_key] = alias
                 return alias
 
     # 3. 대소문자 무시 검색 (fallback)
     key_lower = key.lower()
     for col in columns:
         if col.lower() == key_lower:
+            _resolve_cache[cache_key] = col
             return col
 
+    _resolve_cache[cache_key] = None
     return None
 
 
@@ -564,6 +577,61 @@ def find_so_export_data(
     return _find_data_by_id(df, 'so_id', so_id, 'SO_ID')
 
 
+# === SO 해외 + Customer_해외 데이터 로드 (Order Confirmation용) ===
+
+def load_so_export_with_customer() -> pd.DataFrame:
+    """SO_해외 + Customer_해외 JOIN 데이터 로드
+
+    SO_해외에 Customer_해외의 Bill to, Payment terms를 JOIN합니다.
+    Order Confirmation 생성에 사용됩니다.
+
+    Returns:
+        SO_해외 DataFrame (Customer 정보 포함)
+
+    Raises:
+        FileNotFoundError: 소스 파일이 없는 경우
+    """
+    if not NOAH_SO_PO_DN_FILE.exists():
+        raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
+
+    logger.info(f"SO 해외 + Customer 데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        df_so = pd.read_excel(
+            xl,
+            sheet_name=SO_EXPORT_SHEET,
+            dtype={'Model': str, 'Model number': str}
+        )
+        df_cust = pd.read_excel(xl, sheet_name=CUSTOMER_EXPORT_SHEET)
+
+    df_so = df_so[df_so['SO_ID'].notna()].copy()
+
+    # Customer_해외에서 필요한 컬럼만 추출 (고객코드 중복 제거)
+    cust_cols = ['C-code by 해외', 'Bill to 1', 'Bill to 2', 'Bill to 3', 'Payment terms']
+    cust_cols = [c for c in cust_cols if c in df_cust.columns]
+    df_cust_subset = df_cust[cust_cols].drop_duplicates(
+        subset='C-code by 해외', keep='first',
+    )
+
+    # SO_해외 → Customer_해외 JOIN (고객코드)
+    so_cust_code_col = resolve_column(df_so.columns, 'customer_code')
+    if so_cust_code_col and 'C-code by 해외' in df_cust_subset.columns:
+        df_so = df_so.merge(
+            df_cust_subset,
+            left_on=so_cust_code_col,
+            right_on='C-code by 해외',
+            how='left',
+            suffixes=('', '_CUST'),
+        )
+    else:
+        logger.warning(f"Customer JOIN 실패: so_cust_code_col={so_cust_code_col}")
+
+    df_so['_시트구분'] = '해외'
+    df_so['_문서유형'] = 'OC'
+
+    logger.info(f"SO 해외 + Customer 데이터 {len(df_so)}건 로드 완료")
+    return df_so
+
+
 # === DN 해외 데이터 로드 (Final Invoice용) ===
 
 def load_dn_export_data() -> pd.DataFrame:
@@ -596,7 +664,7 @@ def load_dn_export_data() -> pd.DataFrame:
     # SO_해외에서 가져올 컬럼 (SO가 Single Source of Truth인 필드)
     # 고객코드 컬럼명은 시트마다 다를 수 있으므로 resolve_column()으로 동적 탐지
     so_cust_code_col = resolve_column(df_so.columns, 'customer_code')
-    so_code_cols = ['SO_ID', 'Customer PO', 'PO receipt date', 'Currency', 'Incoterms']
+    so_code_cols = ['SO_ID', 'Customer PO', 'PO receipt date', 'Currency', 'Incoterms', 'EXW NOAH']
     if so_cust_code_col:
         so_code_cols.insert(1, so_cust_code_col)
     so_code_cols = [c for c in so_code_cols if c in df_so.columns]
@@ -612,10 +680,12 @@ def load_dn_export_data() -> pd.DataFrame:
     # DN_해외 + SO_해외 JOIN (SO_ID)
     df_dn = df_dn.merge(df_so_codes, on='SO_ID', how='left')
 
-    # Customer_해외에서 필요한 컬럼만 추출
+    # Customer_해외에서 필요한 컬럼만 추출 (고객코드 중복 제거)
     cust_cols = ['C-code by 해외', 'Bill to 1', 'Bill to 2', 'Bill to 3', 'Payment terms']
     cust_cols = [c for c in cust_cols if c in df_cust.columns]
-    df_cust_subset = df_cust[cust_cols].copy()
+    df_cust_subset = df_cust[cust_cols].drop_duplicates(
+        subset='C-code by 해외', keep='first',
+    )
 
     # DN_해외+SO → Customer_해외 JOIN (고객코드)
     # 고객코드 컬럼명을 동적으로 찾기 (Business registration number, C-code by 해외 등)

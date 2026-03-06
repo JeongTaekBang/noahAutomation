@@ -54,7 +54,7 @@ warnings.filterwarnings('ignore', category=FutureWarning, module='pandas')
 logger = logging.getLogger(__name__)
 
 
-def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
+def generate_po(order_no: str, df: pd.DataFrame, force: bool = False, service: DocumentService | None = None) -> bool:
     """발주서 생성 메인 함수
 
     DocumentService를 사용하여 발주서를 생성합니다.
@@ -64,6 +64,7 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
         order_no: RCK Order No.
         df: 전체 주문 데이터 (하위 호환용, 실제로는 사용하지 않음)
         force: 강제 생성 여부
+        service: 공유 DocumentService 인스턴스 (None이면 새로 생성)
 
     Returns:
         성공 여부
@@ -72,7 +73,8 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False) -> bool:
     print(f"발주서 생성: {order_no}")
     print('=' * 50)
 
-    service = DocumentService()
+    if service is None:
+        service = DocumentService()
 
     # 1. 중복 발주 체크 (CLI에서 사용자 상호작용 필요)
     if not force:
@@ -296,10 +298,10 @@ def main() -> int:
 
     print(f"총 {len(df)}건의 주문 데이터 로드 완료")
 
-    # 각 Order No.에 대해 발주서 생성
+    # 각 Order No.에 대해 발주서 생성 (서비스 인스턴스 공유)
     success_count = 0
     for order_no in args.order_numbers:
-        if generate_po(order_no, df, args.force):
+        if generate_po(order_no, df, args.force, service=service):
             success_count += 1
 
     # 결과 출력

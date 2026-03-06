@@ -14,16 +14,19 @@ from typing import Any
 
 import pandas as pd
 
+from po_generator.config import NOAH_SO_PO_DN_FILE, SO_DOMESTIC_SHEET
 from po_generator.utils import (
     load_noah_po_lists,
     load_dn_data,
     load_pmt_data,
     load_so_export_data,
+    load_dn_export_data,
+    load_so_export_with_customer,
     find_order_data,
     find_dn_data,
     find_pmt_data,
     find_so_export_data,
-    load_so_for_advance,
+    find_dn_export_data,
     get_value,
 )
 
@@ -85,7 +88,10 @@ class FinderService:
         self._po_df: pd.DataFrame | None = None
         self._dn_df: pd.DataFrame | None = None
         self._pmt_df: pd.DataFrame | None = None
+        self._so_domestic_df: pd.DataFrame | None = None
         self._so_export_df: pd.DataFrame | None = None
+        self._so_export_cust_df: pd.DataFrame | None = None
+        self._dn_export_df: pd.DataFrame | None = None
 
     def load_po_data(self) -> pd.DataFrame:
         """PO 데이터 로드 (국내 + 해외)"""
@@ -179,11 +185,85 @@ class FinderService:
             return None
         return OrderData.from_result(result)
 
+    def load_so_export_with_customer(self) -> pd.DataFrame:
+        """SO 해외 + Customer_해외 데이터 로드"""
+        if self._so_export_cust_df is None:
+            logger.info("SO 해외 + Customer 데이터 로딩 중...")
+            self._so_export_cust_df = load_so_export_with_customer()
+            logger.info(f"SO 해외 + Customer 데이터 {len(self._so_export_cust_df)}건 로드 완료")
+        return self._so_export_cust_df
+
+    def find_so_export_with_customer(self, so_id: str) -> OrderData | None:
+        """SO 해외 + Customer_해외 데이터 검색 (OC용)
+
+        Args:
+            so_id: SO_ID (예: SOO-2026-0001)
+
+        Returns:
+            OrderData 또는 None
+        """
+        df = self.load_so_export_with_customer()
+        result = find_so_export_data(df, so_id)
+        if result is None:
+            return None
+        return OrderData.from_result(result)
+
+    def load_dn_export_data(self) -> pd.DataFrame:
+        """DN 해외 데이터 로드 (Customer_해외 JOIN 포함)"""
+        if self._dn_export_df is None:
+            logger.info("DN 해외 데이터 로딩 중...")
+            self._dn_export_df = load_dn_export_data()
+            logger.info(f"DN 해외 데이터 {len(self._dn_export_df)}건 로드 완료")
+        return self._dn_export_df
+
+    def find_dn_export(self, dn_id: str) -> OrderData | None:
+        """DN 해외 데이터 검색
+
+        Args:
+            dn_id: DN_ID (예: DNO-2026-0001)
+
+        Returns:
+            OrderData 또는 None
+        """
+        df = self.load_dn_export_data()
+        result = find_dn_export_data(df, dn_id)
+        if result is None:
+            return None
+        return OrderData.from_result(result)
+
+    def get_available_dn_export_ids(self, limit: int = 20) -> list[tuple[str, str]]:
+        """사용 가능한 DN_ID (해외) 목록 반환
+
+        Args:
+            limit: 반환할 최대 개수
+
+        Returns:
+            (DN_ID, 고객명) 튜플 목록
+        """
+        df = self.load_dn_export_data()
+        pairs = (df.dropna(subset=['DN_ID'])
+                 .drop_duplicates(subset='DN_ID', keep='first')
+                 .head(limit))
+        return [
+            (str(row['DN_ID']), str(row['Customer name']) if pd.notna(row.get('Customer name')) else '')
+            for _, row in pairs.iterrows()
+        ]
+
+    def _load_so_domestic(self) -> pd.DataFrame:
+        """SO_국내 원본 데이터 로드 (캐시)"""
+        if self._so_domestic_df is None:
+            if not NOAH_SO_PO_DN_FILE.exists():
+                raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
+            with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+                self._so_domestic_df = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
+        return self._so_domestic_df
+
     def find_so_for_advance(self, advance_id: str) -> tuple[pd.Series, OrderData] | None:
         """선수금용 SO 데이터 검색
 
         PMT_국내에서 선수금_ID로 SO_ID를 찾고,
         SO_국내에서 해당 SO의 모든 아이템을 반환합니다.
+        캐시된 PMT/SO 데이터를 재사용하여 중복 Excel 로드를 방지합니다.
 
         Args:
             advance_id: 선수금_ID (예: ADV_2026-0001)
@@ -191,10 +271,30 @@ class FinderService:
         Returns:
             (PMT 정보, SO 아이템 OrderData) 또는 None
         """
-        result = load_so_for_advance(advance_id)
-        if result is None:
+        # 캐시된 PMT 데이터에서 선수금_ID 검색
+        pmt_df = self.load_pmt_data()
+        pmt_mask = pmt_df['선수금_ID'] == advance_id
+        if pmt_mask.sum() == 0:
+            logger.warning(f"선수금_ID '{advance_id}'를 찾을 수 없습니다.")
             return None
-        pmt_data, so_items = result
+
+        pmt_data = pmt_df[pmt_mask].iloc[0]
+        so_id = pmt_data['SO_ID']
+        logger.info(f"선수금_ID '{advance_id}' -> SO_ID: {so_id}")
+
+        # 캐시된 SO 데이터에서 해당 SO_ID의 모든 아이템 검색
+        so_df = self._load_so_domestic()
+        so_items = so_df[so_df['SO_ID'] == so_id].copy()
+
+        if len(so_items) == 0:
+            logger.warning(f"SO_ID '{so_id}'에 해당하는 SO 데이터를 찾을 수 없습니다.")
+            return None
+
+        so_items['선수금_ID'] = advance_id
+        so_items['_시트구분'] = '국내'
+        so_items['_문서유형'] = 'ADV'
+
+        logger.info(f"SO_ID '{so_id}': {len(so_items)}개 아이템 발견")
         return pmt_data, OrderData.from_result(so_items)
 
     def get_available_po_ids(self, limit: int = 20) -> list[tuple[str, str]]:
@@ -217,12 +317,13 @@ class FinderService:
         if po_col is None:
             return []
 
-        result = []
-        for po_id in df[po_col].dropna().unique()[:limit]:
-            customer = df[df[po_col] == po_id]['Customer name'].iloc[0] if len(df[df[po_col] == po_id]) > 0 else ''
-            result.append((str(po_id), str(customer) if pd.notna(customer) else ''))
-
-        return result
+        pairs = (df.dropna(subset=[po_col])
+                 .drop_duplicates(subset=po_col, keep='first')
+                 .head(limit))
+        return [
+            (str(row[po_col]), str(row['Customer name']) if pd.notna(row.get('Customer name')) else '')
+            for _, row in pairs.iterrows()
+        ]
 
     def get_available_dn_ids(self, limit: int = 20) -> list[tuple[str, str]]:
         """사용 가능한 DN_ID 목록 반환
@@ -234,11 +335,13 @@ class FinderService:
             (DN_ID, 고객명) 튜플 목록
         """
         df = self.load_dn_data()
-        result = []
-        for dn_id in df['DN_ID'].dropna().unique()[:limit]:
-            customer = df[df['DN_ID'] == dn_id]['Customer name'].iloc[0] if len(df[df['DN_ID'] == dn_id]) > 0 else ''
-            result.append((str(dn_id), str(customer) if pd.notna(customer) else ''))
-        return result
+        pairs = (df.dropna(subset=['DN_ID'])
+                 .drop_duplicates(subset='DN_ID', keep='first')
+                 .head(limit))
+        return [
+            (str(row['DN_ID']), str(row['Customer name']) if pd.notna(row.get('Customer name')) else '')
+            for _, row in pairs.iterrows()
+        ]
 
     def get_available_so_export_ids(self, limit: int = 20) -> list[tuple[str, str]]:
         """사용 가능한 SO_ID (해외) 목록 반환
@@ -250,8 +353,10 @@ class FinderService:
             (SO_ID, 고객명) 튜플 목록
         """
         df = self.load_so_export_data()
-        result = []
-        for so_id in df['SO_ID'].dropna().unique()[:limit]:
-            customer = df[df['SO_ID'] == so_id]['Customer name'].iloc[0] if len(df[df['SO_ID'] == so_id]) > 0 else ''
-            result.append((str(so_id), str(customer) if pd.notna(customer) else ''))
-        return result
+        pairs = (df.dropna(subset=['SO_ID'])
+                 .drop_duplicates(subset='SO_ID', keep='first')
+                 .head(limit))
+        return [
+            (str(row['SO_ID']), str(row['Customer name']) if pd.notna(row.get('Customer name')) else '')
+            for _, row in pairs.iterrows()
+        ]
