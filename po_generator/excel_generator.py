@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -21,17 +20,23 @@ from po_generator.config import (
     TOTAL_COLUMNS,
     ITEM_START_ROW_FALLBACK,
     VAT_RATE_DOMESTIC,
-    SPEC_FIELDS,
-    OPTION_FIELDS,
     PO_TEMPLATE_FILE,
 )
 from po_generator.utils import (
     get_value,
     escape_excel_formula,
+    get_spec_option_fields,
 )
 from po_generator.excel_helpers import (
+    XlConstants,
+    xlwings_app_context,
+    prepare_template,
+    cleanup_temp_file,
     find_item_start_row_xlwings,
     PO_HEADER_LABELS,
+    batch_write_rows,
+    delete_rows_range,
+    find_text_in_column_batch,
 )
 
 logger = logging.getLogger(__name__)
@@ -43,34 +48,6 @@ CELL_DATE = 'A5'
 CELL_DELIVERY_ADDR = 'C5'
 CELL_CUSTOMER_PO = 'C7'
 CELL_CUSTOMER_NAME = 'A10'
-
-
-def _find_item_start_row_xlwings(
-    ws: xw.Sheet,
-    search_labels: tuple[str, ...] = PO_HEADER_LABELS,
-    max_search_rows: int = 30,
-    fallback_row: int = ITEM_START_ROW_FALLBACK,
-) -> int:
-    """템플릿에서 아이템 시작 행을 동적으로 찾기 (xlwings 버전)
-
-    excel_helpers.find_item_start_row_xlwings의 래퍼입니다.
-    하위 호환성을 위해 유지됩니다.
-
-    Args:
-        ws: xlwings Sheet 객체
-        search_labels: 검색할 헤더 레이블
-        max_search_rows: 최대 검색 행 수
-        fallback_row: 헤더를 찾지 못했을 때 기본값
-
-    Returns:
-        아이템 시작 행 번호
-    """
-    return find_item_start_row_xlwings(
-        ws,
-        search_labels=search_labels,
-        max_search_rows=max_search_rows,
-        fallback_row=fallback_row,
-    )
 
 
 def _ensure_template_exists() -> None:
@@ -106,79 +83,6 @@ def _fill_header_data(
     ws.range(CELL_DELIVERY_ADDR).value = escape_excel_formula(delivery_addr)
     ws.range(CELL_CUSTOMER_PO).value = escape_excel_formula(customer_po)
     ws.range(CELL_CUSTOMER_NAME).value = escape_excel_formula(customer_name)
-
-
-def _fill_item_data(
-    ws: xw.Sheet,
-    row_num: int,
-    item_idx: int,
-    item_data: pd.Series,
-    currency: str = 'KRW',
-    is_export: bool = False,
-) -> None:
-    """아이템 행에 데이터 채움
-
-    Args:
-        ws: xlwings Sheet 객체
-        row_num: 행 번호
-        item_idx: 아이템 인덱스 (0부터 시작)
-        item_data: 아이템 데이터
-        currency: 통화 코드 (KRW 또는 USD)
-        is_export: 해외 여부
-    """
-    number_format = '₩#,##0' if currency == 'KRW' else '$#,##0.00'
-
-    # 데이터 추출
-    item_name = get_value(item_data, 'item_name')
-
-    # Description: 해외는 Model number + Item name, 국내는 Item name만
-    if is_export:
-        model_number = get_value(item_data, 'model')
-        if model_number and item_name:
-            description = f"{model_number} {item_name}"
-        elif item_name:
-            description = item_name
-        elif model_number:
-            description = model_number
-        else:
-            description = ''
-    else:
-        description = item_name if item_name else ''
-
-    # 수량
-    try:
-        qty = int(float(get_value(item_data, 'item_qty', 1)))
-    except (ValueError, TypeError):
-        qty = 1
-
-    # 단가
-    try:
-        ico_unit = float(get_value(item_data, 'ico_unit', 0))
-    except (ValueError, TypeError):
-        ico_unit = 0
-
-    # 납기일
-    requested_date = get_value(item_data, 'delivery_date')
-    requested_date_str = ''
-    if requested_date and not pd.isna(requested_date):
-        try:
-            if isinstance(requested_date, datetime):
-                requested_date_str = requested_date.strftime("%Y-%m-%d")
-            else:
-                requested_date_str = str(requested_date)[:10]
-        except (ValueError, TypeError):
-            requested_date_str = ''
-
-    # 데이터 입력 (수식 인젝션 방지 적용)
-    ws.range(f'A{row_num}').value = item_idx + 1
-    ws.range(f'B{row_num}').value = escape_excel_formula(description)
-    ws.range(f'F{row_num}').value = qty
-    ws.range(f'G{row_num}').value = "EA"
-    ws.range(f'H{row_num}').value = ico_unit
-    ws.range(f'H{row_num}').number_format = number_format
-    ws.range(f'I{row_num}').value = requested_date_str
-    ws.range(f'J{row_num}').formula = f"=H{row_num}*F{row_num}"
-    ws.range(f'J{row_num}').number_format = number_format
 
 
 def _fill_footer_data(
@@ -225,7 +129,7 @@ def _fill_footer_data(
 
 
 def _find_totals_row(ws: xw.Sheet, start_row: int, max_search: int = 20) -> int:
-    """'Total net amount' 텍스트가 있는 행 찾기
+    """'Total net amount' 텍스트가 있는 행 찾기 (배치 읽기 최적화)
 
     Args:
         ws: xlwings Sheet 객체
@@ -235,11 +139,10 @@ def _find_totals_row(ws: xw.Sheet, start_row: int, max_search: int = 20) -> int:
     Returns:
         Total net amount 행 번호 (못 찾으면 start_row)
     """
-    for row in range(start_row, start_row + max_search):
-        cell_value = ws.range(f'I{row}').value
-        if cell_value and 'Total net' in str(cell_value):
-            return row
-    return start_row
+    # 배치 읽기로 20회 COM 호출 → 1회로 감소
+    end_row = start_row + max_search - 1
+    row = find_text_in_column_batch(ws, 'I', 'Total net', start_row, end_row)
+    return row if row is not None else start_row
 
 
 def _create_purchase_order(
@@ -247,7 +150,7 @@ def _create_purchase_order(
     order_data: pd.Series,
     items_df: pd.DataFrame | None = None,
 ) -> None:
-    """Purchase Order 시트 생성 (xlwings 기반)
+    """Purchase Order 시트 생성 (xlwings 기반) - 배치 쓰기 최적화
 
     Args:
         ws: xlwings Sheet 객체 (템플릿에서 복사된 시트)
@@ -277,7 +180,11 @@ def _create_purchase_order(
     _fill_header_data(ws, order_data, rck_order_no, today_str)
 
     # 2. 아이템 시작 행 동적 탐지
-    template_row = _find_item_start_row_xlwings(ws, fallback_row=ITEM_START_ROW_FALLBACK)
+    template_row = find_item_start_row_xlwings(
+        ws,
+        search_labels=PO_HEADER_LABELS,
+        fallback_row=ITEM_START_ROW_FALLBACK,
+    )
 
     # 3. 템플릿 아이템 행 수 계산 (Total net amount 행 찾기)
     totals_row = _find_totals_row(ws, template_row)
@@ -286,25 +193,20 @@ def _create_purchase_order(
 
     # 4. 행 수 조정
     if num_items < template_item_count:
-        # 초과 행 삭제
+        # 초과 행 삭제 - 범위 삭제로 N회 COM 호출 → 1회로 감소
         rows_to_delete = template_item_count - num_items
-        for _ in range(rows_to_delete):
-            delete_row = template_row + num_items
-            ws.range(f'{delete_row}:{delete_row}').api.Delete(Shift=-4162)  # xlUp
-        logger.debug(f"{rows_to_delete}개 초과 행 삭제")
+        delete_rows_range(ws, template_row + num_items, rows_to_delete)
     elif num_items > template_item_count:
         # 행 삽입
         rows_to_insert = num_items - template_item_count
         for i in range(rows_to_insert):
             ws.range(f'{template_row}:{template_row}').api.Copy()
             insert_row = template_row + template_item_count + i
-            ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=-4121)  # xlDown
+            ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=XlConstants.xlShiftDown)
         logger.debug(f"{rows_to_insert}개 행 삽입")
 
-    # 5. 아이템 데이터 채움
-    for item_idx, item_data in enumerate(items_list):
-        row_num = template_row + item_idx
-        _fill_item_data(ws, row_num, item_idx, item_data, currency, is_export)
+    # 5. 아이템 데이터 배치 채움 (N개 아이템 * 9열 COM 호출 → 최적화)
+    _fill_items_batch_po(ws, template_row, items_list, currency, is_export)
 
     item_last_row = template_row + num_items - 1
 
@@ -336,12 +238,157 @@ def _create_purchase_order(
     logger.info(f"Purchase Order 시트 생성 완료 (아이템 {num_items}개)")
 
 
+def _fill_items_batch_po(
+    ws: xw.Sheet,
+    start_row: int,
+    items_list: list,
+    currency: str,
+    is_export: bool,
+) -> None:
+    """PO 아이템 데이터 배치 쓰기 (성능 최적화)
+
+    PO는 열이 불연속적이고 수식/포맷이 있어서 그룹별로 배치 처리
+
+    Args:
+        ws: xlwings Sheet 객체
+        start_row: 아이템 시작 행
+        items_list: 아이템 리스트
+        currency: 통화 코드
+        is_export: 해외 여부
+    """
+    num_items = len(items_list)
+    end_row = start_row + num_items - 1
+    number_format = '₩#,##0' if currency == 'KRW' else '$#,##0.00'
+
+    # 데이터 준비
+    col_a = []  # No.
+    col_b = []  # Description
+    col_f = []  # Qty
+    col_g = []  # Unit (EA)
+    col_h = []  # Unit Price
+    col_i = []  # Requested Date
+
+    for item_idx, item_data in enumerate(items_list):
+        # No.
+        col_a.append(item_idx + 1)
+
+        # Description
+        item_name = get_value(item_data, 'item_name')
+        if is_export:
+            model_number = get_value(item_data, 'model')
+            if model_number and item_name:
+                description = f"{model_number} {item_name}"
+            elif item_name:
+                description = item_name
+            elif model_number:
+                description = model_number
+            else:
+                description = ''
+        else:
+            description = item_name if item_name else ''
+        col_b.append(escape_excel_formula(description))
+
+        # Qty
+        raw_qty = get_value(item_data, 'item_qty', 1)
+        try:
+            qty = int(float(raw_qty)) if raw_qty is not None else 1
+        except (ValueError, TypeError):
+            logger.warning(f"Item {item_idx+1}: 수량 변환 실패 '{raw_qty}' -> 기본값 1 사용")
+            qty = 1
+        col_f.append(qty)
+
+        # Unit
+        col_g.append("EA")
+
+        # Unit Price
+        raw_price = get_value(item_data, 'ico_unit', 0)
+        try:
+            ico_unit = float(raw_price) if raw_price is not None else 0
+        except (ValueError, TypeError):
+            logger.warning(f"Item {item_idx+1}: 단가 변환 실패 '{raw_price}' -> 기본값 0 사용")
+            ico_unit = 0
+        col_h.append(ico_unit)
+
+        # Requested Date
+        requested_date = get_value(item_data, 'delivery_date')
+        requested_date_str = ''
+        if requested_date and not pd.isna(requested_date):
+            try:
+                if isinstance(requested_date, datetime):
+                    requested_date_str = requested_date.strftime("%Y-%m-%d")
+                else:
+                    requested_date_str = str(requested_date)[:10]
+            except (ValueError, TypeError):
+                requested_date_str = ''
+        col_i.append(requested_date_str)
+
+    # 배치 쓰기 (6회 COM 호출 - 아이템 수에 관계없이 고정)
+    ws.range(f'A{start_row}:A{end_row}').value = [[v] for v in col_a]
+    ws.range(f'B{start_row}:B{end_row}').value = [[v] for v in col_b]
+    ws.range(f'F{start_row}:F{end_row}').value = [[v] for v in col_f]
+    ws.range(f'G{start_row}:G{end_row}').value = [[v] for v in col_g]
+    ws.range(f'H{start_row}:H{end_row}').value = [[v] for v in col_h]
+    ws.range(f'I{start_row}:I{end_row}').value = [[v] for v in col_i]
+
+    # H열 숫자 포맷 (범위 포맷은 1회 COM 호출)
+    ws.range(f'H{start_row}:H{end_row}').number_format = number_format
+
+    # J열 수식 채우기 (수식은 개별 셀에 설정해야 함)
+    # 하지만 배치로 2D 리스트의 수식을 쓸 수 있음
+    formulas = [[f'=H{start_row + i}*F{start_row + i}'] for i in range(num_items)]
+    ws.range(f'J{start_row}:J{end_row}').formula = formulas
+    ws.range(f'J{start_row}:J{end_row}').number_format = number_format
+
+    logger.debug(f"PO 아이템 배치 쓰기 완료: {num_items}개")
+
+
+def _apply_description_borders(
+    ws: xw.Sheet,
+    num_items: int,
+    num_rows: int,
+) -> None:
+    """Description 시트에 테두리 적용
+
+    Args:
+        ws: xlwings Sheet 객체
+        num_items: 아이템(열) 수
+        num_rows: 행 수 (레이블 포함)
+    """
+    # 열 범위 계산 (B열부터)
+    end_col_num = ord('B') + num_items - 1
+    if end_col_num <= ord('Z'):
+        end_col = chr(end_col_num)
+    else:
+        end_col = 'A' + chr(ord('A') + (end_col_num - ord('Z') - 1))
+
+    # 전체 데이터 영역에 테두리 적용 (A1부터)
+    data_range = ws.range(f'A1:{end_col}{num_rows}')
+
+    # 외곽 테두리
+    for edge in [XlConstants.xlEdgeLeft, XlConstants.xlEdgeTop,
+                 XlConstants.xlEdgeBottom, XlConstants.xlEdgeRight]:
+        data_range.api.Borders(edge).LineStyle = XlConstants.xlContinuous
+        data_range.api.Borders(edge).Weight = XlConstants.xlThin
+
+    # 내부 세로선
+    if num_items > 1:
+        data_range.api.Borders(XlConstants.xlInsideVertical).LineStyle = XlConstants.xlContinuous
+        data_range.api.Borders(XlConstants.xlInsideVertical).Weight = XlConstants.xlThin
+
+    # 내부 가로선
+    if num_rows > 1:
+        data_range.api.Borders(XlConstants.xlInsideHorizontal).LineStyle = XlConstants.xlContinuous
+        data_range.api.Borders(XlConstants.xlInsideHorizontal).Weight = XlConstants.xlThin
+
+    logger.debug(f"Description 테두리 적용: A1:{end_col}{num_rows}")
+
+
 def _create_description_sheet(
     ws: xw.Sheet,
     order_data: pd.Series,
     items_df: pd.DataFrame | None = None,
 ) -> None:
-    """Description 시트 생성 (xlwings 기반)
+    """Description 시트 생성 (xlwings 기반) - 배치 쓰기 최적화
 
     Args:
         ws: xlwings Sheet 객체 (템플릿에서 복사된 시트)
@@ -358,48 +405,64 @@ def _create_description_sheet(
 
     num_items = len(items_list)
 
-    # 첫 번째 아이템 데이터 (B열)
-    try:
-        qty_first = int(float(get_value(items_list[0], 'item_qty', 1)))
-    except (ValueError, TypeError):
-        qty_first = 1
-    ws.range('B2').value = qty_first
+    # 시트 구분 확인 (국내/해외)
+    sheet_type = get_value(order_data, 'sheet_type', '국내')
 
-    # 추가 아이템 열 생성 (B열은 이미 템플릿에 있음)
-    if num_items > 1:
-        for idx in range(1, num_items):
-            col_letter = chr(ord('C') + idx - 1)  # C, D, E...
+    # 동적으로 SPEC/OPTION 필드 가져오기
+    spec_fields, option_fields = get_spec_option_fields(sheet_type)
+    all_fields = spec_fields + option_fields
 
-            # Row 1: Line No
-            ws.range(f'{col_letter}1').value = idx + 1
+    # 헤더 데이터 준비 (Row 1: Line No, Row 2: Qty)
+    header_row1 = []  # Line No
+    header_row2 = []  # Qty
+    for idx, item_data in enumerate(items_list):
+        header_row1.append(idx + 1)
+        try:
+            qty = int(float(get_value(item_data, 'item_qty', 1)))
+        except (ValueError, TypeError):
+            qty = 1
+        header_row2.append(qty)
 
-            # Row 2: Qty
-            try:
-                qty = int(float(get_value(items_list[idx], 'item_qty', 1)))
-            except (ValueError, TypeError):
-                qty = 1
-            ws.range(f'{col_letter}2').value = qty
+    # A열에 레이블 쓰기 (동적 필드 기준)
+    labels = ['Line No', 'Qty'] + all_fields
+    labels_2d = [[label] for label in labels]
+    ws.range(f'A1:A{len(labels)}').value = labels_2d
 
-    # SPEC_FIELDS 데이터 채움 (수식 인젝션 방지 적용)
-    row_idx = 3
-    for field in SPEC_FIELDS:
-        for idx, item_data in enumerate(items_list):
-            col_letter = chr(ord('B') + idx)
+    # B열부터 값 쓰기
+    end_col = chr(ord('B') + num_items - 1) if num_items <= 24 else None
+    if num_items > 24:
+        # 26개 이상인 경우 Excel 열 문자 계산
+        end_col_num = ord('B') + num_items - 1
+        if end_col_num <= ord('Z'):
+            end_col = chr(end_col_num)
+        else:
+            # AA, AB, ... 처리
+            end_col = 'A' + chr(ord('A') + (end_col_num - ord('Z') - 1))
+
+    # 헤더 배치 쓰기 (2회 COM 호출)
+    ws.range(f'B1:{end_col}1').value = [header_row1]
+    ws.range(f'B2:{end_col}2').value = [header_row2]
+
+    # 필드 데이터 준비
+    data_2d = []
+    for field in all_fields:
+        row_data = []
+        for item_data in items_list:
             value = get_value(item_data, field, default='')
             escaped_value = escape_excel_formula(value) if value else None
-            ws.range(f'{col_letter}{row_idx}').value = escaped_value
-        row_idx += 1
+            row_data.append(escaped_value)
+        data_2d.append(row_data)
 
-    # OPTION_FIELDS 데이터 채움 (수식 인젝션 방지 적용)
-    for field in OPTION_FIELDS:
-        for idx, item_data in enumerate(items_list):
-            col_letter = chr(ord('B') + idx)
-            value = get_value(item_data, field, default='')
-            escaped_value = escape_excel_formula(value) if value else None
-            ws.range(f'{col_letter}{row_idx}').value = escaped_value
-        row_idx += 1
+    # SPEC/OPTION 필드 배치 쓰기 (1회 COM 호출 - 30+N 필드 * M 아이템)
+    if data_2d:
+        num_rows = len(data_2d)
+        end_row = 3 + num_rows - 1
+        ws.range(f'B3:{end_col}{end_row}').value = data_2d
 
-    logger.info("Description 시트 생성 완료")
+    # 테두리 적용 (전체 데이터 영역)
+    _apply_description_borders(ws, num_items, len(labels))
+
+    logger.info(f"Description 시트 생성 완료 ({len(all_fields)}개 필드 x {num_items}개 아이템)")
 
 
 def _create_po_workbook_impl(
@@ -415,57 +478,33 @@ def _create_po_workbook_impl(
     Returns:
         생성된 임시 파일 경로
     """
-    # 템플릿 확인
-    _ensure_template_exists()
-
-    # 날짜
-    today = datetime.now()
-
-    # 경로에 한글이 포함된 경우 임시 폴더에서 작업
-    temp_dir = Path(tempfile.gettempdir())
-    temp_template = temp_dir / f"po_template_{today.strftime('%Y%m%d%H%M%S')}.xlsx"
-    temp_output = temp_dir / f"po_output_{today.strftime('%Y%m%d%H%M%S')}.xlsx"
-
-    # 템플릿을 임시 폴더로 복사
-    shutil.copy(PO_TEMPLATE_FILE, temp_template)
-
-    # Excel 앱 시작 (백그라운드)
-    app = xw.App(visible=False)
-    app.display_alerts = False
-    app.screen_updating = False
+    # 템플릿 준비 (임시 폴더로 복사)
+    temp_template, temp_output = prepare_template(PO_TEMPLATE_FILE, "po")
 
     try:
-        # 임시 템플릿 열기
-        wb = app.books.open(str(temp_template))
+        # xlwings App 생명주기 관리
+        with xlwings_app_context() as app:
+            # 임시 템플릿 열기
+            wb = app.books.open(str(temp_template))
 
-        # Purchase Order 시트
-        ws_po = wb.sheets['Purchase Order']
-        _create_purchase_order(ws_po, order_data, items_df)
+            # Purchase Order 시트
+            ws_po = wb.sheets['Purchase Order']
+            _create_purchase_order(ws_po, order_data, items_df)
 
-        # Description 시트
-        ws_desc = wb.sheets['Description']
-        _create_description_sheet(ws_desc, order_data, items_df)
+            # Description 시트
+            ws_desc = wb.sheets['Description']
+            _create_description_sheet(ws_desc, order_data, items_df)
 
-        # Purchase Order 시트를 먼저 보이도록 활성화
-        ws_po.activate()
+            # Purchase Order 시트를 먼저 보이도록 활성화
+            ws_po.activate()
 
-        # 임시 위치에 저장
-        wb.save(str(temp_output))
-        logger.info(f"PO 생성 완료 (임시): {temp_output}")
+            # 임시 위치에 저장
+            wb.save(str(temp_output))
+            logger.info(f"PO 생성 완료 (임시): {temp_output}")
 
     finally:
-        # 정리
-        try:
-            wb.close()
-        except NameError:
-            pass
-        app.quit()
-
         # 임시 템플릿 삭제
-        try:
-            temp_template.unlink()
-        except Exception:
-            pass
+        cleanup_temp_file(temp_template)
 
     return temp_output
 

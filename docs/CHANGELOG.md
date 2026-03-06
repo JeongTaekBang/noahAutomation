@@ -20,6 +20,23 @@
 
 ---
 
+## 2026-03-06: PO 테이블 PK에 `_row_seq` 추가 (부분 매입 대응)
+
+- `db_schema.py`: PO_국내/PO_해외의 PK를 `(PO_ID, Line item)` → `(PO_ID, Line item, _row_seq)`로 변경
+- `_row_seq`는 같은 `(PO_ID, Line item)` 그룹 내에서 Excel 행 순서대로 자동 부여 (1, 2, 3...)
+- 부분 매입 시 같은 Line item이 분할되어도 PK 충돌 없이 정상 동기화
+- `db_schema.py`: `migrate_pk_if_changed()` 추가 — 기존 DB의 PK가 설정과 다르면 자동 DROP → 재생성
+- `db_sync.py`: 테이블 생성 전 PK 마이그레이션 체크 호출
+
+---
+
+## 2026-03-06: OC 품목명에 Model number 표시
+
+- `oc_generator.py`: 품목명 출력 시 SO_해외의 Model number가 있으면 `"{Model number} {Item name}"` 형태로 표시
+- CI와 동일한 로직 적용 (Model number 없으면 Item name만 출력)
+
+---
+
 ## 2026-03-06: 내부 코드 최적화 (데이터 조회/서비스 캐시)
 
 ### 배경

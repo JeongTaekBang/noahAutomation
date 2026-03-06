@@ -43,6 +43,16 @@ logs/
 # Generated files (keep folder, ignore contents)
 generated_po/*.xlsx
 generated_ts/*.xlsx
+generated_fi/*.xlsx
+generated_pi/*.xlsx
+
+# Temp/analysis files
+*.bak
+nul
+analyze_sheets.py
+dn_analysis.txt
+templates/Old/
+templates/ts_template_local.xlsx
 
 # History files (운영 데이터 - 제외)
 po_history.xlsx

@@ -17,8 +17,16 @@ from po_generator.config import (
     OUTPUT_DIR,
     TS_OUTPUT_DIR,
     PI_OUTPUT_DIR,
+    CI_OUTPUT_DIR,
+    FI_OUTPUT_DIR,
+    PL_OUTPUT_DIR,
+    OC_OUTPUT_DIR,
     TS_TEMPLATE_FILE,
     PI_TEMPLATE_FILE,
+    CI_TEMPLATE_FILE,
+    FI_TEMPLATE_FILE,
+    PL_TEMPLATE_FILE,
+    OC_TEMPLATE_FILE,
 )
 from po_generator.utils import get_value
 from po_generator.validators import validate_order_data, validate_multiple_items
@@ -26,6 +34,10 @@ from po_generator.history import check_duplicate_order, save_to_history
 from po_generator.excel_generator import create_po_workbook
 from po_generator.ts_generator import create_ts_xlwings
 from po_generator.pi_generator import create_pi_xlwings
+from po_generator.ci_generator import create_ci_xlwings
+from po_generator.fi_generator import create_fi_xlwings
+from po_generator.pl_generator import create_pl_xlwings
+from po_generator.oc_generator import create_oc_xlwings
 from po_generator.cli_common import generate_output_filename, validate_output_path
 from po_generator.services.result import DocumentResult, GenerationStatus
 from po_generator.services.finder_service import FinderService, OrderData
@@ -59,6 +71,45 @@ class DocumentService:
     def finder(self) -> FinderService:
         """FinderService 인스턴스"""
         return self._finder
+
+    def _enrich_with_model_number(self, order_data: OrderData) -> pd.DataFrame:
+        """DN 아이템에 SO_해외의 Model number 컬럼 추가 (CI용)
+
+        SO_ID + Item name으로 매칭하여 Model number를 가져옵니다.
+        매칭 실패 시 원본 데이터를 그대로 반환합니다.
+        """
+        items_df = order_data.items_df if order_data.items_df is not None else pd.DataFrame([order_data.first_item])
+
+        so_id = get_value(order_data.first_item, 'so_id', '')
+        if not so_id:
+            return items_df
+
+        try:
+            df_so = self._finder.load_so_export_data()
+            so_items = df_so[df_so['SO_ID'] == so_id]
+            if so_items.empty:
+                return items_df
+
+            # DN과 SO의 item_name 컬럼명 찾기
+            dn_item_col = None
+            for col in ('Item name', 'Item'):
+                if col in items_df.columns:
+                    dn_item_col = col
+                    break
+
+            so_item_col = 'Item name' if 'Item name' in so_items.columns else None
+            model_col = 'Model number' if 'Model number' in so_items.columns else None
+
+            if dn_item_col and so_item_col and model_col:
+                model_map = dict(zip(so_items[so_item_col], so_items[model_col]))
+                items_df = items_df.copy()
+                items_df['Model number'] = items_df[dn_item_col].map(model_map)
+                logger.debug(f"Model number 보강 완료: {sum(items_df['Model number'].notna())}건 매칭")
+
+        except Exception as e:
+            logger.warning(f"Model number 보강 실패: {e}")
+
+        return items_df
 
     def generate_po(
         self,
@@ -298,6 +349,284 @@ class DocumentService:
             )
         except Exception as e:
             logger.exception("PI 생성 중 오류 발생")
+            return DocumentResult.file_error_result(
+                order_no=so_id,
+                error_message=str(e),
+            )
+
+        return DocumentResult.success_result(
+            output_file=output_file,
+            order_no=so_id,
+            customer_name=customer_name,
+            item_count=order_data.item_count,
+        )
+
+    def generate_ci(self, dn_id: str) -> DocumentResult:
+        """Commercial Invoice 생성
+
+        Args:
+            dn_id: DN_ID (예: DNO-2026-0001)
+
+        Returns:
+            DocumentResult
+        """
+        logger.info(f"CI 생성 시작: {dn_id}")
+
+        # 템플릿 확인
+        if not CI_TEMPLATE_FILE.exists():
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"템플릿 파일 없음: {CI_TEMPLATE_FILE}",
+            )
+
+        # 데이터 검색 (DN_해외 + Customer_해외 JOIN)
+        order_data = self._finder.find_dn_export(dn_id)
+        if order_data is None:
+            return DocumentResult.not_found_result(dn_id)
+
+        # SO_해외에서 Model number 보강
+        items_df = self._enrich_with_model_number(order_data)
+
+        # 출력 디렉토리 생성
+        CI_OUTPUT_DIR.mkdir(exist_ok=True)
+
+        # 파일명 생성
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        output_file = generate_output_filename("CI", dn_id, customer_name, CI_OUTPUT_DIR)
+
+        if not validate_output_path(output_file, CI_OUTPUT_DIR):
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message="출력 경로 검증 실패",
+            )
+
+        # 문서 생성
+        try:
+            create_ci_xlwings(
+                template_path=CI_TEMPLATE_FILE,
+                output_path=output_file,
+                order_data=items_df.iloc[0],
+                items_df=items_df,
+            )
+            logger.info(f"CI 생성 완료: {output_file}")
+
+        except FileNotFoundError as e:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=str(e),
+            )
+        except PermissionError:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
+            )
+        except Exception as e:
+            logger.exception("CI 생성 중 오류 발생")
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=str(e),
+            )
+
+        return DocumentResult.success_result(
+            output_file=output_file,
+            order_no=dn_id,
+            customer_name=customer_name,
+            item_count=order_data.item_count,
+        )
+
+    def generate_fi(self, dn_id: str) -> DocumentResult:
+        """Final Invoice 생성 (대금 청구용)
+
+        Args:
+            dn_id: DN_ID (예: DNO-2026-0001)
+
+        Returns:
+            DocumentResult
+        """
+        logger.info(f"FI 생성 시작: {dn_id}")
+
+        # 템플릿 확인
+        if not FI_TEMPLATE_FILE.exists():
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"템플릿 파일 없음: {FI_TEMPLATE_FILE}",
+            )
+
+        # 데이터 검색 (DN_해외 + Customer_해외 JOIN)
+        order_data = self._finder.find_dn_export(dn_id)
+        if order_data is None:
+            return DocumentResult.not_found_result(dn_id)
+
+        # 출력 디렉토리 생성
+        FI_OUTPUT_DIR.mkdir(exist_ok=True)
+
+        # 파일명 생성
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        output_file = generate_output_filename("FI", dn_id, customer_name, FI_OUTPUT_DIR)
+
+        if not validate_output_path(output_file, FI_OUTPUT_DIR):
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message="출력 경로 검증 실패",
+            )
+
+        # 문서 생성
+        try:
+            create_fi_xlwings(
+                template_path=FI_TEMPLATE_FILE,
+                output_path=output_file,
+                order_data=order_data.first_item,
+                items_df=order_data.items_df,
+            )
+            logger.info(f"FI 생성 완료: {output_file}")
+
+        except FileNotFoundError as e:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=str(e),
+            )
+        except PermissionError:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
+            )
+        except Exception as e:
+            logger.exception("FI 생성 중 오류 발생")
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=str(e),
+            )
+
+        return DocumentResult.success_result(
+            output_file=output_file,
+            order_no=dn_id,
+            customer_name=customer_name,
+            item_count=order_data.item_count,
+        )
+
+    def generate_pl(self, dn_id: str) -> DocumentResult:
+        """Packing List 생성
+
+        Args:
+            dn_id: DN_ID (예: DNO-2026-0001)
+
+        Returns:
+            DocumentResult
+        """
+        logger.info(f"PL 생성 시작: {dn_id}")
+
+        if not PL_TEMPLATE_FILE.exists():
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"템플릿 파일 없음: {PL_TEMPLATE_FILE}",
+            )
+
+        # 데이터 검색 (DN_해외 + Customer_해외 JOIN)
+        order_data = self._finder.find_dn_export(dn_id)
+        if order_data is None:
+            return DocumentResult.not_found_result(dn_id)
+
+        # SO_해외에서 Model number 보강
+        items_df = self._enrich_with_model_number(order_data)
+
+        PL_OUTPUT_DIR.mkdir(exist_ok=True)
+
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        output_file = generate_output_filename("PL", dn_id, customer_name, PL_OUTPUT_DIR)
+
+        if not validate_output_path(output_file, PL_OUTPUT_DIR):
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message="출력 경로 검증 실패",
+            )
+
+        try:
+            create_pl_xlwings(
+                template_path=PL_TEMPLATE_FILE,
+                output_path=output_file,
+                order_data=items_df.iloc[0],
+                items_df=items_df,
+            )
+            logger.info(f"PL 생성 완료: {output_file}")
+
+        except FileNotFoundError as e:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=str(e),
+            )
+        except PermissionError:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
+            )
+        except Exception as e:
+            logger.exception("PL 생성 중 오류 발생")
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=str(e),
+            )
+
+        return DocumentResult.success_result(
+            output_file=output_file,
+            order_no=dn_id,
+            customer_name=customer_name,
+            item_count=order_data.item_count,
+        )
+
+    def generate_oc(self, so_id: str) -> DocumentResult:
+        """Order Confirmation 생성
+
+        Args:
+            so_id: SO_ID (예: SOO-2026-0001)
+
+        Returns:
+            DocumentResult
+        """
+        logger.info(f"OC 생성 시작: {so_id}")
+
+        if not OC_TEMPLATE_FILE.exists():
+            return DocumentResult.file_error_result(
+                order_no=so_id,
+                error_message=f"템플릿 파일 없음: {OC_TEMPLATE_FILE}",
+            )
+
+        # 데이터 검색 (SO_해외 + Customer_해외 JOIN)
+        order_data = self._finder.find_so_export_with_customer(so_id)
+        if order_data is None:
+            return DocumentResult.not_found_result(so_id)
+
+        OC_OUTPUT_DIR.mkdir(exist_ok=True)
+
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        output_file = generate_output_filename("OC", so_id, customer_name, OC_OUTPUT_DIR)
+
+        if not validate_output_path(output_file, OC_OUTPUT_DIR):
+            return DocumentResult.file_error_result(
+                order_no=so_id,
+                error_message="출력 경로 검증 실패",
+            )
+
+        try:
+            create_oc_xlwings(
+                template_path=OC_TEMPLATE_FILE,
+                output_path=output_file,
+                order_data=order_data.first_item,
+                items_df=order_data.items_df,
+            )
+            logger.info(f"OC 생성 완료: {output_file}")
+
+        except FileNotFoundError as e:
+            return DocumentResult.file_error_result(
+                order_no=so_id,
+                error_message=str(e),
+            )
+        except PermissionError:
+            return DocumentResult.file_error_result(
+                order_no=so_id,
+                error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
+            )
+        except Exception as e:
+            logger.exception("OC 생성 중 오류 발생")
             return DocumentResult.file_error_result(
                 order_no=so_id,
                 error_message=str(e),

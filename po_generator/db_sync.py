@@ -22,6 +22,7 @@ from po_generator.db_schema import (
     SheetConfig, SYNC_SHEETS,
     create_table, ensure_columns_exist,
     update_sync_metadata, get_table_row_count,
+    migrate_pk_if_changed,
 )
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,8 @@ class SyncEngine:
             # 4. 컬럼 목록 구성
             columns = list(df.columns)
 
-            # 5. 테이블 생성/컬럼 추가
+            # 5. PK 변경 시 테이블 재생성 + 테이블 생성/컬럼 추가
+            migrate_pk_if_changed(conn, config)
             create_table(conn, config.table_name, columns, config.pk_columns)
             added_cols = ensure_columns_exist(conn, config.table_name, columns)
             if added_cols > 0:

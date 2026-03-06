@@ -45,14 +45,21 @@ def validate_output_path(output_file: Path, output_dir: Path) -> bool:
         유효한 경로이면 True
     """
     try:
-        if not output_file.resolve().is_relative_to(output_dir.resolve()):
-            print(f"  [오류] 잘못된 파일 경로: {output_file}")
-            return False
-    except ValueError:
-        # Python 3.9+ is_relative_to() 지원 확인용 fallback
-        if str(output_dir.resolve()) not in str(output_file.resolve()):
-            print(f"  [오류] 잘못된 파일 경로: {output_file}")
-            return False
+        resolved_file = output_file.resolve()
+        resolved_dir = output_dir.resolve()
+
+        # Python 3.9+ is_relative_to() 사용
+        if hasattr(resolved_file, 'is_relative_to'):
+            if not resolved_file.is_relative_to(resolved_dir):
+                print(f"  [오류] 잘못된 파일 경로: {output_file}")
+                return False
+        else:
+            # Python 3.8 fallback: relative_to() 사용 (실패 시 ValueError 발생)
+            resolved_file.relative_to(resolved_dir)
+    except (ValueError, AttributeError):
+        # relative_to() 실패 = output_file이 output_dir 하위가 아님
+        print(f"  [오류] 잘못된 파일 경로: {output_file}")
+        return False
     return True
 
 
