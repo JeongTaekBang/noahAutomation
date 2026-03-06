@@ -27,6 +27,7 @@ from po_generator.utils import (
     find_pmt_data,
     find_so_export_data,
     find_dn_export_data,
+    load_so_for_advance,
     get_value,
 )
 
@@ -207,6 +208,7 @@ class FinderService:
         if result is None:
             return None
         return OrderData.from_result(result)
+
 
     def load_dn_export_data(self) -> pd.DataFrame:
         """DN 해외 데이터 로드 (Customer_해외 JOIN 포함)"""

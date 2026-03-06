@@ -318,6 +318,7 @@ set /p CI_CONTINUE="다른 Commercial Invoice를 생성하시겠습니까? (Y/N)
 if /i "%CI_CONTINUE%"=="Y" goto ci_input
 goto menu
 
+
 :sync_db
 echo.
 echo ----------------------------------------

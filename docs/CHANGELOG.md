@@ -159,7 +159,6 @@ DN_해외 → Customer_해외 (customer_code JOIN)
 `SO_해외` → `Customer_해외` (고객코드 JOIN, Bill to/Payment terms 포함)
 
 ---
-
 ## 2026-03-04: FI 새 템플릿 대응 업데이트
 
 ### 배경
