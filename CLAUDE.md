@@ -51,7 +51,7 @@ Shared: config.py (paths, constants, aliases), utils.py (data loading), validato
 DB layer:
   sync_db.py → db_sync.py (Excel→SQLite) → db_schema.py (DDL)
   close_period.py → snapshot.py (SnapshotEngine) → db_schema.py (snapshot tables)
-  sql/order_book.sql (rolling), sql/order_book_snapshot.sql (snapshot-based)
+  sql/order_book.sql (이벤트 기반), sql/order_book_snapshot.sql (snapshot-based)
 ```
 
 **Data flow:** CLI → FinderService loads Excel data → validators check fields → generator fills template → output saved to `generated_*/` + history snapshot to `po_history/YYYY/M월/`.
@@ -87,6 +87,7 @@ DB layer:
 | `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
 | `po_generator/snapshot.py` | SnapshotEngine — 월별 마감, Variance 추적 |
 | `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`) |
+| `sql/order_book.sql` | 이벤트 기반 Order Book SQL (Input/Output 이벤트 월만 행 생성, 재귀 CTE 없음) |
 | `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL (마감 고정 + Variance) |
 
 ## Business Rules

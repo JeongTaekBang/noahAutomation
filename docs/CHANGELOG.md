@@ -20,6 +20,66 @@
 
 ---
 
+## 2026-03-09: Order Book SQL 이벤트 기반 리팩토링
+
+### 배경
+기존 `order_book.sql`은 Power Query 로직을 그대로 SQL로 포팅한 구조로, SO를 모든 월에 걸쳐 행을 펼친(expand) 뒤 롤링 계산. 재귀 CTE + 카테시안 조인으로 빈 월(filler)까지 행을 생성하므로 비효율적이고 복잡.
+
+AX2009 스타일의 이벤트/트랜잭션 기반으로 전환: SO 등록 = Input 이벤트, DN 출고 = Output 이벤트. 이벤트 발생 월만 행으로 존재하고, 빈 월 행을 생성하지 않음.
+
+### 핵심 변경
+
+**제거된 CTE (7개):**
+`dn_last_month`, `period_bounds`, `month_series`(재귀), `so_with_dn`, `so_expanded`, `with_input`, `with_output`
+
+**추가된 CTE (1개):**
+`events_line_item` — Input(SO 등록)/Output(DN 출고) 이벤트 UNION ALL
+
+**새 CTE 구조:**
+```
+so_combined → dn_combined → dn_by_month
+→ events_line_item (NEW: Input + Output UNION ALL)
+→ os_grouped (기존 로직, 소스만 변경)
+→ Final SELECT (Window function Start/Ending)
+```
+12 CTE → 6단계로 축소. `WITH RECURSIVE` 제거.
+
+### 수정 파일 (5개)
+
+| 파일 | 변경 내용 |
+|------|----------|
+| `sql/order_book.sql` | 12→6 CTE, 재귀/카테시안 제거, events_line_item 추가. 출력 컬럼 24개 동일. 빈 월 행 제거(이벤트 월만) |
+| `po_generator/snapshot.py` | `_ORDER_BOOK_BASE_SQL` 이벤트 기반으로 교체. `SELECT * FROM rolling WHERE Period = ?` → 누적 SUM `as_of` 패턴 (`target(p) AS (SELECT ?)`) |
+| `sql/order_book_snapshot.sql` | 베이스 CTE 교체, `cumul_at_snapshot` CTE 추가 (correlated subquery 6개 → JOIN 1개), `next_open_period` CTE로 월 계산 추출 |
+| `sql/order_book_backlog.sql` | rolling + `WHERE Period = max_period` → 전체 이벤트 SUM + `HAVING > 0`으로 단순화 |
+| `sql/order_book_snapshot_backlog.sql` | 동일 패턴 적용 (snap + variance + post_events = total이므로 단순 SUM) |
+
+### snapshot.py 쿼리 패턴 변경
+
+**Before (filler 기반):**
+```sql
+SELECT * FROM rolling WHERE Period = ?
+```
+
+**After (누적 SUM 패턴):**
+```sql
+, target(p) AS (SELECT ?)
+SELECT SO_ID, [OS name], ...
+    SUM(CASE WHEN Period = t.p THEN Input ELSE 0 END) AS Input,
+    SUM(CASE WHEN Period < t.p THEN Input-Output ELSE 0 END) AS Start,
+    SUM(Input - Output) AS Ending
+FROM os_grouped og, target t WHERE Period <= t.p
+GROUP BY SO_ID, [OS name], [Expected delivery date]
+```
+→ 활동 없는 SO도 이전 이벤트 누적으로 잔고 표시. 단일 `?` 파라미터.
+
+### 변경하지 않은 파일
+- `close_period.py` — SnapshotEngine 호출만 하므로 변경 없음
+- `po_generator/db_schema.py` — 테이블 구조 변경 없음
+- `ob_snapshot`, `ob_snapshot_meta` — 기존 스냅샷 데이터 유지
+
+---
+
 ## 2026-03-09: Order Book 스냅샷 기반 Variance 추적
 
 ### 배경
