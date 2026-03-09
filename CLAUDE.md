@@ -23,6 +23,13 @@ python create_pi.py NO-0001              # Proforma invoice
 python create_fi.py ND-0001              # Final invoice
 python create_oc.py SOO-2026-0001        # Order confirmation
 
+# DB sync & snapshot
+python sync_db.py                         # Excel → SQLite sync
+python close_period.py 2026-01            # Monthly close (snapshot)
+python close_period.py --undo 2026-01     # Undo last close
+python close_period.py --list             # Snapshot history
+python close_period.py --status           # Current status
+
 # Tests
 pytest                                    # All tests
 pytest --cov=po_generator                 # With coverage
@@ -40,6 +47,11 @@ Service layer (po_generator/services/document_service.py, finder_service.py)
 Generators (excel_generator.py=openpyxl, ts/pi/fi/oc_generator.py=xlwings)
     ↓
 Shared: config.py (paths, constants, aliases), utils.py (data loading), validators.py
+
+DB layer:
+  sync_db.py → db_sync.py (Excel→SQLite) → db_schema.py (DDL)
+  close_period.py → snapshot.py (SnapshotEngine) → db_schema.py (snapshot tables)
+  sql/order_book.sql (rolling), sql/order_book_snapshot.sql (snapshot-based)
 ```
 
 **Data flow:** CLI → FinderService loads Excel data → validators check fields → generator fills template → output saved to `generated_*/` + history snapshot to `po_history/YYYY/M월/`.
@@ -51,6 +63,7 @@ Shared: config.py (paths, constants, aliases), utils.py (data loading), validato
 - **Template Engine** (`template_engine.py`): Clones rows for multi-item orders, auto-adjusts SUM formulas after row insertion.
 - **History as DB**: `po_history/YYYY/M월/YYYYMMDD_주문번호_고객명.xlsx` — one file per transaction enables duplicate detection without a database.
 - **Result Pattern** (`services/result.py`): `DocumentResult` + `GenerationStatus` enum for structured operation outcomes.
+- **Snapshot Engine** (`snapshot.py`): Monthly close → `ob_snapshot` freezes Ending, subsequent retroactive changes auto-detected as Variance. Sequential close enforced.
 
 ### Configuration Split
 
@@ -72,6 +85,9 @@ Shared: config.py (paths, constants, aliases), utils.py (data loading), validato
 | `docs/POWER_QUERY.md` | Power Query 수식, Power Pivot 관계 — 데이터 소스 구조 이해 시 참고 |
 | `docs/CHANGELOG.md` | 버전별 변경 이력 |
 | `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
+| `po_generator/snapshot.py` | SnapshotEngine — 월별 마감, Variance 추적 |
+| `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`) |
+| `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL (마감 고정 + Variance) |
 
 ## Business Rules
 

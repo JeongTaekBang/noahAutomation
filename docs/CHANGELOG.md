@@ -20,6 +20,90 @@
 
 ---
 
+## 2026-03-09: Order Book 스냅샷 기반 Variance 추적
+
+### 배경
+기존 `order_book.sql`은 매번 SO/DN raw 데이터에서 롤링 재계산. AX2009처럼 월별 마감(스냅샷) → Start를 고정하고, 소급 변경분을 Variance로 자동 감지하는 방식으로 전환.
+
+**핵심 공식 변경**: `Ending = Start(롤링) + Input - Output` → `Ending = Start(스냅샷) + Input + Variance - Output`
+
+### 신규 파일
+| 파일 | 역할 |
+|------|------|
+| `close_period.py` | CLI 진입점 (마감/취소/현황 조회) |
+| `po_generator/snapshot.py` | SnapshotEngine — 스냅샷 생성/취소/조회 |
+| `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL |
+| `sql/order_book_snapshot_backlog.sql` | 스냅샷 기반 Backlog 뷰 |
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `po_generator/db_schema.py` | `create_snapshot_tables()` 함수 추가 (`ob_snapshot`, `ob_snapshot_meta` 테이블) |
+
+### DB 테이블
+
+**`ob_snapshot`** — 스냅샷 데이터 (PK: `snapshot_period, SO_ID, OS name, Expected delivery date`)
+- 마감 Period의 전체 컬럼 고정값 저장 (Start, Input, Output, Variance, Ending × qty/amount)
+- 컨텍스트 (customer_name, item_name, 구분, 등록Period, AX Period, Sector 등)
+
+**`ob_snapshot_meta`** — 마감 메타 (PK: `period`)
+- `is_active`: 활성 여부 (undo 시 0으로 변경)
+- `closed_at`, `note`
+
+### SnapshotEngine 로직
+
+**`take_snapshot(period)`:**
+1. period 형식 검증 (yyyy-MM)
+2. 순차 마감 검증 (이전 period 마감 필수)
+3. 롤링 order_book CTE 실행 → 해당 period 결과 추출
+4. Variance 계산: `recalc_ending(현재 raw) - snap_ending(이전 스냅샷)` → 소급 변경분 감지
+5. `ob_snapshot` + `ob_snapshot_meta` 저장
+
+**`undo_snapshot(period)`:** 최신 활성 마감만 취소 가능. meta 비활성화 + snapshot 삭제.
+
+### SQL 구조 (`order_book_snapshot.sql`)
+
+**Open Period만 표시** — 마감된 Period는 `close_period.py --list`로 조회.
+
+| 데이터 구간 | 처리 |
+|------------|------|
+| Open Period (스냅샷 이후) | Start=스냅샷 Ending, Variance=소급변경분, Ending=Start+Input+Var-Output |
+| 스냅샷 없음 | 기존 롤링 계산 fallback (order_book.sql과 동일 결과) |
+
+### 사용법
+
+```bash
+python close_period.py 2026-01                    # 1월 마감
+python close_period.py 2026-02 --note "정기 마감"   # 노트 포함
+python close_period.py --undo 2026-02              # 마감 취소 (최신만)
+python close_period.py --list                      # 마감 현황
+python close_period.py --status                    # 현재 상태
+```
+
+### `--list` 출력 보강
+
+`list_snapshots()` 쿼리에 `total_start`, `total_input`, `total_output`, `total_variance` 합계 컬럼 추가. `print_list()` 함수에서 다음을 표시:
+
+- **컬럼**: Period, 건수, Start, Input, Output, Variance, Ending, 마감일시
+- **금액 포맷**: 백만 단위 `M` 접미사 (예: `1,597.2M`)
+- **정합성 체크**: 전월 Ending != 당월 Start 시 차이 경고 표시
+- **합계 행**: 활성 마감 기준 Input/Output/Variance 총합, 마지막 Ending
+- **비고**: `--note`로 입력한 비고를 하단에 표시
+
+### `create_po.bat` 메뉴 개편
+
+- `[8]` → `DB Sync (Excel → SQLite)` (라벨 변경)
+- `[9]` → `Order Book Close (월 마감)` 추가 (서브메뉴: 마감/취소/현황/상태)
+- `[H]` → `발주 이력 조회` (기존 `[9]`에서 이동)
+
+### 설계 결정사항
+- 과거 Period: 스냅샷 고정값만 표시
+- Variance: 총액만 (세부 구분 불필요)
+- 마감 순서: 순차 강제 (1월→2월→3월)
+- 기존 `order_book.sql`: 유지 (롤링 버전 병행)
+
+---
+
 ## 2026-03-06: PO 테이블 PK에 `_row_seq` 추가 (부분 매입 대응)
 
 - `db_schema.py`: PO_국내/PO_해외의 PK를 `(PO_ID, Line item)` → `(PO_ID, Line item, _row_seq)`로 변경

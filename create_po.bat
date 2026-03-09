@@ -33,16 +33,17 @@ echo   [6] Commercial Invoice 생성 (CI)
 echo   [7] Packing List 생성 (PL)
 echo.
 echo   [데이터]
-echo   [8] Excel → DB 동기화
+echo   [8] DB Sync (Excel → SQLite)
+echo   [9] Order Book Close (월 마감)
 echo.
 echo   [기타]
-echo   [9] 발주 이력 조회
+echo   [H] 발주 이력 조회
 echo   [0] 종료
 echo.
 echo ========================================
 echo.
 
-set /p CHOICE="선택 (0-9): "
+set /p CHOICE="선택: "
 
 if "%CHOICE%"=="1" goto create_po
 if "%CHOICE%"=="2" goto create_ts
@@ -52,7 +53,8 @@ if "%CHOICE%"=="5" goto create_oc
 if "%CHOICE%"=="6" goto create_ci
 if "%CHOICE%"=="7" goto create_pl
 if "%CHOICE%"=="8" goto sync_db
-if "%CHOICE%"=="9" goto view_history
+if "%CHOICE%"=="9" goto close_period
+if /i "%CHOICE%"=="H" goto view_history
 if "%CHOICE%"=="0" goto end
 echo [오류] 올바른 번호를 입력하세요.
 pause
@@ -318,7 +320,6 @@ set /p CI_CONTINUE="다른 Commercial Invoice를 생성하시겠습니까? (Y/N)
 if /i "%CI_CONTINUE%"=="Y" goto ci_input
 goto menu
 
-
 :sync_db
 echo.
 echo ----------------------------------------
@@ -327,6 +328,84 @@ echo ----------------------------------------
 echo.
 
 "%PYTHON_PATH%" "%~dp0sync_db.py" --changes
+
+echo.
+pause
+goto menu
+
+:close_period
+echo.
+echo ----------------------------------------
+echo   Order Book 월 마감 (스냅샷)
+echo ----------------------------------------
+echo.
+echo   [1] 월 마감
+echo   [2] 마감 취소 (최신만)
+echo   [3] 마감 현황 조회
+echo   [4] 현재 상태
+echo   [0] 메뉴로 돌아가기
+echo.
+
+set /p CP_MODE="선택: "
+
+if "%CP_MODE%"=="1" goto cp_close
+if "%CP_MODE%"=="2" goto cp_undo
+if "%CP_MODE%"=="3" goto cp_list
+if "%CP_MODE%"=="4" goto cp_status
+if "%CP_MODE%"=="0" goto menu
+echo [오류] 올바른 번호를 입력하세요.
+pause
+goto close_period
+
+:cp_close
+echo.
+set /p CP_PERIOD="마감할 Period 입력 (예: 2026-01): "
+if "%CP_PERIOD%"=="" (
+    echo [오류] Period를 입력하세요.
+    goto cp_close
+)
+set /p CP_NOTE="비고 (없으면 Enter): "
+
+echo.
+echo 마감 처리 중...
+echo.
+
+if "%CP_NOTE%"=="" (
+    "%PYTHON_PATH%" "%~dp0close_period.py" %CP_PERIOD%
+) else (
+    "%PYTHON_PATH%" "%~dp0close_period.py" %CP_PERIOD% --note "%CP_NOTE%"
+)
+
+echo.
+pause
+goto menu
+
+:cp_undo
+echo.
+set /p CP_UNDO_PERIOD="취소할 Period 입력 (예: 2026-01): "
+if "%CP_UNDO_PERIOD%"=="" (
+    echo [오류] Period를 입력하세요.
+    goto cp_undo
+)
+
+echo.
+"%PYTHON_PATH%" "%~dp0close_period.py" --undo %CP_UNDO_PERIOD%
+
+echo.
+pause
+goto menu
+
+:cp_list
+echo.
+"%PYTHON_PATH%" "%~dp0close_period.py" --list
+
+echo.
+pause
+goto menu
+
+:cp_status
+echo.
+"%PYTHON_PATH%" "%~dp0close_period.py" --status
 
 echo.
 pause

@@ -173,6 +173,46 @@ def get_table_row_count(conn: sqlite3.Connection, table_name: str) -> int:
         return 0
 
 
+def create_snapshot_tables(conn: sqlite3.Connection) -> None:
+    """Order Book 스냅샷 테이블 생성 (없으면 생성)"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ob_snapshot (
+            snapshot_period TEXT NOT NULL,
+            SO_ID TEXT NOT NULL,
+            [OS name] TEXT NOT NULL,
+            [Expected delivery date] TEXT NOT NULL DEFAULT '',
+            ending_qty REAL NOT NULL DEFAULT 0,
+            ending_amount REAL NOT NULL DEFAULT 0,
+            start_qty REAL NOT NULL DEFAULT 0,
+            start_amount REAL NOT NULL DEFAULT 0,
+            input_qty REAL NOT NULL DEFAULT 0,
+            input_amount REAL NOT NULL DEFAULT 0,
+            output_qty REAL NOT NULL DEFAULT 0,
+            output_amount REAL NOT NULL DEFAULT 0,
+            variance_qty REAL NOT NULL DEFAULT 0,
+            variance_amount REAL NOT NULL DEFAULT 0,
+            customer_name TEXT,
+            item_name TEXT,
+            구분 TEXT,
+            등록Period TEXT,
+            [AX Period] TEXT,
+            [AX Project number] TEXT,
+            Sector TEXT,
+            snapshot_at TEXT NOT NULL,
+            PRIMARY KEY (snapshot_period, SO_ID, [OS name], [Expected delivery date])
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ob_snapshot_meta (
+            period TEXT PRIMARY KEY,
+            closed_at TEXT NOT NULL,
+            note TEXT,
+            is_active INTEGER NOT NULL DEFAULT 1
+        )
+    """)
+    logger.debug("스냅샷 테이블 생성/확인 완료")
+
+
 def get_sync_metadata(conn: sqlite3.Connection) -> dict[str, dict]:
     """_sync_meta 테이블에서 동기화 메타정보 조회"""
     try:

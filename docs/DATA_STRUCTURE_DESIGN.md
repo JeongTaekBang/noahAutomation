@@ -1007,6 +1007,70 @@ NOAH_PO_Lists.xlsx
 
 ---
 
+## 14. Order Book 스냅샷 (월별 마감)
+
+### 배경
+Order Book의 롤링 계산(`sql/order_book.sql`)은 매번 raw 데이터에서 처음부터 재계산. 월별 마감 후 소급 변경이 발생하면 과거 Period 값도 변경되는 문제가 있다. 스냅샷 방식으로 마감된 Period는 고정하고, 소급 변경분은 Variance로 자동 감지한다.
+
+### 테이블 설계
+
+**`ob_snapshot`** — 마감된 Period의 고정값
+
+```
+┌──────────────────┬─────────────┬─────────┬──────────────────────────┐
+│ snapshot_period   │ SO_ID       │ OS name │ Expected delivery date   │
+│ (PK)             │ (PK)        │ (PK)    │ (PK)                     │
+├──────────────────┼─────────────┼─────────┼──────────────────────────┤
+│ 2026-01          │ SOD-2026-001│ IQ10    │ 2026-03-15               │
+└──────────────────┴─────────────┴─────────┴──────────────────────────┘
++ ending_qty, ending_amount, start_qty, start_amount,
+  input_qty, input_amount, output_qty, output_amount,
+  variance_qty, variance_amount,
+  customer_name, item_name, 구분, 등록Period, AX Period, AX Project number, Sector,
+  snapshot_at
+```
+
+**`ob_snapshot_meta`** — 마감 메타정보
+
+```
+┌─────────┬─────────────────────┬──────────────┬───────────┐
+│ period  │ closed_at           │ note         │ is_active │
+│ (PK)    │                     │              │           │
+├─────────┼─────────────────────┼──────────────┼───────────┤
+│ 2026-01 │ 2026-02-05T10:00:00 │ 1월 정기 마감 │ 1         │
+│ 2026-02 │ 2026-03-03T09:30:00 │              │ 1         │
+└─────────┴─────────────────────┴──────────────┴───────────┘
+```
+
+### Order Book 계산 공식
+
+`order_book_snapshot.sql`은 **Open Period만 표시** (마감된 Period는 `close_period.py --list`로 조회).
+
+```
+Open Period (마감 이후):
+  Start     = 마지막 스냅샷의 Ending
+  Variance  = 현재 raw 재계산 Ending - 스냅샷 Ending (소급 변경분)
+  Input     = 당월 SO 등록
+  Output    = 당월 DN 출고
+  Ending    = Start + Input + Variance - Output
+
+스냅샷 없음:
+  → 기존 롤링 계산 (order_book.sql과 동일)
+```
+
+### 관련 파일
+
+| 파일 | 역할 |
+|------|------|
+| `close_period.py` | CLI — 마감/취소/조회 |
+| `po_generator/snapshot.py` | SnapshotEngine |
+| `po_generator/db_schema.py` | `create_snapshot_tables()` |
+| `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL |
+| `sql/order_book_snapshot_backlog.sql` | 스냅샷 기반 Backlog |
+| `sql/order_book.sql` | 기존 롤링 버전 (유지) |
+
+---
+
 ## 변경 이력
 
 | 날짜 | 내용 |
@@ -1019,3 +1083,5 @@ NOAH_PO_Lists.xlsx
 | 2026-02-28 | **ERP 매핑 섹션 추가**: 섹션 6.1 - 테이블 관계, 조인, 집계, 상태 관리, 스냅샷 보존 등 ERP 원리와의 대응 관계 문서화 |
 | 2026-02-28 | **BOM 설계 추가**: 섹션 13 - 완제품↔부품 다대다 관계, BOM_Part/BOM_Line 중간 테이블 설계, 원가 계산/소요량 산출 활용 방안 |
 | 2026-02-28 | **ERP 모듈 비교 추가**: 섹션 6.2 - 모듈별 1:N 관계, Header-Line 패턴, Document Flow, 다대다 관계, 스냅샷 불변성 등 ERP 원리 학습 참고 자료 |
+| 2026-03-09 | **Order Book 스냅샷 추가**: 섹션 14 - 월별 마감/Variance 추적 테이블 설계 (`ob_snapshot`, `ob_snapshot_meta`) |
+| 2026-03-09 | **SQL Open Period 전용화**: `order_book_snapshot.sql`에서 마감된 Period 제거, open period만 표시하도록 변경 |
