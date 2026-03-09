@@ -64,6 +64,14 @@ CI_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_ci"
 FI_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "final_invoice.xlsx"
 FI_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_fi"
 
+# === Packing List 설정 ===
+PL_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "packing_list.xlsx"
+PL_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_pl"
+
+# === Order Confirmation 설정 ===
+OC_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "order_confirmation.xlsx"
+OC_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_oc"
+
 
 # === 시트 설정 (NOAH_SO_PO_DN.xlsx) ===
 # 국내 시트
@@ -263,6 +271,13 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'bill_to_3': ('Bill to 3', 'bill to 3'),
     'payment_terms': ('Payment terms', 'Payment Terms', 'payment terms', '결제조건'),
     'rck_po': ('RCK PO', 'RCK PO No', 'rck_po'),
+    # Order Confirmation 필드
+    'exw_noah': ('EXW NOAH', 'EXW Noah', 'exw_noah', 'EXW date'),
+    'shipping_method': ('Shipping method', 'Shipping Method', 'shipping_method', '배송방법'),
+    # Packing List 필드
+    'weight_per_unit': ('Weight per unit', 'Weight/Unit', 'KG/PC', 'weight_per_unit', '단위중량'),
+    'gross_weight': ('Gross Weight', 'Weight', 'gross_weight', 'Total Weight', '총중량'),
+    'cbm': ('CBM', 'cbm', 'Cubic Meter', '체적'),
 }
 
 

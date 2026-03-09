@@ -12,7 +12,7 @@ from po_generator.validators import validate_order_data
 from po_generator.history import check_duplicate_order, save_to_history, sanitize_filename
 from po_generator.excel_generator import create_po_workbook
 
-__version__ = "2.1.0"
+__version__ = "2.5.0"
 __all__ = [
     "load_noah_po_lists",
     "find_order_data",

@@ -38,15 +38,15 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 |----------|----------|-----|------|
 | `so_domestic` | SO_국내 | `(SO_ID, Customer PO, Line item)` | |
 | `so_export` | SO_해외 | `(SO_ID, Customer PO, Line item)` | |
-| `po_domestic` | PO_국내 | `(SO_ID, Customer PO, Line item)` | |
-| `po_export` | PO_해외 | `(SO_ID, Customer PO, Line item, _row_seq)` | 사양 변형 순번 |
+| `po_domestic` | PO_국내 | `(PO_ID, Line item, _row_seq)` | 부분 매입 순번 |
+| `po_export` | PO_해외 | `(PO_ID, Line item, _row_seq)` | 부분 매입 순번 |
 | `dn_domestic` | DN_국내 | `(DN_ID, Line item)` | |
 | `dn_export` | DN_해외 | `(DN_ID, SO_ID, Line item)` | |
 | `pmt_domestic` | PMT_국내 | `(선수금_ID)` | |
 
-### PO_해외 `_row_seq`
+### PO 테이블 `_row_seq`
 
-같은 SO Line item에 사양 변형이 있을 때 (예: SQ14×14×18D / SQ14×14×30D), 같은 `(SO_ID, Customer PO, Line item)` 내에서 Excel 행 순서대로 자동 순번(1,2,3...) 부여.
+부분 매입 시 같은 Line item이 분할되어 중복될 수 있으므로 (예: Line item 1, qty 2 → Line item 1, qty 1 두 행), 같은 `(PO_ID, Line item)` 내에서 Excel 행 순서대로 자동 순번(1,2,3...) 부여. PO_국내/PO_해외 모두 적용.
 
 ### 메타 테이블 `_sync_meta`
 

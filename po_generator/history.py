@@ -43,34 +43,6 @@ CELL_CUSTOMER_NAME: str = "A10"
 HISTORY_MAX_SEARCH_ROWS: int = 100
 
 
-def _find_item_start_row(
-    ws,
-    search_labels: tuple[str, ...] = PO_HEADER_LABELS,
-    max_search_rows: int = 30,
-    fallback_row: int = ITEM_START_ROW_FALLBACK,
-) -> int:
-    """템플릿에서 아이템 시작 행을 동적으로 찾기 (openpyxl 버전)
-
-    excel_helpers.find_item_start_row_openpyxl의 래퍼입니다.
-    하위 호환성을 위해 유지됩니다.
-
-    Args:
-        ws: openpyxl Worksheet 객체
-        search_labels: 검색할 헤더 레이블
-        max_search_rows: 최대 검색 행 수
-        fallback_row: 헤더를 찾지 못했을 때 기본값
-
-    Returns:
-        아이템 시작 행 번호
-    """
-    return find_item_start_row_openpyxl(
-        ws,
-        search_labels=search_labels,
-        max_search_rows=max_search_rows,
-        fallback_row=fallback_row,
-    )
-
-
 class DuplicateInfo(TypedDict):
     """중복 발주 정보"""
     생성일시: str
@@ -152,7 +124,11 @@ def _extract_data_from_po_file(po_file: Path) -> dict[str, Any]:
             ws_po = wb["Purchase Order"]
 
             # 아이템 시작 행 동적 탐지
-            item_start_row = _find_item_start_row(ws_po, fallback_row=ITEM_START_ROW_FALLBACK)
+            item_start_row = find_item_start_row_openpyxl(
+                ws_po,
+                search_labels=PO_HEADER_LABELS,
+                fallback_row=ITEM_START_ROW_FALLBACK,
+            )
 
             # 고정 위치 셀 (헤더 영역)
             # A1: "Purchase Order - ND-0001" 형식에서 주문번호 추출
