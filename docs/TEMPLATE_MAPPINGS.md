@@ -157,6 +157,7 @@
 - 매칭 결과를 `'Weight per unit'` 컬럼으로 items_df에 추가 → pl_generator가 F열에 자동 출력
 - Weight 시트가 없거나 매칭 실패 시 graceful fallback (빈 값)
 
+
 ---
 
 ## PL — Packing List (`templates/packing_list.xlsx`)
