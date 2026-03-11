@@ -1,12 +1,13 @@
 -- ═══════════════════════════════════════════════════════════════
--- Order Book (수주잔고 롤링 원장)
--- Power Query M 코드 → SQLite 변환
+-- Order Book (수주잔고 이벤트 기반 원장)
+-- 이벤트 기반: SO 등록(Input), DN 출고(Output) 발생 월만 행 생성
 -- DB Browser for SQLite > Execute SQL 탭에서 실행
 -- ═══════════════════════════════════════════════════════════════
--- 동작: SO(수주) × Period(월) 확장 → Input/Output 계산 → 롤링 잔고
+-- 동작: SO(수주) Input + DN(출고) Output 이벤트 → 롤링 잔고 계산
+-- 빈 월(활동 없는 월)은 행을 생성하지 않음
 -- 전제: sync_db.py로 동기화된 noah_data.db 사용
 
-WITH RECURSIVE
+WITH
 -- ─── 1. SO 통합 (국내 + 해외, Cancelled·빈 Period 제외) ───
 so_combined AS (
     SELECT
@@ -20,7 +21,7 @@ so_combined AS (
         CAST([Sales amount] AS REAL) AS [Sales amount KRW],
         Period,
         [AX Period],
-        [AX Project number],
+        [Model code],
         Sector,
         [Business registration number],
         [Industry code],
@@ -43,7 +44,7 @@ so_combined AS (
         CAST([Sales amount KRW] AS REAL),
         Period,
         [AX Period],
-        [AX Project number],
+        [Model code],
         Sector,
         [Business registration number],
         [Industry code],
@@ -87,91 +88,43 @@ dn_by_month AS (
     GROUP BY SO_ID, [Line item], 출고월
 ),
 
--- ─── 4. DN 마지막 출고월 (Period 확장 끝점 결정) ───
-dn_last_month AS (
-    SELECT SO_ID, [Line item], MAX(출고월) AS last_출고월
-    FROM dn_combined
-    WHERE 출고월 IS NOT NULL AND 출고월 != ''
-    GROUP BY SO_ID, [Line item]
-),
-
--- ─── 5. 전체 기간 범위 ───
-period_bounds AS (
-    SELECT MIN(p) AS min_period, MAX(p) AS max_period
-    FROM (
-        SELECT Period AS p FROM so_combined
-        UNION
-        SELECT 출고월 FROM dn_by_month WHERE 출고월 IS NOT NULL
-    )
-),
-
--- ─── 6. 연속 월 생성 (min~max, 재귀 CTE) ───
-month_series(m) AS (
-    SELECT min_period FROM period_bounds
-    UNION ALL
-    SELECT
-        CASE
-            WHEN CAST(SUBSTR(m, 6, 2) AS INTEGER) = 12
-            THEN CAST(CAST(SUBSTR(m, 1, 4) AS INTEGER) + 1 AS TEXT) || '-01'
-            ELSE SUBSTR(m, 1, 5) || PRINTF('%02d', CAST(SUBSTR(m, 6, 2) AS INTEGER) + 1)
-        END
-    FROM month_series, period_bounds
-    WHERE m < max_period
-),
-
--- ─── 7. SO + 마지막출고월 JOIN ───
-so_with_dn AS (
-    SELECT s.*, d.last_출고월
-    FROM so_combined s
-    LEFT JOIN dn_last_month d
-        ON s.SO_ID = d.SO_ID AND s.[Line item] = d.[Line item]
-),
-
--- ─── 8. SO × Period 확장 (등록월 ~ 출고월/현재월) ───
---   출고 완료: 마지막 출고월에서 끊음
---   미출고:    max_period까지 (Backlog)
-so_expanded AS (
+-- ─── 4. 이벤트 통합 (Input: SO 등록 + Output: DN 출고) ───
+events_line_item AS (
+    -- Input: SO 등록 이벤트
     SELECT
         s.SO_ID, s.[Customer name], s.[Customer PO], s.[Item name],
         s.[OS name], s.[Line item], s.[Item qty], s.[Sales amount KRW],
-        s.Period AS 등록Period, s.[AX Period], s.[AX Project number],
+        s.Period AS 등록Period, s.[AX Period], s.[Model code],
         s.Sector, s.[Business registration number], s.[Industry code],
         s.[Expected delivery date], s.구분,
-        ms.m AS Period
-    FROM so_with_dn s
-    JOIN month_series ms
-        ON ms.m >= s.Period
-       AND ms.m <= MAX(
-            COALESCE(s.last_출고월, (SELECT max_period FROM period_bounds)),
-            s.Period
-       )
-),
+        s.Period AS event_period,
+        s.[Item qty]          AS Value_Input_qty,
+        s.[Sales amount KRW]  AS Value_Input_amount,
+        0 AS Value_Output_qty,
+        0 AS Value_Output_amount
+    FROM so_combined s
 
--- ─── 9. Input 계산 (등록Period에만 수주 금액 기록) ───
-with_input AS (
-    SELECT *,
-        CASE WHEN Period = 등록Period THEN [Item qty]          ELSE 0 END AS Value_Input_qty,
-        CASE WHEN Period = 등록Period THEN [Sales amount KRW]  ELSE 0 END AS Value_Input_amount
-    FROM so_expanded
-),
+    UNION ALL
 
--- ─── 10. Output 조인 (DN 출고를 해당 월에 매칭) ───
-with_output AS (
+    -- Output: DN 출고 이벤트 (SO JOIN으로 메타데이터 확보)
     SELECT
-        wi.*,
-        COALESCE(dm.Output_qty, 0)    AS Value_Output_qty,
-        COALESCE(dm.Output_amount, 0) AS Value_Output_amount
-    FROM with_input wi
-    LEFT JOIN dn_by_month dm
-        ON wi.SO_ID = dm.SO_ID
-       AND wi.[Line item] = dm.[Line item]
-       AND wi.Period = dm.출고월
+        s.SO_ID, s.[Customer name], s.[Customer PO], s.[Item name],
+        s.[OS name], s.[Line item], s.[Item qty], s.[Sales amount KRW],
+        s.Period AS 등록Period, s.[AX Period], s.[Model code],
+        s.Sector, s.[Business registration number], s.[Industry code],
+        s.[Expected delivery date], s.구분,
+        dm.출고월 AS event_period,
+        0, 0,
+        dm.Output_qty,
+        dm.Output_amount
+    FROM dn_by_month dm
+    INNER JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
 ),
 
--- ─── 11. OS name 그룹화 (같은 제품+납기일 합산) ───
+-- ─── 5. OS name 그룹화 (같은 제품+납기일 합산) ───
 os_grouped AS (
     SELECT
-        SO_ID, [OS name], [Expected delivery date], Period,
+        SO_ID, [OS name], [Expected delivery date], event_period AS Period,
         MIN([Customer name])  AS [Customer name],
         MIN([Customer PO])    AS [Customer PO],
         MIN([Item name])      AS [Item name],
@@ -181,16 +134,16 @@ os_grouped AS (
         MIN([Business registration number]) AS [Business registration number],
         MIN([Industry code])  AS [Industry code],
         GROUP_CONCAT(DISTINCT [AX Period])         AS [AX Period],
-        GROUP_CONCAT(DISTINCT [AX Project number]) AS [AX Project number],
+        GROUP_CONCAT(DISTINCT [Model code]) AS [Model code],
         SUM(Value_Input_qty)     AS Value_Input_qty,
         SUM(Value_Input_amount)  AS Value_Input_amount,
         SUM(Value_Output_qty)    AS Value_Output_qty,
         SUM(Value_Output_amount) AS Value_Output_amount
-    FROM with_output
-    GROUP BY SO_ID, [OS name], [Expected delivery date], Period
+    FROM events_line_item
+    GROUP BY SO_ID, [OS name], [Expected delivery date], event_period
 )
 
--- ─── 12. 롤링 계산 (Window function: Start/Ending 전파) ───
+-- ─── 6. 롤링 계산 (Window function: Start/Ending 전파) ───
 SELECT
     Period,
     등록Period,
@@ -202,7 +155,7 @@ SELECT
     [OS name],
     [Expected delivery date],
     [AX Period],
-    [AX Project number],
+    [Model code],
     Sector,
     [Business registration number],
     [Industry code],

@@ -196,7 +196,7 @@ def create_snapshot_tables(conn: sqlite3.Connection) -> None:
             구분 TEXT,
             등록Period TEXT,
             [AX Period] TEXT,
-            [AX Project number] TEXT,
+            [Model code] TEXT,
             Sector TEXT,
             snapshot_at TEXT NOT NULL,
             PRIMARY KEY (snapshot_period, SO_ID, [OS name], [Expected delivery date])
