@@ -80,6 +80,7 @@ CELL_INCOTERMS = 'G18'
 
 # Shipping Mark 영역
 CELL_SHIPPING_MARK_NAME = 'A31'   # Customer Name (Shipping Mark 아래)
+CELL_SHIPPING_MARK_BILLTO3 = 'A32'  # Bill to 3 (Customer Name 아래, 기존 country)
 CELL_SHIPPING_MARK_PO = 'C33'     # Customer PO (PO No: 값)
 
 
@@ -172,7 +173,9 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
         ws.range(CELL_INCOTERMS).value = incoterms
 
     # Shipping Mark 영역
+    bill_to_3 = get_value(order_data, 'bill_to_3', '')
     ws.range(CELL_SHIPPING_MARK_NAME).value = customer_name
+    ws.range(CELL_SHIPPING_MARK_BILLTO3).value = bill_to_3
     ws.range(CELL_SHIPPING_MARK_PO).value = customer_po
 
     # L/C 정보

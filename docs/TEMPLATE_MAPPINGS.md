@@ -123,6 +123,7 @@
 | 셀 | 필드명 | 데이터 소스 |
 |----|--------|-------------|
 | A31 | Customer Name | Customer_해외.customer_name |
+| A32 | Bill to 3 | Customer_해외.Bill to 3 (기존 country → bill_to_3로 변경) |
 | C33 | PO No | DN_해외.Customer PO |
 
 ### 동적 필드 (Item List - Row 19~)
