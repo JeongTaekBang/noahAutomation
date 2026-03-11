@@ -38,8 +38,10 @@
 │                 │      │  create_ts.py (TS)  │      │  문서 출력       │
 │ NOAH_SO_PO_DN   │─────▶│  create_pi.py (PI)  │─────▶│  generated_po/  │
 │    .xlsx        │      │  create_fi.py (FI)  │      │  generated_ts/  │
-│                 │      │  create_oc.py (OC)  │      │  generated_pi/  │
-│                 │      └─────────┬───────────┘      │  generated_fi/  │
+│                 │      │  create_ci.py (CI)  │      │  generated_pi/  │
+│                 │      │  create_pl.py (PL)  │      │  generated_fi/  │
+│                 │      │  create_oc.py (OC)  │      │  generated_ci/  │
+│                 │      └─────────┬───────────┘      │  generated_pl/  │
 │  ┌───────────┐  │                │                   │  generated_oc/  │
 │  │ SO_국내   │  │                ▼                   └────────┬────────┘
 │  │ SO_해외   │  │      ┌─────────────────────┐               │
@@ -49,12 +51,14 @@
 │  │ DN_해외   │  │      └─────────┬───────────┘      │  (DB 형식)      │
 │  │ PMT_국내  │  │                │                   └─────────────────┘
 │  │Customer_해외│ │                ▼
-│  └───────────┘  │      ┌─────────────────────┐
-│                 │      │  generators          │
-└─────────────────┘      │  excel_generator.py  │
-                         │  ts_generator.py     │
+│  │ weight    │  │      ┌─────────────────────┐
+│  └───────────┘  │      │  generators          │
+│                 │      │  excel_generator.py  │
+└─────────────────┘      │  ts_generator.py     │
                          │  pi_generator.py     │
+                         │  ci_generator.py     │
                          │  fi_generator.py     │
+                         │  pl_generator.py     │
                          │  oc_generator.py     │
                          └─────────┬───────────┘
                                    │ 템플릿 사용
@@ -64,7 +68,9 @@
                          │  purchase_order.xlsx      │
                          │  ts_template_local        │
                          │  proforma_invoice         │
+                         │  commercial_invoice.xlsx  │
                          │  final_invoice.xlsx       │
+                         │  packing_list.xlsx        │
                          │  order_confirmation.xlsx  │
                          └──────────────────────────┘
 ```
@@ -80,6 +86,8 @@ noahAutomation/
 ├── 📄 create_ts.py          # CLI 진입점 (거래명세표 생성)
 ├── 📄 create_pi.py          # CLI 진입점 (Proforma Invoice)
 ├── 📄 create_fi.py          # CLI 진입점 (Final Invoice)
+├── 📄 create_ci.py          # CLI 진입점 (Commercial Invoice)
+├── 📄 create_pl.py          # CLI 진입점 (Packing List)
 ├── 📄 create_oc.py          # CLI 진입점 (Order Confirmation)
 │
 ├── 📁 po_generator/         # ⭐ 핵심 패키지
@@ -94,6 +102,8 @@ noahAutomation/
 │   ├── ts_generator.py      # 거래명세표 생성 (xlwings)
 │   ├── pi_generator.py      # Proforma Invoice 생성 (xlwings)
 │   ├── fi_generator.py      # Final Invoice 생성 (xlwings)
+│   ├── ci_generator.py      # Commercial Invoice 생성 (xlwings)
+│   ├── pl_generator.py      # Packing List 생성 (xlwings)
 │   ├── oc_generator.py      # Order Confirmation 생성 (xlwings)
 │   ├── template_engine.py   # 템플릿 처리 (레거시, 폴백용)
 │   └── 📁 services/         # 서비스 레이어
@@ -116,6 +126,8 @@ noahAutomation/
 ├── 📁 generated_ts/         # 생성된 거래명세표 출력 폴더
 ├── 📁 generated_pi/         # 생성된 Proforma Invoice 출력 폴더
 ├── 📁 generated_fi/         # 생성된 Final Invoice 출력 폴더
+├── 📁 generated_ci/         # 생성된 Commercial Invoice 출력 폴더
+├── 📁 generated_pl/         # 생성된 Packing List 출력 폴더
 ├── 📁 generated_oc/         # 생성된 Order Confirmation 출력 폴더
 ├── 📁 po_history/           # 발주 이력 (월별 폴더)
 │   └── 2026/
@@ -135,12 +147,12 @@ noahAutomation/
 └─────────────────────────────────────────────────────────────────────────┘
 
   ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-  │ create_po.py │ │ create_ts.py │ │ create_pi.py │ │ create_fi.py │ │ create_oc.py │
-  │  (PO CLI)    │ │  (TS CLI)    │ │  (PI CLI)    │ │  (FI CLI)    │ │  (OC CLI)    │
-  └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-         │                │                │                │                │
-         └────────────────┼────────────────┼────────────────┼────────────────┘
+  ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐ ┌────────────┐
+  │create_po.py│ │create_ts.py│ │create_pi.py│ │create_ci.py│ │create_fi.py│ │create_pl.py│ │create_oc.py│
+  │ (PO CLI)   │ │ (TS CLI)   │ │ (PI CLI)   │ │ (CI CLI)   │ │ (FI CLI)   │ │ (PL CLI)   │ │ (OC CLI)   │
+  └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘ └─────┬──────┘
+        │               │              │              │              │              │              │
+        └───────────────┼──────────────┼──────────────┼──────────────┼──────────────┼──────────────┘
                           ▼
               ┌───────────────────────┐
               │  services/            │
@@ -453,6 +465,12 @@ python create_pi.py SOO-2026-0001                  # SO_ID 기반
 # === Final Invoice (해외 대금 청구) ===
 python create_fi.py DNO-2026-0001                  # DN_ID 기반
 
+# === Commercial Invoice (해외 송장) ===
+python create_ci.py DNO-2026-0001                  # DN_ID 기반
+
+# === Packing List (해외 포장 명세) ===
+python create_pl.py DNO-2026-0001                  # DN_ID 기반 (Weight 시트에서 Net Weight 자동 조회)
+
 # === Order Confirmation (해외 주문 확인) ===
 python create_oc.py SOO-2026-0001                  # SO_ID 기반 (Dispatch date = EXW NOAH)
 ```
@@ -496,7 +514,9 @@ python create_oc.py SOO-2026-0001                  # SO_ID 기반 (Dispatch date
 ├──────────────────────────┼─────────────┼─────────────────────────────────┤
 │ 거래명세표 (TS)          │ xlwings     │ 로고/도장 이미지 필수            │
 │ Proforma Invoice (PI)    │             │ Excel COM으로 서식/이미지 보존  │
+│ Commercial Invoice (CI)  │             │                                 │
 │ Final Invoice (FI)       │             │                                 │
+│ Packing List (PL)        │             │                                 │
 │ Order Confirmation (OC)  │             │                                 │
 └──────────────────────────┴─────────────┴─────────────────────────────────┘
 ```
@@ -524,4 +544,8 @@ python create_oc.py SOO-2026-0001                  # SO_ID 기반 (Dispatch date
 | `create_ts_xlwings()` | ts_generator.py | 거래명세표 생성 (xlwings) |
 | `create_pi_xlwings()` | pi_generator.py | Proforma Invoice 생성 (xlwings) |
 | `create_fi_xlwings()` | fi_generator.py | Final Invoice 생성 (xlwings) |
+| `create_ci_xlwings()` | ci_generator.py | Commercial Invoice 생성 (xlwings) |
+| `create_pl_xlwings()` | pl_generator.py | Packing List 생성 (xlwings) |
 | `create_oc_xlwings()` | oc_generator.py | Order Confirmation 생성 (xlwings) |
+| `load_weight_data()` | utils.py | Weight 시트 데이터 로드 |
+| `build_weight_map()` | utils.py | ITEM→WEIGHT 매핑 dict 생성 |

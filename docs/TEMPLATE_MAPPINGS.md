@@ -144,17 +144,24 @@
 | H | Currency |
 | I | SUM(Amount) |
 
-### Model number 보강 로직
-- `DocumentService._enrich_with_model_number()` — SO_해외에서 SO_ID + Item name 매칭으로 Model number 조회
+### Model number / Model code 보강 로직
+- `DocumentService._enrich_with_model_number()` — SO_해외에서 **SO_ID + Line item 복합키**로 Model number 및 Model code (AX Project number) 조회
+- DN에 여러 SO_ID가 섞여 있어도 모든 아이템을 매칭
 - 품목명: `"{Model number} {Item name}"` (Model number 없으면 Item name만)
 - 아이템을 Model number 오름차순으로 정렬
+
+### Weight 보강 로직 (PL 전용)
+- `DocumentService._enrich_with_weight()` — Weight 시트의 ITEM→WEIGHT 매핑으로 Net Weight 자동 조회
+- Model code (AX Project number) 값을 키로 사용하여 Weight 시트의 ITEM 컬럼과 매칭
+- 매칭 결과를 `'Weight per unit'` 컬럼으로 items_df에 추가 → pl_generator가 F열에 자동 출력
+- Weight 시트가 없거나 매칭 실패 시 graceful fallback (빈 값)
 
 ---
 
 ## PL — Packing List (`templates/packing_list.xlsx`)
 
 **생성기**: `pl_generator.py` (xlwings)
-**데이터 소스**: DN_해외 + Customer_해외 + SO_해외 (Model number 보강)
+**데이터 소스**: DN_해외 + Customer_해외 + SO_해외 (Model number/Model code 보강) + Weight 시트
 
 > CI와 동일한 헤더 구조이나, 아이템 열이 다릅니다 (단가/금액 대신 Weight/CBM).
 
@@ -166,9 +173,9 @@ CI와 동일 (A9, A10, C10, E10, B13, B14, G4, G5, G15, I4, I5, I15).
 
 | 셀 | 필드명 | 데이터 소스 |
 |----|--------|-------------|
-| A31 | Customer Name | Customer_해외.customer_name |
-| A32 | Customer Country | Customer_해외.customer_country |
-| C33 | PO No | DN_해외.Customer PO |
+| A34 | Customer Name | Customer_해외.customer_name |
+| A35 | Bill to 3 | Customer_해외.Bill to 3 |
+| C36 | PO No | DN_해외.Customer PO |
 
 ### 동적 필드 (Item List - Row 19~)
 
@@ -176,7 +183,7 @@ CI와 동일 (A9, A10, C10, E10, B13, B14, G4, G5, G15, I4, I5, I15).
 |----|--------|------|
 | A | Item name | **Model number + Item name** (CI와 동일 보강 로직) |
 | E | Quantity | 수량 |
-| F | Net Weight | KG/PC (weight_per_unit) |
+| F | Net Weight | KG/PC — **Weight 시트 기반 자동 조회** (Model code → ITEM 매핑) |
 | H | Gross Weight | Kg (gross_weight) |
 | I | CBM | Measurement (cbm) |
 

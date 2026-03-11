@@ -28,7 +28,7 @@ from po_generator.config import (
     PL_TEMPLATE_FILE,
     OC_TEMPLATE_FILE,
 )
-from po_generator.utils import get_value
+from po_generator.utils import get_value, resolve_column, build_weight_map
 from po_generator.validators import validate_order_data, validate_multiple_items
 from po_generator.history import check_duplicate_order, save_to_history
 from po_generator.excel_generator import create_po_workbook
@@ -73,42 +73,88 @@ class DocumentService:
         return self._finder
 
     def _enrich_with_model_number(self, order_data: OrderData) -> pd.DataFrame:
-        """DN 아이템에 SO_해외의 Model number 컬럼 추가 (CI용)
+        """DN 아이템에 SO_해외의 Model number/Model code 컬럼 추가
 
-        SO_ID + Item name으로 매칭하여 Model number를 가져옵니다.
+        SO_ID + Line item 복합키로 매칭합니다.
+        DN에 여러 SO_ID가 섞여 있어도 모든 아이템을 매칭합니다.
         매칭 실패 시 원본 데이터를 그대로 반환합니다.
         """
         items_df = order_data.items_df if order_data.items_df is not None else pd.DataFrame([order_data.first_item])
 
-        so_id = get_value(order_data.first_item, 'so_id', '')
-        if not so_id:
+        # DN에 SO_ID가 없으면 스킵
+        so_id_col = resolve_column(items_df.columns, 'so_id')
+        if not so_id_col:
+            return items_df
+
+        # DN에 포함된 모든 SO_ID 수집
+        so_ids = items_df[so_id_col].dropna().unique().tolist()
+        if not so_ids:
             return items_df
 
         try:
             df_so = self._finder.load_so_export_data()
-            so_items = df_so[df_so['SO_ID'] == so_id]
+            so_items = df_so[df_so['SO_ID'].isin(so_ids)]
             if so_items.empty:
                 return items_df
 
-            # DN과 SO의 item_name 컬럼명 찾기
-            dn_item_col = None
-            for col in ('Item name', 'Item'):
-                if col in items_df.columns:
-                    dn_item_col = col
-                    break
+            # Line item 컬럼 확인
+            dn_line_col = 'Line item' if 'Line item' in items_df.columns else None
+            so_line_col = 'Line item' if 'Line item' in so_items.columns else None
 
-            so_item_col = 'Item name' if 'Item name' in so_items.columns else None
+            if not (dn_line_col and so_line_col):
+                logger.debug("Line item 컬럼 없음 — Model 보강 건너뜀")
+                return items_df
+
+            # SO_ID + Line item → Model number / Model code 매핑
             model_col = 'Model number' if 'Model number' in so_items.columns else None
+            model_code_col = resolve_column(so_items.columns, 'model_code')
 
-            if dn_item_col and so_item_col and model_col:
-                model_map = dict(zip(so_items[so_item_col], so_items[model_col]))
-                items_df = items_df.copy()
-                items_df['Model number'] = items_df[dn_item_col].map(model_map)
-                logger.debug(f"Model number 보강 완료: {sum(items_df['Model number'].notna())}건 매칭")
+            if not model_col and not model_code_col:
+                return items_df
+
+            # 복합키 생성 (SO_ID + Line item)
+            so_items = so_items.copy()
+            so_items['_join_key'] = so_items['SO_ID'].astype(str) + '_' + so_items[so_line_col].astype(str)
+
+            items_df = items_df.copy()
+            items_df['_join_key'] = items_df[so_id_col].astype(str) + '_' + items_df[dn_line_col].astype(str)
+
+            if model_col:
+                model_map = dict(zip(so_items['_join_key'], so_items[model_col]))
+                items_df['Model number'] = items_df['_join_key'].map(model_map)
+                logger.debug(f"Model number 보강 완료: {items_df['Model number'].notna().sum()}/{len(items_df)}건 매칭")
+
+            if model_code_col:
+                model_code_map = dict(zip(so_items['_join_key'], so_items[model_code_col]))
+                items_df['Model code'] = items_df['_join_key'].map(model_code_map)
+                logger.debug(f"Model code 보강 완료: {items_df['Model code'].notna().sum()}/{len(items_df)}건 매칭")
+
+            items_df.drop(columns='_join_key', inplace=True)
 
         except Exception as e:
             logger.warning(f"Model number 보강 실패: {e}")
 
+        return items_df
+
+    def _enrich_with_weight(self, items_df: pd.DataFrame) -> pd.DataFrame:
+        """Weight 시트 기반으로 Net Weight (Weight per unit) 보강
+
+        items_df의 'Model code' 값으로 Weight 시트의 ITEM→WEIGHT 매핑을 조회하여
+        'Weight per unit' 컬럼을 추가합니다.
+        """
+        model_code_col = resolve_column(items_df.columns, 'model_code')
+        if not model_code_col:
+            logger.debug("Model code 컬럼 없음 — Weight 보강 건너뜀")
+            return items_df
+
+        weight_map = build_weight_map()
+        if not weight_map:
+            return items_df
+
+        items_df = items_df.copy()
+        items_df['Weight per unit'] = items_df[model_code_col].map(weight_map)
+        matched = items_df['Weight per unit'].notna().sum()
+        logger.debug(f"Weight 보강 완료: {matched}/{len(items_df)}건 매칭")
         return items_df
 
     def generate_po(
@@ -526,8 +572,9 @@ class DocumentService:
         if order_data is None:
             return DocumentResult.not_found_result(dn_id)
 
-        # SO_해외에서 Model number 보강
+        # SO_해외에서 Model number/Model code 보강
         items_df = self._enrich_with_model_number(order_data)
+        items_df = self._enrich_with_weight(items_df)
 
         PL_OUTPUT_DIR.mkdir(exist_ok=True)
 

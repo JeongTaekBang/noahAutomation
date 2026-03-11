@@ -84,6 +84,7 @@ SO_EXPORT_SHEET: Final[str] = 'SO_해외'
 PO_EXPORT_SHEET: Final[str] = 'PO_해외'
 DN_EXPORT_SHEET: Final[str] = 'DN_해외'
 CUSTOMER_EXPORT_SHEET: Final[str] = 'Customer_해외'
+WEIGHT_SHEET: Final[str] = 'Weight'
 
 # 기존 설정 (하위 호환 - deprecated)
 DOMESTIC_SHEET_INDEX: Final[int] = 0  # 국내
@@ -275,6 +276,7 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'exw_noah': ('EXW NOAH', 'EXW Noah', 'exw_noah', 'EXW date'),
     'shipping_method': ('Shipping method', 'Shipping Method', 'shipping_method', '배송방법'),
     # Packing List 필드
+    'model_code': ('Model code', 'AX Project number', 'model_code'),
     'weight_per_unit': ('Weight per unit', 'Weight/Unit', 'KG/PC', 'weight_per_unit', '단위중량'),
     'gross_weight': ('Gross Weight', 'Weight', 'gross_weight', 'Total Weight', '총중량'),
     'cbm': ('CBM', 'cbm', 'Cubic Meter', '체적'),

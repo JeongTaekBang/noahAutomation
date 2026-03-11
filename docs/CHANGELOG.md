@@ -20,6 +20,44 @@
 
 ---
 
+## 2026-03-11: PL 생성기 기능 개선
+
+### 배경
+Packing List 생성 시 Shipping Mark 영역의 셀 위치가 실제 템플릿과 불일치하던 문제 수정, SO_해외 `AX Project number` → `Model code` 컬럼명 변경 대응, Weight 시트 기반 Net Weight 자동 조회 기능 추가.
+
+### 변경 내용
+
+#### 1. Shipping Mark 영역 수정 (`pl_generator.py`)
+- 셀 위치 수정: `A31→A34`, `C33→C36`
+- **A35에 bill_to_3 표시** (기존 A32의 customer_country 대체)
+- `CELL_SHIPPING_MARK_COUNTRY` 제거 → `CELL_SHIPPING_MARK_BILLTO3` 신규
+
+#### 2. Model code 별칭 추가 + 매핑 로직 개선 (`config.py`, `utils.py`, `document_service.py`)
+- `COLUMN_ALIASES`에 `model_code: ('Model code', 'AX Project number', 'model_code')` 추가
+- `load_so_export_data()` / `load_so_export_with_customer()` dtype에 `'Model code': str` 추가
+- `_enrich_with_model_number()` 전면 개선:
+  - 기존: 단일 SO_ID + Item name 매칭 (첫 SO만 매칭, 다중 SO 누락)
+  - 변경: **SO_ID + Line item 복합키** 매칭 (DN에 여러 SO_ID가 섞여 있어도 전체 매칭)
+  - Model code도 함께 매핑
+
+#### 3. Weight 시트 기반 Net Weight 자동 조회 (`config.py`, `utils.py`, `document_service.py`)
+- `WEIGHT_SHEET = 'Weight'` 상수 추가
+- `load_weight_data()`, `build_weight_map()` 함수 추가 (ITEM→WEIGHT dict)
+- `_enrich_with_weight()` 메서드 추가 — Model code로 Weight 시트 조회 → `Weight per unit` 컬럼 자동 추가
+- `generate_pl()`에서 `_enrich_with_weight()` 호출
+- Weight 시트 없거나 매칭 실패 시 graceful fallback
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `config.py` | `model_code` 별칭, `WEIGHT_SHEET` 상수 추가 |
+| `utils.py` | SO 해외 dtype에 `Model code` 추가, `load_weight_data()`, `build_weight_map()` 추가 |
+| `services/document_service.py` | `_enrich_with_model_number()` SO_ID+Line item 복합키 매칭으로 개선 + Model code 매핑, `_enrich_with_weight()` 신규, `generate_pl()` 수정 |
+| `pl_generator.py` | Shipping Mark 상수 수정 (A34/A35/C36), bill_to_3 사용 |
+| `docs/TEMPLATE_MAPPINGS.md` | PL Shipping Mark, Net Weight 데이터 소스 업데이트 |
+
+---
+
 ## 2026-03-09: Order Book 스냅샷 기반 Variance 추적
 
 ### 배경

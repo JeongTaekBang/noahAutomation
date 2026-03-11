@@ -23,6 +23,7 @@ from po_generator.config import (
     PO_EXPORT_SHEET,
     DN_EXPORT_SHEET,
     CUSTOMER_EXPORT_SHEET,
+    WEIGHT_SHEET,
     COLUMN_ALIASES,
     META_COLUMNS,
     SPEC_START_COLUMN,
@@ -549,7 +550,7 @@ def load_so_export_data() -> pd.DataFrame:
         df_so = pd.read_excel(
             xl,
             sheet_name=SO_EXPORT_SHEET,
-            dtype={'Model': str, 'Model number': str}
+            dtype={'Model': str, 'Model number': str, 'Model code': str}
         )
 
     df_so = df_so[df_so['SO_ID'].notna()].copy()
@@ -599,7 +600,7 @@ def load_so_export_with_customer() -> pd.DataFrame:
         df_so = pd.read_excel(
             xl,
             sheet_name=SO_EXPORT_SHEET,
-            dtype={'Model': str, 'Model number': str}
+            dtype={'Model': str, 'Model number': str, 'Model code': str}
         )
         df_cust = pd.read_excel(xl, sheet_name=CUSTOMER_EXPORT_SHEET)
 
@@ -805,3 +806,64 @@ def get_spec_option_fields(
     except Exception as e:
         logger.warning(f"동적 필드 추출 실패: {e}, 기본 필드 사용")
         return list(SPEC_FIELDS), list(OPTION_FIELDS)
+
+
+# === Weight 데이터 로드 ===
+
+def load_weight_data() -> pd.DataFrame:
+    """Weight 시트 데이터 로드
+
+    Returns:
+        Weight DataFrame (ITEM, WEIGHT 컬럼 포함)
+
+    Raises:
+        FileNotFoundError: 소스 파일이 없는 경우
+        ValueError: Weight 시트가 없는 경우
+    """
+    if not NOAH_SO_PO_DN_FILE.exists():
+        raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
+
+    logger.info(f"Weight 데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        if WEIGHT_SHEET not in xl.sheet_names:
+            raise ValueError(f"'{WEIGHT_SHEET}' 시트를 찾을 수 없습니다.")
+        df = pd.read_excel(xl, sheet_name=WEIGHT_SHEET)
+
+    logger.info(f"Weight 데이터 {len(df)}건 로드 완료")
+    return df
+
+
+def build_weight_map() -> dict[str, float]:
+    """ITEM → WEIGHT 매핑 딕셔너리 (Weight 시트 기반)
+
+    Weight 시트의 ITEM 컬럼을 key, WEIGHT 컬럼을 value로 dict 생성.
+    시트가 없거나 로드 실패 시 빈 dict 반환 (graceful fallback).
+
+    Returns:
+        {item_code: weight_value} 딕셔너리
+    """
+    try:
+        df = load_weight_data()
+    except (FileNotFoundError, ValueError) as e:
+        logger.warning(f"Weight 데이터 로드 실패 (빈 매핑 반환): {e}")
+        return {}
+
+    # ITEM, WEIGHT 컬럼 찾기 (대소문자 무관)
+    item_col = None
+    weight_col = None
+    for col in df.columns:
+        col_lower = col.strip().lower()
+        if col_lower == 'item':
+            item_col = col
+        elif col_lower == 'weight':
+            weight_col = col
+
+    if item_col is None or weight_col is None:
+        logger.warning(f"Weight 시트에 ITEM/WEIGHT 컬럼 없음: {list(df.columns)}")
+        return {}
+
+    # NaN 제거 후 dict 생성
+    valid = df[[item_col, weight_col]].dropna(subset=[item_col, weight_col])
+    weight_map = dict(zip(valid[item_col].astype(str), valid[weight_col].astype(float)))
+    logger.info(f"Weight 매핑 {len(weight_map)}건 생성 완료")
+    return weight_map

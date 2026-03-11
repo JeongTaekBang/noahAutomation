@@ -76,9 +76,9 @@ COL_GROSS_WEIGHT = 'H'  # Gross Weight (Kg)
 COL_CBM = 'I'           # Measurement (CBM)
 
 # Shipping Mark 영역 (템플릿 기준 고정 위치, 행 삽입/삭제 시 자동 이동)
-CELL_SHIPPING_MARK_NAME = 'A31'
-CELL_SHIPPING_MARK_COUNTRY = 'A32'
-CELL_SHIPPING_MARK_PO = 'C33'
+CELL_SHIPPING_MARK_NAME = 'A34'
+CELL_SHIPPING_MARK_BILLTO3 = 'A35'
+CELL_SHIPPING_MARK_PO = 'C36'
 
 
 def create_pl_xlwings(
@@ -164,8 +164,9 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
             ws.range(CELL_PO_DATE).value = str(po_date)
 
     # Shipping Mark 영역
+    bill_to_3 = get_value(order_data, 'bill_to_3', '')
     ws.range(CELL_SHIPPING_MARK_NAME).value = customer_name
-    ws.range(CELL_SHIPPING_MARK_COUNTRY).value = customer_country
+    ws.range(CELL_SHIPPING_MARK_BILLTO3).value = bill_to_3
     ws.range(CELL_SHIPPING_MARK_PO).value = customer_po
 
     # L/C 정보
