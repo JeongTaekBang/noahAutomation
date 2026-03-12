@@ -169,15 +169,27 @@
 
 ### 고정 필드 (Header)
 
-CI와 동일 (A9, A10, C10, E10, B13, B14, G4, G5, G15, I4, I5, I15).
+| 셀 | 필드명 | 설명 | 데이터 소스 |
+|----|--------|------|-------------|
+| G4 | Invoice No | DN_ID | DN_해외.DN_ID |
+| G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
+| I4 | Invoice date | 선적일 | DN_해외.dispatch_date |
+| G15 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
+| I15 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
+| A9 | Consigned to | Delivery Address | DN_해외.Delivery Address |
+| A10 | Consigned country | 수취인 국가 | Customer_해외 |
+| C10 | Consigned TEL | 수취인 전화번호 | Customer_해외 |
+| E10 | Consigned FAX | 수취인 팩스번호 | Customer_해외 |
+| B13 | From | 출발지 | 고정값 "INCHEON, KOREA" |
+| B14 | Destination country | 도착 국가 | Customer_해외 |
 
 ### Shipping Mark 영역
 
 | 셀 | 필드명 | 데이터 소스 |
 |----|--------|-------------|
-| A34 | Customer Name | Customer_해외.customer_name |
-| A35 | Bill to 3 | Customer_해외.Bill to 3 |
-| C36 | PO No | DN_해외.Customer PO |
+| A33 | Customer Name | Customer_해외.customer_name |
+| A34 | Bill to 3 | Customer_해외.Bill to 3 |
+| C35 | PO No | DN_해외.Customer PO |
 
 ### 동적 필드 (Item List - Row 19~)
 

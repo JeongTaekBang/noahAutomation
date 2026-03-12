@@ -20,6 +20,26 @@
 
 ---
 
+## 2026-03-12: PL 템플릿 G5에 Incoterms 배치
+
+### 배경
+PL 템플릿이 수정되어 F5에 `Incoterms:` 라벨이 추가됨. 기존 G5(L/C No), I5(L/C Date) 로직을 제거하고 G5에 Incoterms 값을 기록하도록 변경.
+
+### 변경 내용
+
+#### 1. 셀 상수 변경 (`pl_generator.py`)
+- `CELL_LC_NO = 'G5'` → `CELL_INCOTERMS = 'G5'`
+- `CELL_LC_DATE = 'I5'` 삭제
+
+#### 2. `_fill_header()` 로직 변경
+- L/C No/Date 기록 로직 제거
+- G5에 Incoterms 기록 (SO_해외 JOIN 데이터)
+
+#### 3. Shipping Mark 셀 위치 수정
+- `A34→A33`, `A35→A34`, `C36→C35` (템플릿 Row 32 기준, 한 행 밀림 버그 수정)
+
+---
+
 ## 2026-03-12: CI 템플릿 셀 위치 변경 (Incoterms/Payment Terms)
 
 ### 배경

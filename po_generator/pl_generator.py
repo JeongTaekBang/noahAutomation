@@ -58,9 +58,8 @@ CELL_FROM = 'B13'
 CELL_DESTINATION = 'B14'
 CELL_DEPARTS = 'D15'
 CELL_INVOICE_NO = 'G4'
-CELL_LC_NO = 'G5'
+CELL_INCOTERMS = 'G5'
 CELL_INVOICE_DATE = 'I4'
-CELL_LC_DATE = 'I5'
 CELL_HS_CODE = 'I11'
 CELL_PO_NO = 'G15'
 CELL_PO_DATE = 'I15'
@@ -76,9 +75,9 @@ COL_GROSS_WEIGHT = 'H'  # Gross Weight (Kg)
 COL_CBM = 'I'           # Measurement (CBM)
 
 # Shipping Mark 영역 (템플릿 기준 고정 위치, 행 삽입/삭제 시 자동 이동)
-CELL_SHIPPING_MARK_NAME = 'A34'
-CELL_SHIPPING_MARK_BILLTO3 = 'A35'
-CELL_SHIPPING_MARK_PO = 'C36'
+CELL_SHIPPING_MARK_NAME = 'A33'
+CELL_SHIPPING_MARK_BILLTO3 = 'A34'
+CELL_SHIPPING_MARK_PO = 'C35'
 
 
 def create_pl_xlwings(
@@ -169,16 +168,10 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
     ws.range(CELL_SHIPPING_MARK_BILLTO3).value = bill_to_3
     ws.range(CELL_SHIPPING_MARK_PO).value = customer_po
 
-    # L/C 정보
-    lc_no = get_value(order_data, 'lc_no', '')
-    lc_date = get_value(order_data, 'lc_date', '')
-    if lc_no:
-        ws.range(CELL_LC_NO).value = lc_no
-    if lc_date and pd.notna(lc_date):
-        if isinstance(lc_date, datetime):
-            ws.range(CELL_LC_DATE).value = lc_date.strftime("%Y-%m-%d")
-        else:
-            ws.range(CELL_LC_DATE).value = str(lc_date)
+    # Incoterms (G5)
+    incoterms = get_value(order_data, 'incoterms', '')
+    if incoterms:
+        ws.range(CELL_INCOTERMS).value = incoterms
 
 
 def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
