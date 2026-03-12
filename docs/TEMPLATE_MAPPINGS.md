@@ -92,7 +92,7 @@
 | 데이터 소스 | SO_해외 | DN_해외 |
 | Invoice No (G4) | SO_ID | DN_ID |
 | Invoice Date (I4) | 오늘 날짜 | dispatch_date (없으면 today) |
-| ITEM_START_ROW | 18 | **19** (Row 18 = 카테고리 라벨 유지) |
+| ITEM_START_ROW | 18 | **20** (Row 19 = Electric Actuator 카테고리 라벨) |
 | G5 | L/C No | **Incoterms** |
 | I5 | L/C Date | **Payment Terms** |
 | H열 (아이템 행) | — | 각 행에 currency 표시 |
@@ -105,28 +105,28 @@
 
 | 셀 | 필드명 | 설명 | 데이터 소스 |
 |----|--------|------|-------------|
-| A9 | Consigned to | Delivery Address (없으면 Customer Name) | DN_해외.Delivery Address |
-| A10 | Consigned country | 수취인 국가 | Customer_해외 |
-| C10 | Consigned TEL | 수취인 전화번호 | Customer_해외 |
-| E10 | Consigned FAX | 수취인 팩스번호 | Customer_해외 |
-| B13 | From | 출발지 | 고정값 "INCHEON, KOREA" |
-| B14 | Destination country | 도착 국가 | Customer_해외 |
+| A9 | Bill to 1 | 청구처 주소 1행 | Customer_해외.Bill to 1 |
+| A10 | Bill to 2 | 청구처 주소 2행 | Customer_해외.Bill to 2 |
+| A11 | Bill to 3 | 청구처 주소 3행 | Customer_해외.Bill to 3 |
+| B14 | From | 출발지 | 고정값 "INCHEON, KOREA" |
+| B15 | Destination | 도착 국가 | bill_to_3 (국가명) |
 | G4 | Invoice No | DN_ID | DN_해외.DN_ID |
 | G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
-| G15 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
+| G16 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
 | I4 | Invoice date | 선적일 | DN_해외.dispatch_date |
 | I5 | Payment Terms | 결제 조건 | Customer_해외.Payment terms |
-| I15 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
+| I12 | HS CODE | 관세 코드 | — |
+| I16 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
 
 ### Shipping Mark 영역
 
 | 셀 | 필드명 | 데이터 소스 |
 |----|--------|-------------|
-| A31 | Customer Name | Customer_해외.customer_name |
-| A32 | Bill to 3 | Customer_해외.Bill to 3 (기존 country → bill_to_3로 변경) |
-| C33 | PO No | DN_해외.Customer PO |
+| A32 | Customer Name | Customer_해외.customer_name |
+| A33 | Bill to 3 | Customer_해외.Bill to 3 |
+| C34 | PO No | DN_해외.Customer PO |
 
-### 동적 필드 (Item List - Row 19~)
+### 동적 필드 (Item List - Row 20~)
 
 | 열 | 필드명 | 설명 |
 |----|--------|------|
@@ -171,27 +171,27 @@
 
 | 셀 | 필드명 | 설명 | 데이터 소스 |
 |----|--------|------|-------------|
+| A9 | Bill to 1 | 청구처 주소 1행 | Customer_해외.Bill to 1 |
+| A10 | Bill to 2 | 청구처 주소 2행 | Customer_해외.Bill to 2 |
+| A11 | Bill to 3 | 청구처 주소 3행 | Customer_해외.Bill to 3 |
 | G4 | Invoice No | DN_ID | DN_해외.DN_ID |
 | G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
 | I4 | Invoice date | 선적일 | DN_해외.dispatch_date |
-| G15 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
-| I15 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
-| A9 | Consigned to | Delivery Address | DN_해외.Delivery Address |
-| A10 | Consigned country | 수취인 국가 | Customer_해외 |
-| C10 | Consigned TEL | 수취인 전화번호 | Customer_해외 |
-| E10 | Consigned FAX | 수취인 팩스번호 | Customer_해외 |
-| B13 | From | 출발지 | 고정값 "INCHEON, KOREA" |
-| B14 | Destination country | 도착 국가 | Customer_해외 |
+| I12 | HS CODE | 관세 코드 | — |
+| G16 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
+| I16 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
+| B14 | From | 출발지 | 고정값 "INCHEON, KOREA" |
+| B15 | Destination | 도착 국가 | bill_to_3 (국가명) |
 
 ### Shipping Mark 영역
 
 | 셀 | 필드명 | 데이터 소스 |
 |----|--------|-------------|
-| A33 | Customer Name | Customer_해외.customer_name |
-| A34 | Bill to 3 | Customer_해외.Bill to 3 |
-| C35 | PO No | DN_해외.Customer PO |
+| A34 | Customer Name | Customer_해외.customer_name |
+| A35 | Bill to 3 | Customer_해외.Bill to 3 |
+| C36 | PO No | DN_해외.Customer PO |
 
-### 동적 필드 (Item List - Row 19~)
+### 동적 필드 (Item List - Row 20~)
 
 | 열 | 필드명 | 설명 |
 |----|--------|------|

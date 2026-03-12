@@ -20,6 +20,37 @@
 
 ---
 
+## 2026-03-12: CI/PL 템플릿 셀 위치 전면 업데이트 (Bill to 3줄 확장)
+
+### 배경
+CI/PL 템플릿의 Consigned to 영역이 1줄(주소+국가+Tel+Fax) → 3줄(Bill to 1/2/3)로 확장되면서 Row 13 이하가 1행씩 밀림. 코드의 셀 상수들을 현재 템플릿에 맞게 전면 업데이트.
+
+### 변경 내용
+
+#### 1. 셀 상수 변경 (`ci_generator.py`, `pl_generator.py`)
+- `CELL_CONSIGNED_TO/COUNTRY/TEL/FAX` 삭제 → `CELL_BILL_TO_1(A9)`, `CELL_BILL_TO_2(A10)`, `CELL_BILL_TO_3(A11)` 신규
+- `CELL_FROM`: B13→B14, `CELL_DESTINATION`: B14→B15, `CELL_DEPARTS`: D15→D16
+- `CELL_HS_CODE`: I11→I12, `CELL_PO_NO`: G15→G16, `CELL_PO_DATE`: I15→I16
+- `ITEM_START_ROW`: 19→20 (Row 19 = Electric Actuator 카테고리 라벨)
+
+#### 2. Shipping Mark 셀 변경
+- **CI**: A31→A32, A32→A33, C33→C34
+- **PL**: A33→A34, A34→A35, C35→C36
+
+#### 3. `_fill_header()` 로직 변경
+- 기존 `customer_name/address/country/tel/fax` + `delivery_address` 로직 제거
+- `bill_to_1/2/3` 3줄 기록으로 교체
+- Destination(To:)에 `bill_to_3` 사용 (국가명)
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `ci_generator.py` | 셀 상수 전면 변경, `_fill_header()` Bill to 로직 교체 |
+| `pl_generator.py` | 셀 상수 전면 변경, `_fill_header()` Bill to 로직 교체 |
+| `docs/TEMPLATE_MAPPINGS.md` | CI/PL 셀 매핑 업데이트 |
+
+---
+
 ## 2026-03-12: PL 템플릿 G5에 Incoterms 배치
 
 ### 배경

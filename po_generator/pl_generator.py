@@ -48,24 +48,23 @@ def _to_text(value) -> str:
 
 
 # === 셀 매핑 (Packing List - CI와 헤더 동일) ===
-# Header
-CELL_CONSIGNED_TO = 'A9'
-CELL_CONSIGNED_COUNTRY = 'A10'
-CELL_CONSIGNED_TEL = 'C10'
-CELL_CONSIGNED_FAX = 'E10'
+# Header — Bill to 3줄 확장으로 Row 13 이하 1행씩 밀림
+CELL_BILL_TO_1 = 'A9'
+CELL_BILL_TO_2 = 'A10'
+CELL_BILL_TO_3 = 'A11'
 CELL_VESSEL = 'A12'
-CELL_FROM = 'B13'
-CELL_DESTINATION = 'B14'
-CELL_DEPARTS = 'D15'
+CELL_FROM = 'B14'
+CELL_DESTINATION = 'B15'
+CELL_DEPARTS = 'D16'
 CELL_INVOICE_NO = 'G4'
 CELL_INCOTERMS = 'G5'
 CELL_INVOICE_DATE = 'I4'
-CELL_HS_CODE = 'I11'
-CELL_PO_NO = 'G15'
-CELL_PO_DATE = 'I15'
+CELL_HS_CODE = 'I12'
+CELL_PO_NO = 'G16'
+CELL_PO_DATE = 'I16'
 
-# 아이템 시작 행 (Row 18 = 카테고리 라벨 유지)
-ITEM_START_ROW = 19
+# 아이템 시작 행 (Row 19 = Electric Actuator 카테고리 라벨)
+ITEM_START_ROW = 20
 
 # 아이템 열 (PL 고유: 단가/금액 대신 Weight/CBM)
 COL_ITEM_NAME = 'A'
@@ -75,9 +74,9 @@ COL_GROSS_WEIGHT = 'H'  # Gross Weight (Kg)
 COL_CBM = 'I'           # Measurement (CBM)
 
 # Shipping Mark 영역 (템플릿 기준 고정 위치, 행 삽입/삭제 시 자동 이동)
-CELL_SHIPPING_MARK_NAME = 'A33'
-CELL_SHIPPING_MARK_BILLTO3 = 'A34'
-CELL_SHIPPING_MARK_PO = 'C35'
+CELL_SHIPPING_MARK_NAME = 'A34'
+CELL_SHIPPING_MARK_BILLTO3 = 'A35'
+CELL_SHIPPING_MARK_PO = 'C36'
 
 
 def create_pl_xlwings(
@@ -136,21 +135,17 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
     else:
         ws.range(CELL_INVOICE_DATE).value = datetime.now().strftime("%Y-%m-%d")
 
-    # Consigned to (Delivery Address)
-    customer_name = get_value(order_data, 'customer_name', '')
-    customer_country = get_value(order_data, 'customer_country', '')
-    customer_tel = get_value(order_data, 'customer_tel', '')
-    customer_fax = get_value(order_data, 'customer_fax', '')
-
-    delivery_address = get_value(order_data, 'delivery_address', '')
-    ws.range(CELL_CONSIGNED_TO).value = delivery_address if delivery_address else customer_name
-    ws.range(CELL_CONSIGNED_COUNTRY).value = customer_country
-    ws.range(CELL_CONSIGNED_TEL).value = customer_tel
-    ws.range(CELL_CONSIGNED_FAX).value = customer_fax
+    # Bill to 정보 (3줄)
+    bill_to_1 = get_value(order_data, 'bill_to_1', '')
+    bill_to_2 = get_value(order_data, 'bill_to_2', '')
+    bill_to_3 = get_value(order_data, 'bill_to_3', '')
+    ws.range(CELL_BILL_TO_1).value = bill_to_1
+    ws.range(CELL_BILL_TO_2).value = bill_to_2
+    ws.range(CELL_BILL_TO_3).value = bill_to_3
 
     # 운송 정보
     ws.range(CELL_FROM).value = "INCHEON, KOREA"
-    ws.range(CELL_DESTINATION).value = customer_country
+    ws.range(CELL_DESTINATION).value = bill_to_3
 
     # Customer PO
     customer_po = get_value(order_data, 'customer_po', '')
@@ -163,7 +158,7 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
             ws.range(CELL_PO_DATE).value = str(po_date)
 
     # Shipping Mark 영역
-    bill_to_3 = get_value(order_data, 'bill_to_3', '')
+    customer_name = get_value(order_data, 'customer_name', '')
     ws.range(CELL_SHIPPING_MARK_NAME).value = customer_name
     ws.range(CELL_SHIPPING_MARK_BILLTO3).value = bill_to_3
     ws.range(CELL_SHIPPING_MARK_PO).value = customer_po
