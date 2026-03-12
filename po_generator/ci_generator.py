@@ -57,9 +57,9 @@ CELL_FROM = 'B13'
 CELL_DESTINATION = 'B14'
 CELL_DEPARTS = 'D15'
 CELL_INVOICE_NO = 'G4'
-CELL_LC_NO = 'G5'
+CELL_INCOTERMS = 'G5'
 CELL_INVOICE_DATE = 'I4'
-CELL_LC_DATE = 'I5'
+CELL_PAYMENT_TERMS = 'I5'
 CELL_HS_CODE = 'I11'
 CELL_PO_NO = 'G15'
 CELL_PO_DATE = 'I15'
@@ -75,8 +75,6 @@ COL_UNIT_PRICE = 'G'
 COL_CURRENCY = 'H'
 COL_AMOUNT = 'I'
 
-# CI 고유: Incoterms 셀 위치
-CELL_INCOTERMS = 'G18'
 
 # Shipping Mark 영역
 CELL_SHIPPING_MARK_NAME = 'A31'   # Customer Name (Shipping Mark 아래)
@@ -167,7 +165,13 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
         else:
             ws.range(CELL_PO_DATE).value = str(po_date)
 
-    # Incoterms (G18 for CI)
+    # Shipping Mark 영역
+    bill_to_3 = get_value(order_data, 'bill_to_3', '')
+    ws.range(CELL_SHIPPING_MARK_NAME).value = customer_name
+    ws.range(CELL_SHIPPING_MARK_BILLTO3).value = bill_to_3
+    ws.range(CELL_SHIPPING_MARK_PO).value = customer_po
+
+    # Incoterms (G5) - DN_해외 → SO_해외 JOIN
     incoterms = get_value(order_data, 'incoterms', '')
     if incoterms:
         ws.range(CELL_INCOTERMS).value = incoterms
@@ -178,16 +182,10 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
     ws.range(CELL_SHIPPING_MARK_BILLTO3).value = bill_to_3
     ws.range(CELL_SHIPPING_MARK_PO).value = customer_po
 
-    # L/C 정보
-    lc_no = get_value(order_data, 'lc_no', '')
-    lc_date = get_value(order_data, 'lc_date', '')
-    if lc_no:
-        ws.range(CELL_LC_NO).value = lc_no
-    if lc_date and pd.notna(lc_date):
-        if isinstance(lc_date, datetime):
-            ws.range(CELL_LC_DATE).value = lc_date.strftime("%Y-%m-%d")
-        else:
-            ws.range(CELL_LC_DATE).value = str(lc_date)
+    # Payment terms (I5) - Customer_해외
+    payment_terms = get_value(order_data, 'payment_terms', '')
+    if payment_terms:
+        ws.range(CELL_PAYMENT_TERMS).value = payment_terms
 
 
 def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:

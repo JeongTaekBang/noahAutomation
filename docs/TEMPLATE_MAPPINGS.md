@@ -93,7 +93,8 @@
 | Invoice No (G4) | SO_ID | DN_ID |
 | Invoice Date (I4) | 오늘 날짜 | dispatch_date (없으면 today) |
 | ITEM_START_ROW | 18 | **19** (Row 18 = 카테고리 라벨 유지) |
-| Incoterms 셀 | G17 | **G18** |
+| G5 | L/C No | **Incoterms** |
+| I5 | L/C Date | **Payment Terms** |
 | H열 (아이템 행) | — | 각 행에 currency 표시 |
 | A열 품목명 | Item name | **Model number + Item name** |
 | 아이템 정렬 | — | Model number 오름차순 |
@@ -111,11 +112,10 @@
 | B13 | From | 출발지 | 고정값 "INCHEON, KOREA" |
 | B14 | Destination country | 도착 국가 | Customer_해외 |
 | G4 | Invoice No | DN_ID | DN_해외.DN_ID |
-| G5 | L/C No | 신용장 번호 | DN_해외 |
-| **G18** | **Incoterms** | 인코텀즈 | DN_해외.Incoterms |
+| G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
 | G15 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
 | I4 | Invoice date | 선적일 | DN_해외.dispatch_date |
-| I5 | L/C date | 신용장 발행일 | DN_해외 |
+| I5 | Payment Terms | 결제 조건 | Customer_해외.Payment terms |
 | I15 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
 
 ### Shipping Mark 영역

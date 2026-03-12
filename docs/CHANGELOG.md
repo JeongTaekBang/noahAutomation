@@ -20,6 +20,25 @@
 
 ---
 
+## 2026-03-12: CI 템플릿 셀 위치 변경 (Incoterms/Payment Terms)
+
+### 배경
+CI 템플릿이 수정되어, 기존 G5(L/C No), I5(L/C Date) 자리에 Incoterms와 Payment Terms를 배치하고, 기존 G18의 Incoterms 로직을 제거.
+
+### 변경 내용
+
+#### 1. 셀 상수 변경 (`ci_generator.py`)
+- `CELL_LC_NO = 'G5'` → `CELL_INCOTERMS = 'G5'`
+- `CELL_LC_DATE = 'I5'` → `CELL_PAYMENT_TERMS = 'I5'`
+- `CELL_INCOTERMS = 'G18'` 삭제 (G18 Incoterms 로직 제거)
+
+#### 2. `_fill_header()` 로직 변경
+- L/C No/Date 기록 로직 제거
+- G5에 Incoterms 기록 (SO_해외 JOIN)
+- I5에 Payment Terms 기록 (Customer_해외 JOIN)
+
+---
+
 ## 2026-03-11: PL 생성기 기능 개선
 
 ### 배경
