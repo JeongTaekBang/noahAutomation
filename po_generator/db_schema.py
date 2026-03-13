@@ -66,13 +66,13 @@ SYNC_SHEETS: list[SheetConfig] = [
     SheetConfig(
         sheet_name=DN_DOMESTIC_SHEET,
         table_name='dn_domestic',
-        pk_columns=('DN_ID', 'Line item'),
+        pk_columns=('DN_ID', 'SO_ID', 'Line item'),
         required_column='DN_ID',
     ),
     SheetConfig(
         sheet_name=DN_EXPORT_SHEET,
         table_name='dn_export',
-        pk_columns=('DN_ID', 'Line item'),
+        pk_columns=('DN_ID', 'SO_ID', 'Line item'),
         required_column='DN_ID',
     ),
     SheetConfig(

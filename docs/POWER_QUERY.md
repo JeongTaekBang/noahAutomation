@@ -77,7 +77,7 @@ NOAH 엑셀 원가 계산:
 
 | 쿼리 | 용도 |
 |------|------|
-| DN_원가포함 | 출고 내역 + 원가 + GL대상 여부 |
+| DN_원가포함 | 출고 내역 + 원가 |
 | SO_통합 | 주문 현황 + 원가 + 마진 + 출고 상태 |
 | PO_현황 | 발주 현황 + Status별 집계 + 매입금액 |
 | **PO_매입월별** | **월별 매입 집계 (IC Balance Confirmation용)** |
@@ -291,8 +291,6 @@ Dr. Inventory           xxx    ← 원가 (Total ICO)
 | Item 등록 후 | 고객 보유 | AR/Sales, COGS 정리 |
 
 - Timing difference이지만 IC Balance Confirmation을 위해 필요
-- DN_원가포함 쿼리의 **GL대상 = Y** 필터 → **원가_합계** 합계 = GL 분개 금액
-
 ---
 
 ## Inventory_Transaction
@@ -445,7 +443,7 @@ in
 ### 목적
 - DN_국내 + DN_해외 통합
 - PO에서 원가 조인 (SO_ID + Item 기준)
-- SO에서 AX Project number 조인 → GL대상 여부 판단
+- SO에서 Model code 조인
 
 ### 결과 컬럼
 | 컬럼 | 설명 |
@@ -465,16 +463,10 @@ in
 | Customer PO | 고객 발주번호 (SO에서) |
 | OS name | OneStream Item name (SO에서) |
 | Business registration number | 사업자등록번호 (SO에서) |
-| AX Project number | ERP 프로젝트 번호 (SO에서) |
+| Model code | ERP 프로젝트 번호 (SO에서) |
 | AX PO | AX 발주번호 (PO에서) |
 | Currency | 통화 (SO에서) |
-| GL대상 | Y = AX 미등록 → 수기 분개 필요 |
-
 ### 용도
-- **GL대상 = Y 필터** → 원가_합계 합계 = GL 분개 금액
-- AX2009에 Item 미등록 시 임시 회계 처리:
-  - `Dr. Inventory / Cr. AP-NOAH (IC)`
-  - Item 등록 후 역분개
 - **IC Balance Confirmation** → 원가_합계 합계 = RCK AP-NOAH (IC)
   ```
   NOAH AR Statement  vs  DN_원가포함 (원가_합계 SUM)
@@ -516,8 +508,8 @@ let
     SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
     SO_해외_Raw = Excel.CurrentWorkbook(){[Name="SO_해외"]}[Content],
 
-    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Line item", "Opportunity", "Customer PO", "OS name", "Business registration number", "AX Project number", "Currency"}),
-    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Line item", "Opportunity", "Customer PO", "OS name", "Business registration number", "AX Project number", "Currency"}),
+    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Line item", "Opportunity", "Customer PO", "OS name", "Business registration number", "Model code", "Currency"}),
+    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Line item", "Opportunity", "Customer PO", "OS name", "Business registration number", "Model code", "Currency"}),
     SO_Combined = Table.Distinct(Table.Combine({SO_국내, SO_해외}), {"SO_ID", "Line item"}),
 
     // ========== 조인: DN + PO (원가) ==========
@@ -526,13 +518,10 @@ let
 
     // ========== 조인: + SO (SO_ID + Line item 기준) ==========
     WithAX = Table.NestedJoin(WithCostExpanded, {"SO_ID", "Line item"}, SO_Combined, {"SO_ID", "Line item"}, "SO_Data", JoinKind.LeftOuter),
-    WithAXExpanded = Table.ExpandTableColumn(WithAX, "SO_Data", {"Opportunity", "Customer PO", "OS name", "Business registration number", "AX Project number", "Currency"}, {"Opportunity", "Customer PO", "OS name", "Business registration number", "AX Project number", "Currency"}),
-
-    // ========== GL 대상 여부 ==========
-    WithGLFlag = Table.AddColumn(WithAXExpanded, "GL대상", each if [AX Project number] = null or Text.Trim(Text.From([AX Project number])) = "" then "Y" else "N", type text),
+    WithAXExpanded = Table.ExpandTableColumn(WithAX, "SO_Data", {"Opportunity", "Customer PO", "OS name", "Business registration number", "Model code", "Currency"}, {"Opportunity", "Customer PO", "OS name", "Business registration number", "Model code", "Currency"}),
 
     // ========== 타입 변환 ==========
-    Result = Table.TransformColumnTypes(WithGLFlag, {
+    Result = Table.TransformColumnTypes(WithAXExpanded, {
         {"출고일", type date},
         {"Total Sales KRW", Currency.Type},
         {"원가_단가", Currency.Type},
@@ -600,17 +589,26 @@ let
     SO_해외_Selected = Table.SelectColumns(SO_해외_Raw, CommonColumns_Filtered & {"Sales amount", "Sales amount KRW", "Status"}),
     SO_해외_Tagged = Table.AddColumn(SO_해외_Selected, "구분", each "해외"),
 
-    // SO 합치기 + Cancelled 제외 (null은 포함)
+    // SO 합치기 + 에러 치환 + Cancelled 제외 (null은 포함)
     SO_Combined = Table.Combine({SO_국내_Tagged, SO_해외_Tagged}),
-    SO_Filtered = Table.SelectRows(SO_Combined, each [Status] = null or [Status] <> "Cancelled"),
+    SO_CleanErrors = Table.ReplaceErrorValues(SO_Combined,
+        List.Transform(Table.ColumnNames(SO_Combined), each {_, null})
+    ),
+    SO_Filtered = Table.SelectRows(SO_CleanErrors, each [Status] = null or [Status] <> "Cancelled"),
     SO_Final = Table.RemoveColumns(SO_Filtered, {"Status"}),
 
     // ========== PO 원가 (SO_ID + Line item 기준 합산) ==========
     PO_국내_Raw = Excel.CurrentWorkbook(){[Name="PO_국내"]}[Content],
     PO_해외_Raw = Excel.CurrentWorkbook(){[Name="PO_해외"]}[Content],
 
-    PO_국내 = Table.SelectColumns(PO_국내_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
-    PO_해외 = Table.SelectColumns(PO_해외_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
+    PO_국내_Select = Table.SelectColumns(PO_국내_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
+    PO_국내 = Table.ReplaceErrorValues(PO_국내_Select,
+        List.Transform(Table.ColumnNames(PO_국내_Select), each {_, null})
+    ),
+    PO_해외_Select = Table.SelectColumns(PO_해외_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
+    PO_해외 = Table.ReplaceErrorValues(PO_해외_Select,
+        List.Transform(Table.ColumnNames(PO_해외_Select), each {_, null})
+    ),
     PO_Combined = Table.Group(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}, {
         {"ICO Unit", each List.Average([ICO Unit]), type number},
         {"Total ICO", each List.Sum([Total ICO]), type number}
@@ -620,9 +618,15 @@ let
     DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
     DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
 
-    DN_국내 = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Total Sales", "출고일"}),
+    DN_국내_Select = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Total Sales", "출고일"}),
+    DN_국내 = Table.ReplaceErrorValues(DN_국내_Select,
+        List.Transform(Table.ColumnNames(DN_국내_Select), each {_, null})
+    ),
     DN_국내_Renamed = Table.RenameColumns(DN_국내, {{"Total Sales", "출고금액"}}),
-    DN_해외 = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Total Sales KRW", "선적일"}),
+    DN_해외_Select = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Total Sales KRW", "선적일"}),
+    DN_해외 = Table.ReplaceErrorValues(DN_해외_Select,
+        List.Transform(Table.ColumnNames(DN_해외_Select), each {_, null})
+    ),
     DN_해외_Renamed = Table.RenameColumns(DN_해외, {{"Total Sales KRW", "출고금액"}, {"선적일", "출고일"}}),
     DN_Combined = Table.Group(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}, {
         {"출고금액", each List.Sum([출고금액]), type number},
@@ -664,9 +668,10 @@ let
         {"출고금액", Currency.Type},
         {"마진", Currency.Type},
         {"미출고금액", Currency.Type}
-    })
+    }),
+    #"다시 정렬한 열 수" = Table.ReorderColumns(Result,{"SO_ID", "PO receipt date", "Period", "AX Period", "AX Project number", "CS담당자", "Business registration number", "Customer name", "Customer PO", "Order type", "Opportunity", "Sector", "Industry code", "Model code", "Item name", "OS name", "Currency", "Line item", "Item qty", "Sales Unit Price", "Incoterms", "Requested delivery date", "EXW NOAH", "Expected delivery date", "영업 담당", "Remarks", "Sales amount KRW", "구분", "Sales amount", "원가_단가", "원가", "출고금액", "출고일", "마진", "마진율", "출고완료", "매출연월", "미출고금액"})
 in
-    Result
+    #"다시 정렬한 열 수"
 ```
 
 ---
@@ -891,7 +896,7 @@ NOAH AR Statement (2026-01월)  vs  PO_매입월별 (Period = 2026-01) 매입금
 ### 목적
 - **회계 마감 시 AX GRN 대사** 용도
 - Invoiced(GRN 처리 완료) 건만 대상
-- SO_ID 기준 flat 구조 — AX Project number, AX PO를 LEFT JOIN으로 나열
+- SO_ID 기준 flat 구조 — Model code, AX PO를 LEFT JOIN으로 나열
 - AX에 입력된 GRN 금액과 엑셀 매입금액 비교
 
 ### 대사 프로세스
@@ -912,7 +917,7 @@ NOAH AR Statement (2026-01월)  vs  PO_매입월별 (Period = 2026-01) 매입금
 | 컬럼 | 설명 |
 |------|------|
 | Period | 출고일 기준 월 (yyyy-MM 형식) |
-| AX Project number | AX 프로젝트번호 (SO에서 LEFT JOIN) |
+| Model code | AX 프로젝트번호 (SO에서 LEFT JOIN) |
 | AX PO | AX 발주번호 (PXXXXXX) |
 | 구분 | 국내/해외 |
 | SO_ID | NOAH SO 번호 (행 기준 키) |
@@ -943,17 +948,17 @@ let
     // AX PO 있는 건만 (AX에 입력되어 대사 가능한 건)
     PO_WithAX = Table.SelectRows(PO_Invoiced, each [#"AX PO"] <> null and [#"AX PO"] <> ""),
 
-    // ========== SO 원본 (AX Project number 조인용) ==========
+    // ========== SO 원본 (Model code 조인용) ==========
     SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
     SO_해외_Raw = Excel.CurrentWorkbook(){[Name="SO_해외"]}[Content],
 
-    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Line item", "AX Project number"}),
-    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Line item", "AX Project number"}),
+    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Line item", "Model code"}),
+    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Line item", "Model code"}),
     SO_Combined = Table.Combine({SO_국내, SO_해외}),
 
-    // ========== PO + SO 조인 (AX Project number 가져오기) ==========
+    // ========== PO + SO 조인 (Model code 가져오기) ==========
     WithProject = Table.NestedJoin(PO_WithAX, {"SO_ID", "Line item"}, SO_Combined, {"SO_ID", "Line item"}, "SO_Data", JoinKind.LeftOuter),
-    WithProjectExpanded = Table.ExpandTableColumn(WithProject, "SO_Data", {"AX Project number"}, {"AX Project number"}),
+    WithProjectExpanded = Table.ExpandTableColumn(WithProject, "SO_Data", {"Model code"}, {"Model code"}),
 
     // ========== DN 원본 (출고일 → Period 산정) ==========
     DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
@@ -984,8 +989,8 @@ let
         Text.From(Date.Year([출고일])) & "-" & Text.PadStart(Text.From(Date.Month([출고일])), 2, "0"),
         type text),
 
-    // ========== SO_ID 기준 그룹화 (AX PO, AX Project number는 LEFT JOIN으로 유지) ==========
-    Grouped = Table.Group(WithPeriod, {"Period", "AX Project number", "AX PO", "구분", "SO_ID"}, {
+    // ========== SO_ID 기준 그룹화 (AX PO, Model code는 LEFT JOIN으로 유지) ==========
+    Grouped = Table.Group(WithPeriod, {"Period", "Model code", "AX PO", "구분", "SO_ID"}, {
         {"PO_ID", each Text.Combine(List.Distinct([PO_ID]), ", "), type text},
         {"건수", each Table.RowCount(_), Int64.Type},
         {"수량", each List.Sum([Item qty]), type number},
@@ -993,12 +998,12 @@ let
     }),
 
     // ========== 컬럼 순서 정리 ==========
-    Reordered = Table.ReorderColumns(Grouped, {"Period", "AX Project number", "AX PO", "구분", "SO_ID", "PO_ID", "건수", "수량", "금액"}),
+    Reordered = Table.ReorderColumns(Grouped, {"Period", "Model code", "AX PO", "구분", "SO_ID", "PO_ID", "건수", "수량", "금액"}),
 
     // ========== 정렬 ==========
     Sorted = Table.Sort(Reordered, {
         {"Period", Order.Descending},
-        {"AX Project number", Order.Ascending},
+        {"Model code", Order.Ascending},
         {"AX PO", Order.Ascending},
         {"SO_ID", Order.Ascending}
     }),
@@ -1015,7 +1020,7 @@ in
 
 ### 결과 예시
 
-| Period | AX Project number | AX PO | 구분 | SO_ID | PO_ID | 건수 | 수량 | 금액 |
+| Period | Model code | AX PO | 구분 | SO_ID | PO_ID | 건수 | 수량 | 금액 |
 |--------|-------------------|-------|------|-------|-------|------|------|------|
 | 2026-02 | PRJ-002 | P000003 | 국내 | SOD-0007 | POD-0007 | 2 | 10 | 4,000,000 |
 | 2026-02 | PRJ-003 | P000005 | 해외 | SOO-0003 | POO-0003 | 1 | 5 | 3,500,000 |
@@ -1029,7 +1034,7 @@ in
 | 필터/분석 | 용도 |
 |----------|------|
 | Period = "2026-01" | 해당 월 마감 대사 (월별 필터링) |
-| 특정 AX Project number | 프로젝트 단위 금액 합계 확인 (하위 PO들 합산) |
+| 특정 Model code | 프로젝트 단위 금액 합계 확인 (하위 PO들 합산) |
 | 특정 AX PO | AX GRN 금액과 비교 (SO별 행 합산 = AX PO 금액) |
 | 특정 SO_ID | 불일치 시 어떤 SO에서 차이인지 즉시 파악 |
 | 구분별 소계 | 국내/해외 AP 분리 확인 |
@@ -1039,7 +1044,7 @@ in
 PO_AX대사 (Period = 2026-01) 금액 합계  vs  AX D365 F&O GRN (2026-01월) 금액
 → AX PO 필터 후 SO별 행 합산 = PXXXXXX GRN 금액과 대사
 → 불일치 시 SO_ID별로 어디서 차이인지 바로 추적 가능
-→ AX Project number로 동일 프로젝트 내 PO들을 묶어 합산 대사 가능
+→ Model code로 동일 프로젝트 내 PO들을 묶어 합산 대사 가능
 ```
 
 ---
@@ -1048,7 +1053,7 @@ PO_AX대사 (Period = 2026-01) 금액 합계  vs  AX D365 F&O GRN (2026-01월) �
 
 ### 목적
 - PO_국내 + PO_해외 통합
-- SO에서 Industry code, Opportunity, AX Project number 조인
+- SO에서 Industry code, Opportunity, Model code 조인
 - PO_ID별 Industry code 파악용
 
 ### 결과 컬럼
@@ -1059,7 +1064,7 @@ PO_AX대사 (Period = 2026-01) 금액 합계  vs  AX D365 F&O GRN (2026-01월) �
 | SO_ID | 주문 번호 (여러 건이면 콤마 연결) |
 | Customer name | 고객명 (PO에서) |
 | Opportunity | Opportunity 번호 (SO에서, 여러 건이면 콤마 연결) |
-| AX Project number | AX 프로젝트 번호 (SO에서, 여러 건이면 콤마 연결) |
+| Model code | AX 프로젝트 번호 (SO에서, 여러 건이면 콤마 연결) |
 | Sector | 섹터 (SO에서, 여러 건이면 콤마 연결) |
 | Industry code | 산업코드 (SO에서, 여러 건이면 콤마 연결) |
 | 발주날짜 | 공장 발주 날짜 (가장 최근) |
@@ -1080,23 +1085,23 @@ let
     PO_해외_Tagged = Table.AddColumn(PO_해외, "구분", each "해외"),
     PO_Combined = Table.Combine({PO_국내_Tagged, PO_해외_Tagged}),
 
-    // ========== SO (Industry code, Opportunity, AX Project number) ==========
+    // ========== SO (Industry code, Opportunity, Model code) ==========
     SO_국내_Raw = Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content],
     SO_해외_Raw = Excel.CurrentWorkbook(){[Name="SO_해외"]}[Content],
-    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Line item", "Sector", "Industry code", "Opportunity", "AX Project number"}),
-    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Line item", "Sector", "Industry code", "Opportunity", "AX Project number"}),
+    SO_국내 = Table.SelectColumns(SO_국내_Raw, {"SO_ID", "Line item", "Sector", "Industry code", "Opportunity", "Model code"}),
+    SO_해외 = Table.SelectColumns(SO_해외_Raw, {"SO_ID", "Line item", "Sector", "Industry code", "Opportunity", "Model code"}),
     SO_Combined = Table.Distinct(Table.Combine({SO_국내, SO_해외}), {"SO_ID", "Line item"}),
 
     // ========== PO + SO 조인 (SO_ID + Line item 기준) ==========
     WithSO = Table.NestedJoin(PO_Combined, {"SO_ID", "Line item"}, SO_Combined, {"SO_ID", "Line item"}, "SO_Data", JoinKind.LeftOuter),
-    WithSOExpanded = Table.ExpandTableColumn(WithSO, "SO_Data", {"Sector", "Industry code", "Opportunity", "AX Project number"}, {"Sector", "Industry code", "Opportunity", "AX Project number"}),
+    WithSOExpanded = Table.ExpandTableColumn(WithSO, "SO_Data", {"Sector", "Industry code", "Opportunity", "Model code"}, {"Sector", "Industry code", "Opportunity", "Model code"}),
 
     // ========== PO_ID 기준 그룹화 ==========
     Grouped = Table.Group(WithSOExpanded, {"PO_ID"}, {
         {"SO_ID", each Text.Combine(List.Distinct([SO_ID]), ", "), type text},
         {"Customer name", each List.First([Customer name]), type text},
         {"Opportunity", each Text.Combine(List.Distinct(List.RemoveNulls([Opportunity])), ", "), type text},
-        {"AX Project number", each Text.Combine(List.Distinct(List.RemoveNulls(List.Transform([AX Project number], Text.From))), ", "), type text},
+        {"Model code", each Text.Combine(List.Distinct(List.RemoveNulls(List.Transform([Model code], Text.From))), ", "), type text},
         {"Sector", each Text.Combine(List.Distinct(List.RemoveNulls([Sector])), ", "), type text},
         {"Industry code", each Text.Combine(List.Distinct(List.RemoveNulls(List.Transform([Industry code], Text.From))), ", "), type text},
         {"발주날짜", each List.Max([공장 발주 날짜]), type date},
@@ -1113,7 +1118,7 @@ in
 
 ### 결과 예시
 
-| PO_ID | SO_ID | Customer name | Opportunity | AX Project number | Sector | Industry code | 발주날짜 | Status | 구분 |
+| PO_ID | SO_ID | Customer name | Opportunity | Model code | Sector | Industry code | 발주날짜 | Status | 구분 |
 |-------|-------|--------------|-------------|-------------------|--------|--------------|----------|--------|------|
 | ND-0001 | SOD-2026-0001 | 삼성전자 | OPP-001 | PRJ-2026-001 | CPI | Power | 2026-01-15 | Invoiced P01 | 국내 |
 | ND-0002 | SOD-2026-0002 | LG전자 | OPP-002 | PRJ-2026-002 | W&P | Water | 2026-01-20 | Confirmed | 국내 |
@@ -1336,7 +1341,7 @@ SO_ID = SOD-0001
 - **그룹화 키**: SO_ID + OS name + Expected delivery date + Period
 - **합산 필드**: qty, amount (Input/Output 모두)
 - **대표값 필드**: Customer name, Item name, 구분, Sector 등은 첫 번째 값 사용
-- **AX Project number**: 그룹 내 고유값을 `, `로 연결 (예: "P001, P002")
+- **Model code**: 그룹 내 고유값을 `, `로 연결 (예: "P001, P002")
 - **처리 순서**: Line item 레벨에서 Input/Output 계산 → OS name + 납기일로 그룹화 → 롤링 계산
 
 ### 결과 컬럼
@@ -1353,7 +1358,7 @@ SO_ID = SOD-0001
 | OS name | OneStream Item name (**그룹화 키**) |
 | Expected delivery date | 예상 납기일 (**그룹화 키**, 같은 OS name이라도 납기일 다르면 구분) |
 | AX Period | AX 기간 (그룹 내 고유값 연결) |
-| AX Project number | ERP 프로젝트 번호 (그룹 내 고유값 연결) |
+| Model code | ERP 프로젝트 번호 (그룹 내 고유값 연결) |
 | Sector | 사업 부문 |
 | Business registration number | 사업자등록번호 |
 | Industry code | 산업 코드 |
@@ -1575,8 +1580,10 @@ let
     SO_해외_Tagged = Table.AddColumn(SO_해외, "구분", each "해외"),
 
     SO_Combined = Table.Combine({SO_국내_Tagged, SO_해외_Tagged}),
-    // #N/A 등 에러 값을 null로 치환 (XLOOKUP 실패 등)
-    SO_CleanErrors = Table.ReplaceErrorValues(SO_Combined, {{"Expected delivery date", null}}),
+    // #N/A 등 에러 값을 null로 치환 — 모든 컬럼 대상 (XLOOKUP 실패 등 lazy evaluation 에러 방지)
+    SO_CleanErrors = Table.ReplaceErrorValues(SO_Combined,
+        List.Transform(Table.ColumnNames(SO_Combined), each {_, null})
+    ),
     // Cancelled 제외, Period 비어있는 행 제외
     SO_Filtered = Table.SelectRows(SO_CleanErrors, each
         ([Status] = null or [Status] <> "Cancelled") and
@@ -1588,7 +1595,10 @@ let
     DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
 
     // 국내: 출고일 기준, Total Sales = 매출
-    DN_국내 = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Qty", "Total Sales", "출고일"}),
+    DN_국내_Select = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Qty", "Total Sales", "출고일"}),
+    DN_국내 = Table.ReplaceErrorValues(DN_국내_Select,
+        List.Transform(Table.ColumnNames(DN_국내_Select), each {_, null})
+    ),
     DN_국내_WithPeriod = Table.AddColumn(DN_국내, "출고월", each
         if [출고일] = null then null
         else Text.From(Date.Year([출고일])) & "-" & Text.PadStart(Text.From(Date.Month([출고일])), 2, "0"),
@@ -1596,7 +1606,10 @@ let
     DN_국내_Final = Table.RenameColumns(DN_국내_WithPeriod, {{"Total Sales", "출고금액"}}),
 
     // 해외: 선적일 기준 (매출 인식 시점), Total Sales KRW = 매출
-    DN_해외 = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Qty", "Total Sales KRW", "선적일"}),
+    DN_해외_Select = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Qty", "Total Sales KRW", "선적일"}),
+    DN_해외 = Table.ReplaceErrorValues(DN_해외_Select,
+        List.Transform(Table.ColumnNames(DN_해외_Select), each {_, null})
+    ),
     DN_해외_WithPeriod = Table.AddColumn(DN_해외, "출고월", each
         if [선적일] = null then null
         else Text.From(Date.Year([선적일])) & "-" & Text.PadStart(Text.From(Date.Month([선적일])), 2, "0"),
@@ -1761,9 +1774,13 @@ let
         {"Value_Output_amount", Currency.Type},
         {"Value_Variance_amount", Currency.Type},
         {"Value_Ending_amount", Currency.Type}
-    })
+    }),
+    #"Reordered Columns" = Table.ReorderColumns(Result,{"SO_ID", "AX Project number", "AX Period", "구분", "Period", "등록Period", "Customer name", "Customer PO", "Item name", "OS name", "Sector", "Business registration number", "Industry code", "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty", "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount", "Expected delivery date"}),
+    #"Removed Columns" = Table.RemoveColumns(#"Reordered Columns",{"Item name"}),
+    #"Reordered Columns1" = Table.ReorderColumns(#"Removed Columns",{"SO_ID", "AX Project number", "AX Period", "구분", "Period", "등록Period", "Business registration number", "Customer name", "Customer PO", "Sector", "Industry code", "OS name", "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty", "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount", "Expected delivery date"}),
+    #"Removed Columns1" = Table.RemoveColumns(#"Reordered Columns1",{"Value_Variance_qty", "Value_Variance_amount"})
 in
-    Result
+    #"Removed Columns1"
 ```
 
 ### 결과 예시
@@ -2080,10 +2097,6 @@ SQL 이벤트:   실제 일어난 일(Input/Output)만 기록 → 필요할 때 
 - **원인**: PO 또는 DN에 해당 SO_ID + Line item 조합이 없음
 - **확인**: 원본 시트에서 Line item 일치 여부 확인
 
-### GL대상 판단 기준
-- AX Project number가 없거나 빈 문자열이면 `Y`
-- AX에 Item 등록 후 프로젝트 번호가 부여되면 `N`으로 변경됨
-
 ### Sales = 0인 행이 SO_통합에서 누락 (2026-01-30 수정)
 - **증상**: Sales amount = 0인 SO_ID가 SO_통합 쿼리 결과에서 빠짐
 - **원인**: `[Status] <> "Cancelled"` 조건에서 Status가 null인 경우 Power Query가 해당 행을 제외
@@ -2342,7 +2355,7 @@ DN_국내 시트에 수식 여러 개 필요:
 
 ```
 원가 조회:     =XLOOKUP(SO_ID & Item, PO[Key], PO[ICO Unit])
-AX번호 조회:   =XLOOKUP(SO_ID & Item, SO[Key], SO[AX Project number])
+AX번호 조회:   =XLOOKUP(SO_ID & Item, SO[Key], SO[Model code])
 고객PO 조회:   =XLOOKUP(SO_ID & Item, SO[Key], SO[Customer PO])
 ...
 
@@ -2408,10 +2421,10 @@ Step 2: DN + PO (원가)
 
 Step 3: DN + PO + SO (AX 정보)
 ┌───────┬──────────────┬──────┬─────┬───────────┬─────────────────┬────────┐
-│ DN_ID │ SO_ID        │ Item │ Qty │ 원가_합계  │ AX Project no   │ GL대상 │
-├───────┼──────────────┼──────┼─────┼───────────┼─────────────────┼────────┤
-│ DN-010│ SOD-2026-0001│ IQ10 │ 10  │ 5,000,000 │ (없음)          │ Y      │
-└───────┴──────────────┴──────┴─────┴───────────┴─────────────────┴────────┘
+│ DN_ID │ SO_ID        │ Item │ Qty │ 원가_합계  │ Model code      │
+├───────┼──────────────┼──────┼─────┼───────────┼─────────────────┤
+│ DN-010│ SOD-2026-0001│ IQ10 │ 10  │ 5,000,000 │ (없음)          │
+└───────┴──────────────┴──────┴─────┴───────────┴─────────────────┘
                                                   ↑ SO에서 가져옴
 ```
 
@@ -2488,7 +2501,7 @@ Step 3: DN + PO + SO (AX 정보)
 | 요소 | 현재 상황 | 판단 |
 |------|----------|------|
 | 데이터 규모 | 소규모 (ERP 통합 전 임시) | 파워 쿼리 OK |
-| 분석 목적 | 명확함 (Backlog, GL대상, 마진) | 고정 뷰로 충분 |
+| 분석 목적 | 명확함 (Backlog, 마진) | 고정 뷰로 충분 |
 | 관계 구조 | 단순 (SO → PO → DN) | 파워 쿼리 조인 OK |
 | 시계열 분석 | 없음 (YTD, 전년비 불필요) | DAX 불필요 |
 | 사용자 | 본인 위주 | 동적 피벗 불필요 |
@@ -2497,7 +2510,6 @@ Step 3: DN + PO + SO (AX 정보)
 
 - **Backlog**: 미출고금액 합계 (SO_통합)
 - **마진 분석**: 마진율 정렬/필터 (SO_통합)
-- **GL 대상**: GL대상=Y 필터 (DN_원가포함)
 - **국내/해외 구분**: 구분 컬럼 필터
 
 ### 파워 피벗이 필요해지는 시점

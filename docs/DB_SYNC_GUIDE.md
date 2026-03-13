@@ -36,11 +36,11 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 
 | 테이블명 | 소스 시트 | PK | 비고 |
 |----------|----------|-----|------|
-| `so_domestic` | SO_국내 | `(SO_ID, Customer PO, Line item)` | |
-| `so_export` | SO_해외 | `(SO_ID, Customer PO, Line item)` | |
+| `so_domestic` | SO_국내 | `(SO_ID, Line item)` | |
+| `so_export` | SO_해외 | `(SO_ID, Line item)` | |
 | `po_domestic` | PO_국내 | `(PO_ID, Line item, _row_seq)` | 부분 매입 순번 |
 | `po_export` | PO_해외 | `(PO_ID, Line item, _row_seq)` | 부분 매입 순번 |
-| `dn_domestic` | DN_국내 | `(DN_ID, Line item)` | |
+| `dn_domestic` | DN_국내 | `(DN_ID, SO_ID, Line item)` | |
 | `dn_export` | DN_해외 | `(DN_ID, SO_ID, Line item)` | |
 | `pmt_domestic` | PMT_국내 | `(선수금_ID)` | |
 
