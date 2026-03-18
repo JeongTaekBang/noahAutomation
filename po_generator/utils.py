@@ -189,9 +189,8 @@ def _load_and_merge_sheets(
     # PO_ID가 없는 행(빈 행) 제외
     df_po = df_po[df_po['PO_ID'].notna()].copy()
 
-    # SO_ID로 병합 (PO 기준 left join)
-    # SO에서 가져올 컬럼: Customer PO, Customer name, Incoterms 등 (PO에 없는 것들)
-    so_cols_to_merge = ['SO_ID', 'Customer PO', 'Customer name', 'Incoterms',
+    # SO_ID + Line item 복합키로 병합 (라인별 납기일 등 개별 데이터 보존)
+    so_cols_to_merge = ['SO_ID', 'Line item', 'Customer PO', 'Customer name', 'Incoterms',
                         'Opportunity', 'Sector', 'Industry code',
                         'Sales Unit Price', 'Sales amount', 'Currency',
                         'PO receipt date', 'Requested delivery date', '납품 주소',
@@ -201,12 +200,16 @@ def _load_and_merge_sheets(
 
     df_so_subset = df_so[so_cols_to_merge].copy()
 
-    # SO_ID가 같은 행이 여러 개일 수 있음 (다중 아이템)
-    # SO에서 SO_ID별 첫 행만 가져옴 (Customer name, Customer PO 등은 동일하므로)
-    df_so_unique = df_so_subset.drop_duplicates(subset='SO_ID', keep='first')
+    # Line item 컬럼 존재 시 SO_ID + Line item 복합키로 join
+    join_keys = ['SO_ID']
+    if 'Line item' in df_so_subset.columns and 'Line item' in df_po.columns:
+        join_keys = ['SO_ID', 'Line item']
+    else:
+        # Line item 없으면 기존 방식 (SO_ID별 첫 행)
+        df_so_subset = df_so_subset.drop_duplicates(subset='SO_ID', keep='first')
 
     # PO 기준으로 left join
-    df_merged = df_po.merge(df_so_unique, on='SO_ID', how='left', suffixes=('', '_SO'))
+    df_merged = df_po.merge(df_so_subset, on=join_keys, how='left', suffixes=('', '_SO'))
 
     # 시트 구분 추가
     df_merged['_시트구분'] = sheet_type

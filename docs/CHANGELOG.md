@@ -20,40 +20,130 @@
 
 ---
 
-## 2026-03-18: Streamlit 대시보드 추가
+## 2026-03-19: 대시보드 카드 UI 전환 및 Order Book 개선
 
 ### 배경
-NOAH_SO_PO_DN.xlsx 기반 문서 자동화 시스템에 비즈니스 현황을 한눈에 파악할 수 있는 대시보드가 없었음. SQLite DB(noah_data.db)를 데이터 소스로 활용하여 Streamlit 대시보드를 구축.
+"오늘의 현황" 페이지의 메트릭과 테이블이 엑셀과 차별 없음 → 카드 UI로 시각화 개선.
+Order Book 페이지에 납기 분포 히트맵 추가, 불필요한 섹션 정리.
 
-### 신규 파일
-| 파일 | 역할 |
-|------|------|
-| `dashboard.py` | Streamlit 대시보드 앱 (6페이지, ~500줄) |
+### 변경 내용
+
+**카드 UI 전환 (`st.container(border=True)` + 아이콘)**
+- `_render_cards()` 헬퍼 추가 — 3열 격자 카드 렌더러
+- KPI 4개: `st.metric()` → 아이콘 카드 (🔴/🟢 납기, 📥 수주 전월비, 📤 출고 달성률 progress bar)
+- 납기 현황: `st.dataframe()` → SO_ID별 카드 (상태 아이콘 + 품목/수량/금액 + 납기/EXW)
+- 선적 대기: `st.dataframe()` → DN_ID별 카드 (⏳ + 출고→픽업→선적 flow + B/L)
+- 캘린더 상세: 납기 예정 → SO_ID별 카드, 출고 실적 → DN_ID별 카드 (2열 격자)
+- Customer PO 정보 전 카드에 표시 (`load_so()` SQL에 `Customer PO` 컬럼 추가)
+
+**삭제된 섹션**
+- 해외 최근 선적 완료 (7일 이내)
+- 국내 최근 출고 (7일) — metric + 카드
+- Backlog 추이 — 마감 확정치 (스냅샷 차트)
+- Backlog 상세 테이블
+- 납기 지연 `st.warning()` — KPI 카드에 흡수
+
+**Order Book 개선**
+- 납기 분포 히트맵 추가: 금월~연말, 월별 × 섹터, YlOrRd colorscale, 셀에 금액 표시
+- `load_order_book()`: 예외를 빈 DataFrame으로 삼키던 버그 수정 → 예외 전파하여 `st.error()` 경로 정상화
 
 ### 수정 파일
 | 파일 | 변경 내용 |
 |------|----------|
-| `requirements.txt` | `streamlit>=1.30.0`, `plotly>=5.18.0` 추가 |
-| `CLAUDE.md` | `streamlit run dashboard.py` 커맨드 추가 |
-| `create_po.bat` | 메뉴에 `[D] 대시보드 (Streamlit)` 추가 |
+| `dashboard.py` | `_render_cards()` 헬퍼, KPI 카드화, 4개 섹션 카드 전환, Customer PO 추가, 납기 히트맵, 섹션 삭제, `load_order_book()` 예외 수정 |
+
+---
+
+## 2026-03-18: 대시보드 납기 캘린더 추가
+
+### 배경
+"오늘의 현황" 페이지에 KPI 메트릭과 테이블만 있어 월 단위 시각적 조망이 불가능. Plotly Heatmap 기반 달력으로 납기 예정(SO)과 출고 실적(DN)을 한눈에 파악할 수 있도록 개선.
+
+### 변경 내용
+- **`build_calendar_data()`**: 순수 함수 — SO 납기일/DN 출고일을 날짜별로 집계 (so_count, so_amount, dn_count, dn_amount)
+- **`_render_delivery_calendar()`**: Plotly Heatmap 캘린더 UI
+  - Session state 기반 월 네비게이션 (◀ 이전 달 / 다음 달 ▶)
+  - Diverging colorscale: 빨강(과납기) ↔ 흰색(0건) ↔ 파랑(미래 납기)
+  - 셀 텍스트: 📦 납기 예정 건수/금액 + 🚚 출고 실적 건수/금액
+  - 오늘 날짜 테두리 강조 (`add_shape`)
+  - 날짜 클릭 → 드릴다운: 납기 예정 테이블 + 출고 실적 테이블 (2컬럼 레이아웃)
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `dashboard.py` | `import calendar` 추가, `build_calendar_data()` + `_render_delivery_calendar()` 함수 추가, `pg_today()` 내 KPI 직후 캘린더 렌더 호출 |
+| `tests/test_dashboard.py` | `TestCalendarData` 클래스 5개 테스트 추가 (47 passed) |
+
+---
+
+## 2026-03-18: 대시보드 Interactive Charts 추가
+
+### 변경 내용
+- **Hover Templates**: 전체 21개 Plotly 차트에 KRW 포맷(`₩%{y:,.0f}`), 한글 라벨, `<extra></extra>` 적용
+- **드릴다운 (on_select)**: 제품 Top 15 / 섹터 Pie / 고객 Top 15 / Aging Bar 클릭 시 하위 상세 분석 표시
+  - 제품: 월별 추이 + 섹터 비중 + 주요 고객 Top 5
+  - 섹터: 제품 믹스 + 월별 추이 + 주요 고객
+  - 고객: 월별 추이 + 제품 믹스 + Backlog 현황
+  - Aging: 해당 구간 Backlog 상세 테이블
+- **Rangeslider**: 수주/출고 월별 추이, Order Book 월별 추이에 rangeslider 추가
+- **최소 버전**: `streamlit>=1.35.0` (on_select 파라미터 요구)
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `dashboard.py` | 21개 차트 hovertemplate, 4개 드릴다운, 2개 rangeslider |
+| `tests/test_dashboard.py` | 드릴다운 필터링 로직 12개 테스트 추가 (42 passed) |
+| `requirements.txt` | `streamlit>=1.30.0` → `streamlit>=1.35.0` |
+
+---
+
+## 2026-03-18: Streamlit 대시보드 추가 + 개선
+
+### 배경
+NOAH_SO_PO_DN.xlsx 기반 문서 자동화 시스템에 비즈니스 현황을 한눈에 파악할 수 있는 대시보드가 없었음. SQLite DB(noah_data.db)를 데이터 소스로 활용하여 Streamlit 대시보드를 구축. 이후 피드백을 반영하여 전면 개선.
+
+### 신규 파일
+| 파일 | 역할 |
+|------|------|
+| `dashboard.py` | Streamlit 대시보드 앱 (6페이지, ~800줄) |
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `requirements.txt` | `streamlit>=1.35.0`, `plotly>=5.18.0` 추가 |
+| `CLAUDE.md` | `streamlit run dashboard.py` 커맨드 추가 (로컬/네트워크 공유) |
+| `create_po.bat` | `[D]` 대시보드 (내 PC), `[N]` 대시보드 (네트워크 공유) 추가 |
 
 ### 대시보드 페이지 구성 (6페이지)
 
 | 페이지 | 핵심 내용 |
 |--------|----------|
-| 오늘의 현황 | KPI (납기 건수, 금월 수주/출고), 이번 주 납기 예정, 최근 출고, 백로그 요약 |
-| 수주/출고 현황 | 수주/출고 KPI, 월별 금액/수량 추이 (Plotly), 금월 일별 출고 |
-| 제품 분석 | Top 15 매출, 구성비 도넛, 월별 추이 (Top 5 stacked area) |
-| 섹터 분석 | 섹터별 비중 KPI, 파이/월별 stacked bar/제품 믹스 |
-| 고객 분석 | Top 15, Pareto 차트, 고객 상세 테이블 |
-| Order Book | Backlog 금액/수량/건수, 스냅샷 추이, 상세 테이블 |
+| 오늘의 현황 | KPI, **납기 캘린더** (Plotly Heatmap, 월 네비, 날짜 클릭 드릴다운), 납기 현황 (국내/해외 탭, SO_ID 그룹, Status 아이콘, 지연 경고), 해외 선적 Action Items (선적 대기/최근 완료), 국내 최근 출고, 백로그 요약 |
+| 수주/출고 현황 | 전월 대비 증감율, Book-to-Bill 비율/추이, 월별 수주/출고 + 누적매출, 금월 일별 출고 |
+| 제품 분석 | Top 15 매출, 구성비 도넛, 월별 추이, 제품별 평균 단가, 제품별 Backlog Top 10 |
+| 섹터 분석 | 섹터별 비중, 파이/월별 stacked bar/제품 믹스, 섹터별 Backlog, 평균 주문 규모 |
+| 고객 분석 | Top 15, Pareto, 고객 상세 (Backlog 병합), 고객별 월별 매출 추이 (Top 5) |
+| Order Book | Backlog KPI (지연/임박), 월별 Input/Output/Ending 추이 (`order_book.sql` 직접 실행), Aging 분석 (6구간), 섹터별/고객별 Backlog, 스냅샷 추이, 상세 테이블 |
 
-### 데이터 레이어
-- `@st.cache_data(ttl=300)` 캐시 (5분)
-- SO 통합: `so_domestic` + `so_export` UNION ALL (order_book.sql `so_combined` 패턴)
-- DN 통합: `dn_domestic` + `dn_export` UNION ALL, SO JOIN으로 메타데이터 보강
-- Backlog: `order_book_backlog.sql` 이벤트 기반 패턴 (events → GROUP BY → HAVING)
-- 스냅샷: `ob_snapshot` / `ob_snapshot_meta` 테이블 활용
+### 데이터 레이어 (7개 캐시 로더)
+- `load_so()` — SO 통합 (Status, EXW NOAH 포함)
+- `load_dn()` — DN 통합 (매출 기준: 국내=출고일, 해외=선적일)
+- `load_dn_export_shipping()` — 해외 DN 선적 파이프라인 (출고일/픽업일/선적예정일/선적일/B/L)
+- `load_backlog()` — 현재 백로그 (`order_book_backlog.sql` 이벤트 패턴)
+- `load_order_book()` — 월별 Order Book (`sql/order_book.sql` 파일 직접 실행)
+- `load_sync_meta()` — 동기화 메타정보
+- `load_snapshot_meta()` — 스냅샷 메타정보
+
+### SQL 파일 활용
+| SQL 파일 | 대시보드 활용 |
+|----------|-------------|
+| `order_book.sql` | `load_order_book()` — 파일 직접 읽어서 실행, 월별 Input/Output/Ending 추이 |
+| `order_book_backlog.sql` | `load_backlog()` — 같은 이벤트 기반 패턴 인라인 SQL |
+
+### 네트워크 공유 기능
+- `create_po.bat` → `[N]` 선택 시 `--server.address 0.0.0.0 --server.port 8501`로 실행
+- 컴퓨터 hostname + IP 주소 자동 표시
+- 같은 네트워크 내 동료가 `http://hostname:8501`로 접속 가능
 
 ### 사이드바 필터
 시장 구분(전체/국내/해외), 연도/월, 섹터 multiselect, 고객 필터, 새로고침 버튼
