@@ -36,6 +36,9 @@ echo   [데이터]
 echo   [8] DB Sync (Excel → SQLite)
 echo   [9] Order Book Close (월 마감)
 echo.
+echo   [분석]
+echo   [D] 대시보드 (Streamlit)
+echo.
 echo   [기타]
 echo   [H] 발주 이력 조회
 echo   [0] 종료
@@ -54,6 +57,7 @@ if "%CHOICE%"=="6" goto create_ci
 if "%CHOICE%"=="7" goto create_pl
 if "%CHOICE%"=="8" goto sync_db
 if "%CHOICE%"=="9" goto close_period
+if /i "%CHOICE%"=="D" goto dashboard
 if /i "%CHOICE%"=="H" goto view_history
 if "%CHOICE%"=="0" goto end
 echo [오류] 올바른 번호를 입력하세요.
@@ -406,6 +410,22 @@ goto menu
 :cp_status
 echo.
 "%PYTHON_PATH%" "%~dp0close_period.py" --status
+
+echo.
+pause
+goto menu
+
+:dashboard
+echo.
+echo ----------------------------------------
+echo   대시보드 (Streamlit)
+echo ----------------------------------------
+echo.
+echo   브라우저에서 대시보드가 열립니다.
+echo   종료: Ctrl+C
+echo.
+
+"%PYTHON_PATH%" -m streamlit run "%~dp0dashboard.py"
 
 echo.
 pause

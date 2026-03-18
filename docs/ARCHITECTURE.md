@@ -89,6 +89,7 @@ noahAutomation/
 ├── 📄 create_ci.py          # CLI 진입점 (Commercial Invoice)
 ├── 📄 create_pl.py          # CLI 진입점 (Packing List)
 ├── 📄 create_oc.py          # CLI 진입점 (Order Confirmation)
+├── 📄 dashboard.py          # Streamlit 대시보드 (수주/출고/제품/섹터/고객/백로그)
 │
 ├── 📁 po_generator/         # ⭐ 핵심 패키지
 │   ├── config.py            # 설정/상수 (경로, 필드, 색상)
@@ -133,6 +134,8 @@ noahAutomation/
 │   └── 2026/
 │       └── 1월/
 │           └── 20260118_ND-0001_고객명.xlsx
+│
+├── 📁 sql/                  # SQL 쿼리 (Order Book, Backlog)
 │
 └── 📁 tests/                # 테스트 코드
 ```

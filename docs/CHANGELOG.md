@@ -20,6 +20,52 @@
 
 ---
 
+## 2026-03-18: Streamlit 대시보드 추가
+
+### 배경
+NOAH_SO_PO_DN.xlsx 기반 문서 자동화 시스템에 비즈니스 현황을 한눈에 파악할 수 있는 대시보드가 없었음. SQLite DB(noah_data.db)를 데이터 소스로 활용하여 Streamlit 대시보드를 구축.
+
+### 신규 파일
+| 파일 | 역할 |
+|------|------|
+| `dashboard.py` | Streamlit 대시보드 앱 (6페이지, ~500줄) |
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `requirements.txt` | `streamlit>=1.30.0`, `plotly>=5.18.0` 추가 |
+| `CLAUDE.md` | `streamlit run dashboard.py` 커맨드 추가 |
+| `create_po.bat` | 메뉴에 `[D] 대시보드 (Streamlit)` 추가 |
+
+### 대시보드 페이지 구성 (6페이지)
+
+| 페이지 | 핵심 내용 |
+|--------|----------|
+| 오늘의 현황 | KPI (납기 건수, 금월 수주/출고), 이번 주 납기 예정, 최근 출고, 백로그 요약 |
+| 수주/출고 현황 | 수주/출고 KPI, 월별 금액/수량 추이 (Plotly), 금월 일별 출고 |
+| 제품 분석 | Top 15 매출, 구성비 도넛, 월별 추이 (Top 5 stacked area) |
+| 섹터 분석 | 섹터별 비중 KPI, 파이/월별 stacked bar/제품 믹스 |
+| 고객 분석 | Top 15, Pareto 차트, 고객 상세 테이블 |
+| Order Book | Backlog 금액/수량/건수, 스냅샷 추이, 상세 테이블 |
+
+### 데이터 레이어
+- `@st.cache_data(ttl=300)` 캐시 (5분)
+- SO 통합: `so_domestic` + `so_export` UNION ALL (order_book.sql `so_combined` 패턴)
+- DN 통합: `dn_domestic` + `dn_export` UNION ALL, SO JOIN으로 메타데이터 보강
+- Backlog: `order_book_backlog.sql` 이벤트 기반 패턴 (events → GROUP BY → HAVING)
+- 스냅샷: `ob_snapshot` / `ob_snapshot_meta` 테이블 활용
+
+### 사이드바 필터
+시장 구분(전체/국내/해외), 연도/월, 섹터 multiselect, 고객 필터, 새로고침 버튼
+
+### 사용법
+```bash
+streamlit run dashboard.py
+# 또는 create_po.bat → [D] 대시보드
+```
+
+---
+
 ## 2026-03-12: CI/PL 템플릿 셀 위치 전면 업데이트 (Bill to 3줄 확장)
 
 ### 배경
