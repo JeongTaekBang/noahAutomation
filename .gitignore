@@ -72,6 +72,7 @@ dn_analysis.txt
 nul
 
 # Local/sensitive templates
+templates/logo_rotork.png
 templates/sign_rotork.png
 templates/ts_template_local.xlsx
 
