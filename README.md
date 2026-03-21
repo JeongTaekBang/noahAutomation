@@ -1,6 +1,6 @@
 # NOAH Document Auto-Generator
 
-RCK(Rotork Korea Sales Office)에서 NOAH(Intercompany Factory)로 보내는 업무 문서를 자동 생성하고, 비즈니스 KPI를 대시보드로 모니터링합니다.
+Sales Office에서 Intercompany Factory로 보내는 업무 문서를 자동 생성하고, 비즈니스 KPI를 대시보드로 모니터링합니다.
 
 ```
 NOAH_SO_PO_DN.xlsx (데이터 소스)
@@ -16,7 +16,7 @@ NOAH_SO_PO_DN.xlsx (데이터 소스)
 
 | 문서 | 용도 | CLI |
 |------|------|-----|
-| **PO** (Purchase Order) | RCK→NOAH 발주서 | `create_po.py` |
+| **PO** (Purchase Order) | 사내 발주서 | `create_po.py` |
 | **거래명세표** (Transaction Statement) | 국내 납품/선수금 명세 | `create_ts.py` |
 | **PI** (Proforma Invoice) | 해외 견적서 | `create_pi.py` |
 | **FI** (Final Invoice) | 해외 대금 청구서 | `create_fi.py` |
@@ -46,7 +46,7 @@ NOAH_SO_PO_DN.xlsx (데이터 소스)
 | SO_해외 / PO_해외 / DN_해외 | 해외 고객 주문 |
 
 **필수 입력 항목:**
-- `RCK Order no.` - 주문번호 (예: ND-0001, NO-0001)
+- `Order no.` - 주문번호 (예: ND-0001, NO-0001)
 - `Customer name` - 고객명
 - `Customer PO` - 고객 발주번호
 - `Item qty` - 수량
@@ -238,9 +238,9 @@ noahAutomation/
 
 ## 다중 아이템 주문
 
-동일한 `RCK Order no.`로 여러 행을 입력하면 하나의 문서에 여러 아이템이 포함됩니다.
+동일한 `Order no.`로 여러 행을 입력하면 하나의 문서에 여러 아이템이 포함됩니다.
 
-| RCK Order no. | Customer name | Item name | Item qty | ICO Unit |
+| Order no. | Customer name | Item name | Item qty | ICO Unit |
 |---------------|---------------|-----------|----------|----------|
 | ND-0001 | ABC전자 | NA-100 | 2 | 500,000 |
 | ND-0001 | ABC전자 | NA-200 | 1 | 750,000 |
