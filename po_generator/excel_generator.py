@@ -285,7 +285,13 @@ def _fill_items_batch_po(
             else:
                 description = ''
         else:
-            description = item_name if item_name else ''
+            model_number = get_value(item_data, 'model')
+            if item_name:
+                description = item_name
+            elif model_number:
+                description = model_number
+            else:
+                description = ''
         col_b.append(escape_excel_formula(description))
 
         # Qty
@@ -426,7 +432,9 @@ def _create_description_sheet(
     # A열에 레이블 쓰기 (동적 필드 기준)
     labels = ['Line No', 'Qty'] + all_fields
     labels_2d = [[label] for label in labels]
-    ws.range(f'A1:A{len(labels)}').value = labels_2d
+    label_range = ws.range(f'A1:A{len(labels)}')
+    label_range.number_format = '@'  # 텍스트 형식 — '-40' 등 숫자형 문자열 보존
+    label_range.value = labels_2d
 
     # B열부터 값 쓰기
     end_col = chr(ord('B') + num_items - 1) if num_items <= 24 else None

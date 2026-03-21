@@ -31,8 +31,7 @@ python close_period.py --list             # Snapshot history
 python close_period.py --status           # Current status
 
 # Dashboard
-streamlit run dashboard.py                # Streamlit 대시보드 (로컬)
-streamlit run dashboard.py --server.address 0.0.0.0 --server.port 8501  # 네트워크 공유
+streamlit run dashboard.py                # Streamlit 대시보드
 
 # Tests
 pytest                                    # All tests
@@ -93,7 +92,7 @@ DB layer:
 | `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`) |
 | `sql/order_book.sql` | 이벤트 기반 Order Book SQL (Input/Output 이벤트 월만 행 생성, 재귀 CTE 없음) |
 | `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL (마감 고정 + Variance) |
-| `dashboard.py` | Streamlit 대시보드 (6페이지, 납기 캘린더, 카드 UI, 납기 히트맵, `order_book.sql` 직접 실행, 네트워크 공유 지원) |
+| `dashboard.py` | Streamlit 대시보드 (8페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book, 납기 캘린더, 세금계산서 미발행, Order Book 3탭(Executive/Risk/Conversion), 리드타임 분석) |
 
 ## Business Rules
 

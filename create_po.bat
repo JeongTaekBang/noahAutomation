@@ -37,8 +37,7 @@ echo   [8] DB Sync (Excel → SQLite)
 echo   [9] Order Book Close (월 마감)
 echo.
 echo   [분석]
-echo   [D] 대시보드 (내 PC)
-echo   [N] 대시보드 (네트워크 공유)
+echo   [D] 대시보드
 echo.
 echo   [기타]
 echo   [H] 발주 이력 조회
@@ -59,7 +58,7 @@ if "%CHOICE%"=="7" goto create_pl
 if "%CHOICE%"=="8" goto sync_db
 if "%CHOICE%"=="9" goto close_period
 if /i "%CHOICE%"=="D" goto dashboard
-if /i "%CHOICE%"=="N" goto dashboard_network
+
 if /i "%CHOICE%"=="H" goto view_history
 if "%CHOICE%"=="0" goto end
 echo [오류] 올바른 번호를 입력하세요.
@@ -428,32 +427,6 @@ echo   종료: Ctrl+C
 echo.
 
 "%PYTHON_PATH%" -m streamlit run "%~dp0dashboard.py"
-
-echo.
-pause
-goto menu
-
-:dashboard_network
-echo.
-echo ----------------------------------------
-echo   대시보드 (네트워크 공유)
-echo ----------------------------------------
-echo.
-
-REM 접속 주소 표시
-echo   [접속 주소 (동료에게 공유)]
-echo     http://%COMPUTERNAME%:8501
-echo.
-echo   [IP 주소 (위 주소가 안 될 경우)]
-for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /C:"IPv4"') do (
-    echo     http://%%a:8501
-)
-echo.
-echo   접속이 안 되면 Windows 방화벽에서 8501 포트를 허용하세요.
-echo   종료: Ctrl+C
-echo.
-
-"%PYTHON_PATH%" -m streamlit run "%~dp0dashboard.py" --server.address 0.0.0.0 --server.port 8501
 
 echo.
 pause

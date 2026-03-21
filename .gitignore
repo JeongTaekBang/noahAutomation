@@ -87,3 +87,9 @@ htmlcov/
 
 # mypy
 .mypy_cache/
+
+# Dashboard distribution (packaged exe - too large)
+dashboard_dist/
+
+# Test output
+test_output.txt

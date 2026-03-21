@@ -175,7 +175,7 @@ OPTION_FIELDS: Final[tuple[str, ...]] = (
     'Model', 'Bush', 'ALS', 'EXT', 'DC24V', 'Modbus, Profibus', 'LCU', 'PIU',
     'CPT+PIU', 'PCU+PIU', '-40', '-60', 'SCP', 'EXP', 'Bush-SQ', 'Bush-STAR',
     'INTEGRAL', 'IMS', 'BLDC', 'HART, Foundation Fieldbus', 'ATS',
-    'MOV사양', 'VALVE 사양',
+    'MOV조립', 'VALVE 가격',
 )
 
 

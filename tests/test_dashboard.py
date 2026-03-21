@@ -8,7 +8,7 @@ Streamlit UI 렌더링은 테스트하지 않음 — 순수 데이터 로직만.
 import pandas as pd
 import pytest
 
-from dashboard import build_calendar_data, enrich_dn, filt, fmt_krw
+from dashboard import build_calendar_data, calc_coverage, calc_margin, enrich_dn, filt, fmt_krw
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -503,3 +503,182 @@ class TestCalendarData:
         day10 = result[result["day"] == 10].iloc[0]
         assert day10["dn_count"] == 2  # DND-A, DND-B (nunique)
         assert day10["dn_amount"] == 3_500_000
+
+
+# ═══════════════════════════════════════════════════════════════
+# 발주 커버리지 순수함수 테스트
+# ═══════════════════════════════════════════════════════════════
+class TestCalcCoverage:
+    """calc_coverage() 순수 함수 단위 테스트 — SO_ID 단위 집계"""
+
+    @pytest.fixture
+    def so_for_cov(self):
+        """SO: ND-001 (2라인, 합계 qty=15), ND-002 (1라인, qty=20)"""
+        return pd.DataFrame({
+            "SO_ID": ["ND-001", "ND-001", "ND-002"],
+            "line_item": [1, 2, 1],
+            "customer_name": ["고객A", "고객A", "고객B"],
+            "os_name": ["IQ3", "CVA", "IQ3"],
+            "sector": ["Oil&Gas", "Oil&Gas", "Water"],
+            "market": ["국내", "국내", "국내"],
+            "period": ["2025-01", "2025-01", "2025-02"],
+            "qty": [10, 5, 20],
+            "amount_krw": [1_000_000, 500_000, 2_000_000],
+            "delivery_date": pd.to_datetime(["2025-03-01", "2025-03-01", "2025-04-01"]),
+            "status": ["미출고", "미출고", "미출고"],
+        })
+
+    @pytest.fixture
+    def po_for_cov(self):
+        """PO: ND-001에 Confirmed 상태"""
+        return pd.DataFrame({
+            "SO_ID": ["ND-001"],
+            "po_qty": [15],
+            "po_total_ico": [1_000_000],
+            "po_statuses": ["Confirmed"],
+        })
+
+    def test_confirmed_po(self, so_for_cov, po_for_cov):
+        """PO 존재 + Confirmed → 발주 확정"""
+        result = calc_coverage(so_for_cov, po_for_cov)
+        row = result[result["SO_ID"] == "ND-001"].iloc[0]
+        assert row["coverage_status"] == "발주 확정"
+
+    def test_open_po_is_unordered(self, so_for_cov):
+        """PO Open = 공장 발주 전 → 미발주"""
+        po = pd.DataFrame({
+            "SO_ID": ["ND-001"],
+            "po_qty": [10],
+            "po_total_ico": [700_000],
+            "po_statuses": ["Open"],
+        })
+        result = calc_coverage(so_for_cov, po)
+        row = result[result["SO_ID"] == "ND-001"].iloc[0]
+        assert row["coverage_status"] == "미발주"
+
+    def test_sent_po(self, so_for_cov):
+        """PO Sent = 공장에 발주함 → 발주 진행중"""
+        po = pd.DataFrame({
+            "SO_ID": ["ND-001"],
+            "po_qty": [10],
+            "po_total_ico": [700_000],
+            "po_statuses": ["Sent"],
+        })
+        result = calc_coverage(so_for_cov, po)
+        row = result[result["SO_ID"] == "ND-001"].iloc[0]
+        assert row["coverage_status"] == "발주 진행중"
+
+    def test_partial_order(self, so_for_cov):
+        """Open + Confirmed 혼합 → 부분 발주"""
+        po = pd.DataFrame({
+            "SO_ID": ["ND-001", "ND-001"],
+            "po_qty": [5, 5],
+            "po_total_ico": [300_000, 400_000],
+            "po_statuses": ["Confirmed", "Open"],
+        })
+        result = calc_coverage(so_for_cov, po)
+        row = result[result["SO_ID"] == "ND-001"].iloc[0]
+        assert row["coverage_status"] == "부분 발주"
+
+    def test_no_po(self, so_for_cov, po_for_cov):
+        """PO 없는 SO → 미발주"""
+        result = calc_coverage(so_for_cov, po_for_cov)
+        row = result[result["SO_ID"] == "ND-002"].iloc[0]
+        assert row["coverage_status"] == "미발주"
+        assert row["po_qty"] == 0
+
+    def test_cancelled_po_excluded(self, so_for_cov):
+        """모든 PO가 Cancelled인 SO → 결과에서 제외"""
+        po = pd.DataFrame(columns=["SO_ID", "po_qty", "po_total_ico", "po_statuses"])
+        po_all = pd.DataFrame({
+            "SO_ID": ["ND-001", "ND-001"],
+            "po_status": ["Cancelled", "Cancelled"],
+        })
+        result = calc_coverage(so_for_cov, po, po_all_status=po_all)
+        assert "ND-001" not in result["SO_ID"].values
+        # ND-002는 PO 자체가 없으므로 미발주로 남음
+        assert "ND-002" in result["SO_ID"].values
+
+    def test_empty_so(self):
+        """빈 SO → 빈 결과"""
+        result = calc_coverage(pd.DataFrame(), pd.DataFrame())
+        assert result.empty
+
+    def test_empty_po(self, so_for_cov):
+        """빈 PO → 모두 미발주"""
+        result = calc_coverage(so_for_cov, pd.DataFrame())
+        assert (result["coverage_status"] == "미발주").all()
+
+    def test_multi_line_so_merged(self, so_for_cov, po_for_cov):
+        """SO 다중 라인이 SO_ID 단위로 합산됨"""
+        result = calc_coverage(so_for_cov, po_for_cov)
+        assert len(result[result["SO_ID"] == "ND-001"]) == 1
+        row = result[result["SO_ID"] == "ND-001"].iloc[0]
+        assert "IQ3" in row["os_name"]
+        assert "CVA" in row["os_name"]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 수익성 분석 순수함수 테스트
+# ═══════════════════════════════════════════════════════════════
+class TestCalcMargin:
+    """calc_margin() 순수 함수 단위 테스트 — SO_ID 단위 집계"""
+
+    @pytest.fixture
+    def so_for_margin(self):
+        return pd.DataFrame({
+            "SO_ID": ["ND-001", "ND-002"],
+            "line_item": [1, 1],
+            "customer_name": ["고객A", "고객B"],
+            "os_name": ["IQ3", "CVA"],
+            "sector": ["Oil&Gas", "Water"],
+            "market": ["국내", "국내"],
+            "period": ["2025-01", "2025-02"],
+            "qty": [10, 20],
+            "amount_krw": [1_000_000, 2_000_000],
+        })
+
+    @pytest.fixture
+    def po_for_margin(self):
+        return pd.DataFrame({
+            "SO_ID": ["ND-001"],
+            "po_total_ico": [700_000],
+        })
+
+    def test_margin_with_cost(self, so_for_margin, po_for_margin):
+        """원가 확정 건 — 마진 = 매출 - ICO"""
+        result = calc_margin(so_for_margin, po_for_margin)
+        row = result[result["SO_ID"] == "ND-001"].iloc[0]
+        assert row["margin_amount"] == 300_000
+        assert row["margin_pct"] == 30.0
+        assert row["has_cost"] == True
+
+    def test_margin_no_cost(self, so_for_margin, po_for_margin):
+        """원가 미확정 건 — has_cost=False"""
+        result = calc_margin(so_for_margin, po_for_margin)
+        row = result[result["SO_ID"] == "ND-002"].iloc[0]
+        assert row["has_cost"] == False
+        assert row["po_total_ico"] == 0
+
+    def test_margin_zero_sales(self):
+        """매출 0 → 마진율 0%"""
+        so = pd.DataFrame({
+            "SO_ID": ["ND-X"], "line_item": [1], "qty": [0],
+            "amount_krw": [0], "customer_name": ["A"], "os_name": ["X"],
+            "sector": ["S"], "market": ["국내"], "period": ["2025-01"],
+        })
+        po = pd.DataFrame({
+            "SO_ID": ["ND-X"], "po_total_ico": [100_000],
+        })
+        result = calc_margin(so, po)
+        assert result.iloc[0]["margin_pct"] == 0.0
+
+    def test_margin_empty_so(self):
+        """빈 SO → 빈 결과"""
+        result = calc_margin(pd.DataFrame(), pd.DataFrame())
+        assert result.empty
+
+    def test_margin_empty_po(self, so_for_margin):
+        """빈 PO → 모두 원가 미확정"""
+        result = calc_margin(so_for_margin, pd.DataFrame())
+        assert (~result["has_cost"]).all()

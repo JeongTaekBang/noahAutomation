@@ -9,6 +9,7 @@ Usage:
 """
 
 import calendar
+import logging
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -19,6 +20,8 @@ import streamlit as st
 
 from po_generator.config import DB_FILE
 from po_generator.db_schema import get_sync_metadata
+
+logger = logging.getLogger(__name__)
 
 # ── 상수 ──────────────────────────────────────────────────────
 _TODAY = datetime.today()
@@ -96,7 +99,9 @@ def load_so() -> pd.DataFrame:
                    [Model code] AS model_code,
                    Sector  AS sector,
                    [Expected delivery date] AS delivery_date,
+                   [Requested delivery date] AS requested_date,
                    [EXW NOAH] AS exw_noah,
+                   [PO receipt date] AS po_receipt_date,
                    COALESCE(Status, '') AS status,
                    COALESCE([Customer PO], '') AS customer_po,
                    '국내' AS market
@@ -110,7 +115,9 @@ def load_so() -> pd.DataFrame:
                    CAST([Sales amount KRW] AS REAL),
                    Period, [Model code], Sector,
                    [Expected delivery date],
+                   [Requested delivery date],
                    [EXW NOAH],
+                   [PO receipt date],
                    COALESCE(Status, ''),
                    COALESCE([Customer PO], ''),
                    '해외'
@@ -118,12 +125,17 @@ def load_so() -> pd.DataFrame:
             WHERE COALESCE(Status, '') != 'Cancelled'
               AND Period IS NOT NULL AND TRIM(Period) != ''
         """, conn)
-    except Exception:
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
         return pd.DataFrame()
     finally:
         conn.close()
     df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
+    df["requested_date"] = pd.to_datetime(df["requested_date"], errors="coerce")
+    df.loc[df["requested_date"].dt.year <= 1900, "requested_date"] = pd.NaT
     df["exw_noah"] = pd.to_datetime(df["exw_noah"], errors="coerce")
+    df.loc[df["exw_noah"].dt.year <= 1900, "exw_noah"] = pd.NaT
+    df["po_receipt_date"] = pd.to_datetime(df["po_receipt_date"], errors="coerce")
     for c in ("os_name", "sector", "customer_name"):
         df[c] = df[c].fillna("")
     return df
@@ -153,7 +165,8 @@ def load_dn() -> pd.DataFrame:
             FROM dn_export
             WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''
         """, conn)
-    except Exception:
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
         return pd.DataFrame()
     finally:
         conn.close()
@@ -179,16 +192,111 @@ def load_dn_export_shipping() -> pd.DataFrame:
                    [공장 픽업일]   AS pickup_date,
                    [선적 예정일]   AS expected_ship_date,
                    [선적일]       AS ship_date,
-                   [B/L]          AS bl_no
+                   [B/L]          AS bl_no,
+                   [운송 업체]     AS carrier
             FROM dn_export
             WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
         """, conn)
-    except Exception:
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
         return pd.DataFrame()
     finally:
         conn.close()
     for c in ("factory_date", "pickup_date", "expected_ship_date", "ship_date"):
         df[c] = pd.to_datetime(df[c], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=300)
+def load_po_status() -> pd.DataFrame:
+    """PO 국내+해외 SO_ID별 Status 집계 (Invoiced 여부 판단용)."""
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query("""
+            SELECT SO_ID, COALESCE(Status, '') AS po_status
+            FROM po_domestic
+            UNION ALL
+            SELECT SO_ID, COALESCE(Status, '')
+            FROM po_export
+        """, conn)
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    return df
+
+
+@st.cache_data(ttl=300)
+def load_po_detail() -> pd.DataFrame:
+    """PO SO_ID 단위 집계 — 발주 커버리지·마진 분석용.
+
+    PO line_item은 SO line_item과 1:1 대응하지 않음 (본체+부속을 합쳐서 발주하는 경우 등).
+    따라서 SO_ID 단위로 집계합니다.
+    """
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query("""
+            SELECT SO_ID,
+                   SUM(CAST([Item qty] AS REAL))  AS po_qty,
+                   SUM(CAST([Total ICO] AS REAL))  AS po_total_ico,
+                   GROUP_CONCAT(DISTINCT COALESCE(Status, '')) AS po_statuses,
+                   '국내' AS market
+            FROM po_domestic
+            WHERE COALESCE(Status, '') != 'Cancelled'
+            GROUP BY SO_ID
+            UNION ALL
+            SELECT SO_ID,
+                   SUM(CAST([Item qty] AS REAL))  AS po_qty,
+                   SUM(CAST([Total ICO] AS REAL))  AS po_total_ico,
+                   GROUP_CONCAT(DISTINCT COALESCE(Status, '')) AS po_statuses,
+                   '해외' AS market
+            FROM po_export
+            WHERE COALESCE(Status, '') != 'Cancelled'
+            GROUP BY SO_ID
+        """, conn)
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    df["po_qty"] = pd.to_numeric(df["po_qty"], errors="coerce").fillna(0)
+    df["po_total_ico"] = pd.to_numeric(df["po_total_ico"], errors="coerce").fillna(0)
+    df["po_statuses"] = df["po_statuses"].fillna("")
+    return df
+
+
+@st.cache_data(ttl=300)
+def load_dn_tax_pending() -> pd.DataFrame:
+    """국내 DN 세금계산서 미발행 건 — 출고 완료 but 세금계산서/선수금 세금계산서 모두 미발행."""
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query("""
+            SELECT DN_ID, SO_ID, [Customer name] AS customer_name,
+                   [Item] AS item_name,
+                   CAST([Line item] AS INTEGER) AS line_item,
+                   CAST(Qty AS REAL) AS qty,
+                   CAST([Total Sales] AS REAL) AS amount_krw,
+                   [출고일] AS dispatch_date
+            FROM dn_domestic
+            WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
+              AND (TRIM(COALESCE([세금계산서 발행일], '')) = '' OR [세금계산서 발행일] IS NULL)
+              AND UPPER(TRIM(COALESCE([세금계산서 발행일], ''))) != 'N/A'
+              AND (TRIM(COALESCE([선수금 세금계산서 발행일], '')) = '' OR [선수금 세금계산서 발행일] IS NULL)
+              AND CAST(COALESCE([Total Sales], 0) AS REAL) > 0
+        """, conn)
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    df["dispatch_date"] = pd.to_datetime(df["dispatch_date"], errors="coerce")
     return df
 
 
@@ -260,7 +368,8 @@ def load_backlog() -> pd.DataFrame:
         HAVING SUM(in_amt - out_amt) > 0
         ORDER BY market, SO_ID, os_name
         """, conn)
-    except Exception:
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
         return pd.DataFrame()
     finally:
         conn.close()
@@ -281,6 +390,9 @@ def load_order_book() -> pd.DataFrame:
     try:
         sql = sql_path.read_text(encoding="utf-8")
         df = pd.read_sql_query(sql, conn)
+    except Exception as e:
+        logger.warning("Order Book SQL 실행 실패: %s", e)
+        return pd.DataFrame()
     finally:
         conn.close()
     return df
@@ -309,7 +421,8 @@ def load_snapshot_meta() -> pd.DataFrame:
             "SELECT * FROM ob_snapshot_meta WHERE is_active=1 ORDER BY period DESC",
             conn,
         )
-    except Exception:
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
         return pd.DataFrame()
     finally:
         conn.close()
@@ -387,7 +500,8 @@ def main():
     st.sidebar.title("NOAH 대시보드")
     page = st.sidebar.radio("페이지", [
         "오늘의 현황", "수주/출고 현황", "제품 분석",
-        "섹터 분석", "고객 분석", "Order Book",
+        "섹터 분석", "고객 분석", "발주 커버리지",
+        "수익성 분석", "Order Book",
     ])
     st.sidebar.divider()
     market = st.sidebar.radio("시장 구분", ["전체", "국내", "해외"], horizontal=True)
@@ -426,6 +540,8 @@ def main():
         "제품 분석": pg_product,
         "섹터 분석": pg_sector,
         "고객 분석": pg_customer,
+        "발주 커버리지": pg_po_coverage,
+        "수익성 분석": pg_margin,
         "Order Book": pg_orderbook,
     }[page](**kw)
 
@@ -434,8 +550,9 @@ def main():
 # 납기 캘린더 (pg_today 내부 사용)
 # ═══════════════════════════════════════════════════════════════
 def build_calendar_data(so_pending: pd.DataFrame, dn: pd.DataFrame,
-                        year: int, month: int) -> pd.DataFrame:
-    """월별 납기/출고 집계 — 날짜별 건수·금액 반환 (테스트 가능한 순수 함수)."""
+                        year: int, month: int,
+                        ship_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    """월별 납기/출고/EXW/픽업 집계 — 날짜별 건수·금액 반환 (테스트 가능한 순수 함수)."""
     import calendar as _cal
     _, n_days = _cal.monthrange(year, month)
     days = pd.DataFrame({"day": range(1, n_days + 1)})
@@ -468,8 +585,40 @@ def build_calendar_data(so_pending: pd.DataFrame, dn: pd.DataFrame,
                 dn_amount=("amount_krw", "sum"),
             ).reset_index()
 
-    merged = days.merge(so_agg, on="day", how="left").merge(dn_agg, on="day", how="left")
-    for c in ("so_count", "so_amount", "dn_count", "dn_amount"):
+    # EXW 출고 예정 집계
+    exw_agg = pd.DataFrame(columns=["day", "exw_count"])
+    if not so_pending.empty and "exw_noah" in so_pending.columns:
+        ep = so_pending[
+            so_pending["exw_noah"].notna()
+            & (so_pending["exw_noah"].dt.year == year)
+            & (so_pending["exw_noah"].dt.month == month)
+        ].copy()
+        if not ep.empty:
+            ep["day"] = ep["exw_noah"].dt.day
+            exw_agg = ep.groupby("day").agg(
+                exw_count=("SO_ID", "nunique"),
+            ).reset_index()
+
+    # 공장 픽업 집계
+    pk_agg = pd.DataFrame(columns=["day", "pk_count"])
+    if ship_df is not None and not ship_df.empty and "pickup_date" in ship_df.columns:
+        pp = ship_df[
+            ship_df["pickup_date"].notna()
+            & (ship_df["pickup_date"].dt.year == year)
+            & (ship_df["pickup_date"].dt.month == month)
+        ].copy()
+        if not pp.empty:
+            pp["day"] = pp["pickup_date"].dt.day
+            pk_agg = pp.groupby("day").agg(
+                pk_count=("DN_ID", "nunique"),
+            ).reset_index()
+
+    merged = (days
+              .merge(so_agg, on="day", how="left")
+              .merge(dn_agg, on="day", how="left")
+              .merge(exw_agg, on="day", how="left")
+              .merge(pk_agg, on="day", how="left"))
+    for c in ("so_count", "so_amount", "dn_count", "dn_amount", "exw_count", "pk_count"):
         merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0)
     return merged
 
@@ -509,7 +658,8 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
             st.rerun()
 
     # 데이터 준비
-    cal_data = build_calendar_data(so_pending, dn, cy, cm)
+    ship_df = load_dn_export_shipping()
+    cal_data = build_calendar_data(so_pending, dn, cy, cm, ship_df=ship_df)
 
     # 달력 그리드 구성
     cal_obj = calendar.Calendar(firstweekday=6)  # 일요일 시작
@@ -536,6 +686,8 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 so_amt = float(row["so_amount"].iloc[0]) if not row.empty else 0
                 dn_cnt = int(row["dn_count"].iloc[0]) if not row.empty else 0
                 dn_amt = float(row["dn_amount"].iloc[0]) if not row.empty else 0
+                exw_cnt = int(row["exw_count"].iloc[0]) if not row.empty else 0
+                pk_cnt = int(row["pk_count"].iloc[0]) if not row.empty else 0
 
                 # Z값: 양수=미래/오늘 납기, 음수=과납기
                 from datetime import date as _date_cls
@@ -547,6 +699,10 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
 
                 # 텍스트 조립
                 lines = [f"<b>{day}</b>"]
+                if exw_cnt > 0:
+                    lines.append(f"\U0001F3ED {exw_cnt}건")  # 🏭 EXW 출고
+                if pk_cnt > 0:
+                    lines.append(f"\U0001F69B {pk_cnt}건")   # 🚛 픽업
                 if so_cnt > 0:
                     lines.append(f"\U0001F4E6 {so_cnt}건 {fmt_krw(so_amt)}")
                 if dn_cnt > 0:
@@ -605,9 +761,14 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
     st.plotly_chart(fig_cal, key="cal_heatmap", use_container_width=True)
 
     # 날짜 선택 → 상세
+    # 현재 달이면 오늘 날짜 기본 선택, 다른 달이면 1일
+    if cy == _TODAY.year and cm == _TODAY.month:
+        default_date = _TODAY_DATE
+    else:
+        default_date = datetime(cy, cm, 1).date()
     sel_date = st.date_input(
         "날짜 선택",
-        value=None, key="cal_date_pick",
+        value=default_date, key="cal_date_pick",
         min_value=datetime(cy, cm, 1).date(),
         max_value=datetime(cy, cm, calendar.monthrange(cy, cm)[1]).date(),
     )
@@ -615,9 +776,92 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
 
     if sel_date_str:
         st.markdown(f"---\n#### {sel_date_str} 상세")
+
+        # ── (A) EXW 출고 예정 (SO 국내+해외 EXW NOAH 기준) ──
+        if not so_pending.empty and "exw_noah" in so_pending.columns:
+            day_exw = so_pending[so_pending["exw_noah"].dt.date == sel_date]
+        else:
+            day_exw = pd.DataFrame()
+
+        st.markdown("**🏭 EXW 출고 예정** — 공장 출고 예정 오더")
+        if not day_exw.empty:
+            agg = dict(
+                고객명=("customer_name", "first"),
+                품목수=("line_item", "nunique") if "line_item" in day_exw.columns else ("os_name", "count"),
+                총수량=("qty", "sum"),
+                총금액=("amount_krw", "sum"),
+                요청납기=("requested_date", "min"),
+                납품예정일=("delivery_date", "min"),
+                마켓=("market", "first"),
+                Status=("status", "first"),
+            )
+            if "customer_po" in day_exw.columns:
+                agg["고객PO"] = ("customer_po", "first")
+            g = day_exw.groupby("SO_ID").agg(**agg).reset_index()
+            items = []
+            for _, r in g.iterrows():
+                icon = _status_icon(r["Status"], False)
+                mkt_tag = "🇰🇷" if r["마켓"] == "국내" else "🌏"
+                po_info = f" · PO: {r['고객PO']}" if r.get("고객PO") else ""
+                req = fmt_date(r["요청납기"]) if pd.notna(r["요청납기"]) else "ASAP"
+                lines = [
+                    f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
+                    f"📅 납기 {req}",
+                ]
+                if pd.notna(r["납품예정일"]):
+                    lines.append(f"📦 납품 예정일 {fmt_date(r['납품예정일'])}")
+                items.append({
+                    "title": f"{icon} {mkt_tag} **{r['SO_ID']}**  {r['고객명']}",
+                    "lines": lines,
+                })
+            _render_cards(items, cols_per_row=2)
+        else:
+            st.info("EXW 출고 예정 건 없음")
+
+        # ── (B) 공장 픽업 (DN_해외 공장 픽업일 기준) ──
+        ship_all = load_dn_export_shipping()
+        if not ship_all.empty:
+            day_pickup = ship_all[ship_all["pickup_date"].dt.date == sel_date]
+        else:
+            day_pickup = pd.DataFrame()
+
+        st.markdown("**🚛 공장 픽업** — 해외 DN 공장 픽업 예정")
+        if not day_pickup.empty:
+            day_pickup["carrier"] = day_pickup["carrier"].fillna("")
+            so_meta = load_so()[["SO_ID", "customer_po"]].drop_duplicates(subset=["SO_ID"])
+            day_pickup = day_pickup.merge(so_meta, on="SO_ID", how="left")
+            day_pickup["customer_po"] = day_pickup["customer_po"].fillna("")
+            pk = day_pickup.groupby("DN_ID").agg(
+                고객명=("customer_name", "first"),
+                고객PO=("customer_po", "first"),
+                품목수=("item_name", "nunique"),
+                총수량=("qty", "sum"),
+                총금액=("amount_krw", "sum"),
+                공장출고일=("factory_date", "min"),
+                선적예정일=("expected_ship_date", "min"),
+                운송업체=("carrier", "first"),
+                SO_ID=("SO_ID", "first"),
+            ).reset_index()
+            items = []
+            for _, r in pk.iterrows():
+                po_info = f" · PO: {r['고객PO']}" if r["고객PO"] else ""
+                lines = [
+                    f"SO: {r['SO_ID']} · 품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
+                    f"출고 {fmt_date(r['공장출고일'])} → 선적예정 {fmt_date(r['선적예정일'])}",
+                ]
+                if r["운송업체"]:
+                    lines.append(f"🚛 운송 업체: {r['운송업체']}")
+                items.append({
+                    "title": f"🚛 **{r['DN_ID']}**  {r['고객명']}",
+                    "lines": lines,
+                })
+            _render_cards(items, cols_per_row=2)
+        else:
+            st.info("공장 픽업 예정 건 없음")
+
         d_a, d_b = st.columns(2)
 
-        # (A) 납기 예정
+        # (C) 납기 예정
         with d_a:
             st.markdown("**📦 납기 예정**")
             if not so_pending.empty:
@@ -653,7 +897,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
             else:
                 st.info("납기 예정 건 없음")
 
-        # (B) 출고 실적
+        # (D) 출고 실적
         with d_b:
             st.markdown("**🚚 출고 실적**")
             if not dn.empty:
@@ -663,7 +907,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
 
             if not day_dn.empty:
                 # SO에서 customer_po 조인
-                so_po = so[["SO_ID", "customer_po"]].drop_duplicates(subset=["SO_ID"])
+                so_po = so_pending[["SO_ID", "customer_po"]].drop_duplicates(subset=["SO_ID"])
                 day_dn = day_dn.merge(so_po, on="SO_ID", how="left")
                 day_dn["customer_po"] = day_dn["customer_po"].fillna("")
                 agg_dict = dict(
@@ -760,6 +1004,62 @@ def pg_today(market, sectors, customers, **_):
     # ── 납기 캘린더 ──
     _render_delivery_calendar(so_pending, dn)
 
+    # ── EXW 출고 지연 (EXW NOAH < 오늘 & PO 미완료) ──
+    st.subheader("🔴 EXW 출고 지연")
+    po_st = load_po_status()
+    if not so_pending.empty and not po_st.empty and "exw_noah" in so_pending.columns:
+        # PO Status가 Invoiced/Cancelled인 SO_ID → 완료 처리
+        done_so = set(
+            po_st[po_st["po_status"].str.startswith("Invoiced") | (po_st["po_status"] == "Cancelled")]
+            ["SO_ID"].unique()
+        )
+        # EXW 지난 건 중 PO가 Invoiced가 아닌 건
+        exw_overdue = so_pending[
+            so_pending["exw_noah"].notna()
+            & (so_pending["exw_noah"].dt.date < _TODAY_DATE)
+            & (~so_pending["SO_ID"].isin(done_so))
+        ].copy()
+        if not exw_overdue.empty:
+            # PO Status 조인 (SO별 대표 status)
+            po_repr = po_st[~po_st["po_status"].isin(("Cancelled",))].drop_duplicates(subset=["SO_ID"])
+            exw_overdue = exw_overdue.merge(po_repr[["SO_ID", "po_status"]], on="SO_ID", how="left")
+            exw_overdue["po_status"] = exw_overdue["po_status"].fillna("")
+
+            agg = dict(
+                고객명=("customer_name", "first"),
+                요청납기=("requested_date", "min"),
+                EXW=("exw_noah", "min"),
+                마켓=("market", "first"),
+                품목수=("line_item", "nunique"),
+                총수량=("qty", "sum"),
+                총금액=("amount_krw", "sum"),
+                PO상태=("po_status", "first"),
+            )
+            if "customer_po" in exw_overdue.columns:
+                agg["고객PO"] = ("customer_po", "first")
+            g = exw_overdue.groupby("SO_ID").agg(**agg).reset_index().sort_values("EXW")
+
+            st.caption(f"EXW NOAH 일자가 경과했으나 공장 출고가 완료되지 않은 건: **{len(g)}건**")
+            items = []
+            for _, r in g.iterrows():
+                days_late = (_TODAY_DATE - r["EXW"].date()).days
+                mkt_tag = "🇰🇷" if r["마켓"] == "국내" else "🌏"
+                po_info = f" · PO: {r['고객PO']}" if r.get("고객PO") else ""
+                req = fmt_date(r["요청납기"]) if pd.notna(r["요청납기"]) else "ASAP"
+                items.append({
+                    "title": f"🔴 {mkt_tag} **{r['SO_ID']}**  {r['고객명']}",
+                    "lines": [
+                        f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
+                        f"🏭 EXW {fmt_date(r['EXW'])} (**{days_late}일 지연**) · 납기 {req}",
+                        f"📋 PO: {r['PO상태'] if r['PO상태'] else '—'}",
+                    ],
+                })
+            _render_cards(items, cols_per_row=2)
+        else:
+            st.success("EXW 출고 지연 건 없음")
+    else:
+        st.info("데이터 없음")
+
     # ── 납기 현황 (국내/해외 탭) ──
     st.subheader("납기 현황 (미완료 건)")
     # 이번 주 + 지연 건 합산
@@ -818,10 +1118,11 @@ def pg_today(market, sectors, customers, **_):
             # 공장 출고 완료 but 선적 미완료 → CI/PL 작성 + 포워더 필요
             pending_ship = ship_df[ship_df["ship_date"].isna()].copy()
             if not pending_ship.empty:
-                st.markdown("**선적 대기** — CI/PL 작성 및 포워더 arrange 필요")
+                pending_ship["carrier"] = pending_ship["carrier"].fillna("")
+                _join_pos = lambda s: ", ".join(sorted(s[s != ""].unique())) if (s != "").any() else ""
                 ps = pending_ship.groupby("DN_ID").agg(
                     고객명=("customer_name", "first"),
-                    고객PO=("customer_po", "first"),
+                    고객PO=("customer_po", _join_pos),
                     품목수=("item_name", "nunique"),
                     총수량=("qty", "sum"),
                     총금액=("amount_krw", "sum"),
@@ -829,38 +1130,159 @@ def pg_today(market, sectors, customers, **_):
                     픽업일=("pickup_date", "min"),
                     선적예정일=("expected_ship_date", "min"),
                     BL=("bl_no", "first"),
+                    운송업체=("carrier", "first"),
                 ).reset_index().sort_values("공장출고일")
-                items = []
-                for _, r in ps.iterrows():
-                    bl = r["BL"] if pd.notna(r["BL"]) else ""
-                    po_info = f" · PO: {r['고객PO']}" if r["고객PO"] else ""
-                    lines = [
-                        f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
-                        f"출고 {fmt_date(r['공장출고일'])} → 픽업 {fmt_date(r['픽업일'])} → 선적예정 {fmt_date(r['선적예정일'])}",
-                    ]
-                    if bl:
-                        lines.append(f"B/L: {bl}")
-                    items.append({
-                        "title": f"⏳ **{r['DN_ID']}**  {r['고객명']}",
-                        "lines": lines,
-                    })
-                _render_cards(items)
+
+                ps_no_carrier = ps[ps["운송업체"] == ""]
+                ps_has_carrier = ps[ps["운송업체"] != ""]
+
+                def _build_ship_cards(df, arranging=False):
+                    items = []
+                    for _, r in df.iterrows():
+                        bl = r["BL"] if pd.notna(r["BL"]) else ""
+                        po_info = f" · PO: {r['고객PO']}" if r["고객PO"] else ""
+                        carrier_txt = r["운송업체"] if r["운송업체"] else "arranging..."
+                        lines = [
+                            f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
+                            f"출고 {fmt_date(r['공장출고일'])} → 픽업 {fmt_date(r['픽업일'])} → 선적예정 {fmt_date(r['선적예정일'])}",
+                            f"🚛 운송 업체: {carrier_txt}",
+                        ]
+                        if bl:
+                            lines.append(f"B/L: {bl}")
+                        icon = "🔴" if arranging else "⏳"
+                        items.append({
+                            "title": f"{icon} **{r['DN_ID']}**  {r['고객명']}",
+                            "lines": lines,
+                        })
+                    return items
+
+                # 포워더 미정 (먼저 표시)
+                if not ps_no_carrier.empty:
+                    st.markdown(f"**🔴 포워더 미정** — {len(ps_no_carrier)}건 arrange 필요")
+                    _render_cards(_build_ship_cards(ps_no_carrier, arranging=True))
+
+                # 포워더 확정
+                if not ps_has_carrier.empty:
+                    st.markdown(f"**⏳ 선적 대기** — {len(ps_has_carrier)}건")
+                    _render_cards(_build_ship_cards(ps_has_carrier, arranging=False))
+
+                if ps_no_carrier.empty and ps_has_carrier.empty:
+                    st.success("선적 대기 건 없음")
             else:
                 st.success("선적 대기 건 없음")
 
         else:
             st.info("해외 출고 데이터 없음")
 
-    # ── 백로그 요약 ──
-    st.subheader("백로그 요약")
-    if not backlog.empty:
-        b1, b2 = st.columns(2)
-        dom = backlog[backlog["market"] == "국내"]
-        ovs = backlog[backlog["market"] == "해외"]
-        b1.metric("국내 백로그", f"{len(dom)}건 / {fmt_krw(dom['ending_amount'].sum())}")
-        b2.metric("해외 백로그", f"{len(ovs)}건 / {fmt_krw(ovs['ending_amount'].sum())}")
-    else:
-        st.info("백로그 데이터 없음")
+    # ── 세금계산서 미발행 (국내) ──
+    if market != "해외":
+        st.subheader("🧾 세금계산서 미발행 (국내)")
+        tax_pending = load_dn_tax_pending()
+        if not tax_pending.empty:
+            # 고객/섹터 필터 적용
+            if customers:
+                tax_pending = tax_pending[tax_pending["customer_name"].isin(customers)]
+
+            if not tax_pending.empty:
+                # Aging 계산
+                tax_pending["경과일"] = (_TODAY_DATE - tax_pending["dispatch_date"].dt.date).apply(lambda d: d.days if d else 0)
+
+                def _tax_aging(d):
+                    if d <= 7:
+                        return "① 7일 이내"
+                    if d <= 14:
+                        return "② 7~14일"
+                    if d <= 30:
+                        return "③ 14~30일"
+                    return "④ 30일+"
+
+                tax_pending["aging"] = tax_pending["경과일"].apply(_tax_aging)
+
+                # DN별 집계
+                dn_agg = tax_pending.groupby("DN_ID").agg(
+                    customer_name=("customer_name", "first"),
+                    품목수=("line_item", "nunique"),
+                    amount_krw=("amount_krw", "sum"),
+                    dispatch_date=("dispatch_date", "min"),
+                    경과일=("경과일", "max"),
+                    aging=("aging", "max"),
+                ).reset_index()
+
+                # KPI 카드
+                total_pending = len(dn_agg)
+                total_amt = dn_agg["amount_krw"].sum()
+                max_days = dn_agg["경과일"].max()
+                over_30 = len(dn_agg[dn_agg["경과일"] > 30])
+
+                tc1, tc2, tc3, tc4 = st.columns(4)
+                with tc1:
+                    with st.container(border=True):
+                        st.markdown("**미발행 건수**")
+                        st.markdown(f"### {total_pending}건")
+                with tc2:
+                    with st.container(border=True):
+                        st.markdown("**미발행 금액**")
+                        st.markdown(f"### {fmt_krw(total_amt)}")
+                with tc3:
+                    with st.container(border=True):
+                        st.markdown(f"{'🔴' if max_days > 30 else '🟡'} **최장 경과**")
+                        st.markdown(f"### {max_days}일")
+                with tc4:
+                    with st.container(border=True):
+                        st.markdown(f"{'🔴' if over_30 else '🟢'} **30일 초과**")
+                        st.markdown(f"### {over_30}건")
+
+                # Aging 바 + 고객별 금액
+                tax_col1, tax_col2 = st.columns(2)
+                with tax_col1:
+                    aging_agg = dn_agg.groupby("aging").agg(
+                        건수=("DN_ID", "count"),
+                        금액=("amount_krw", "sum"),
+                    ).reset_index().sort_values("aging")
+                    aging_colors = {
+                        "① 7일 이내": C_ENDING, "② 7~14일": "#ff9800",
+                        "③ 14~30일": C_PURPLE, "④ 30일+": C_DANGER,
+                    }
+                    fig_ta = px.bar(aging_agg, x="aging", y="금액", color="aging",
+                                    labels={"aging": "출고 후 경과", "금액": "미발행 금액"},
+                                    color_discrete_map=aging_colors,
+                                    text="건수")
+                    fig_ta.update_traces(
+                        texttemplate="%{text}건",
+                        hovertemplate="<b>%{x}</b><br>₩%{y:,.0f} (%{text}건)<extra></extra>",
+                    )
+                    fig_ta.update_layout(height=350, margin=dict(t=30, b=30), showlegend=False)
+                    st.plotly_chart(fig_ta, use_container_width=True)
+
+                with tax_col2:
+                    cust_agg = dn_agg.groupby("customer_name").agg(
+                        건수=("DN_ID", "count"),
+                        금액=("amount_krw", "sum"),
+                    ).sort_values("금액", ascending=False).head(10).reset_index()
+                    cust_agg.columns = ["고객", "건수", "금액"]
+                    fig_tc = px.bar(cust_agg, y="고객", x="금액", orientation="h",
+                                    color_discrete_sequence=[C_INPUT], text="건수")
+                    fig_tc.update_traces(
+                        texttemplate="%{text}건",
+                        hovertemplate="<b>%{y}</b><br>₩%{x:,.0f} (%{text}건)<extra></extra>",
+                    )
+                    fig_tc.update_layout(height=350, margin=dict(t=30, l=150),
+                                         yaxis=dict(autorange="reversed"), showlegend=False)
+                    st.plotly_chart(fig_tc, use_container_width=True)
+
+                # 상세 (expander)
+                with st.expander(f"미발행 상세 {total_pending}건"):
+                    detail = dn_agg[["DN_ID", "customer_name", "품목수", "amount_krw", "dispatch_date", "경과일"]].copy()
+                    detail.columns = ["DN_ID", "고객명", "품목수", "금액", "출고일", "경과일"]
+                    detail = detail.sort_values("경과일", ascending=False)
+                    detail["출고일"] = detail["출고일"].apply(fmt_date)
+                    detail["금액"] = detail["금액"].apply(fmt_num)
+                    detail["경과일"] = detail["경과일"].apply(lambda d: f"{d}일")
+                    st.dataframe(detail, use_container_width=True, hide_index=True)
+            else:
+                st.success("세금계산서 미발행 건 없음 (필터 기준)")
+        else:
+            st.success("세금계산서 미발행 건 없음")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -992,21 +1414,62 @@ def pg_orders(market, sectors, customers, year, month):
         )
         st.plotly_chart(fig_btb, use_container_width=True)
 
-    # ── 일별 출고 ──
-    st.subheader(f"{kpi_label} 일별 출고 현황")
+    # ── 일별 수주/출고 현황 ──
+    st.subheader("일별 수주/출고 현황")
+
+    # 월 선택 — SO/DN에 존재하는 월 목록
+    available_months = set()
+    if not so_all.empty:
+        available_months.update(so_all["period"].dropna().unique())
     if not dn_all.empty:
-        m_dn = dn_all[dn_all["dispatch_month"] == kpi_month].copy()
-        if not m_dn.empty:
-            m_dn["day"] = m_dn["dispatch_date"].dt.strftime("%m-%d")
-            daily = m_dn.groupby("day")["amount_krw"].sum().reset_index()
-            fig3 = px.bar(daily, x="day", y="amount_krw",
-                          labels={"day": "날짜", "amount_krw": "출고금액(KRW)"})
-            fig3.update_traces(hovertemplate="<b>%{x}</b><br>출고: ₩%{y:,.0f}<extra></extra>")
-            fig3.update_layout(height=300, margin=dict(t=30, b=30),
-                               xaxis=dict(type="category"))
-            st.plotly_chart(fig3, use_container_width=True)
-        else:
-            st.info("금월 출고 데이터 없음")
+        available_months.update(dn_all["dispatch_month"].dropna().unique())
+    available_months = sorted(available_months)
+    default_idx = available_months.index(kpi_month) if kpi_month in available_months else len(available_months) - 1
+    daily_month = st.selectbox("월 선택", available_months, index=default_idx, key="daily_month")
+
+    dc1, dc2 = st.columns(2)
+
+    # 일별 수주 (PO receipt date 기준)
+    with dc1:
+        st.markdown(f"**{daily_month} 일별 수주**")
+        if not so_all.empty and "po_receipt_date" in so_all.columns:
+            so_with_date = so_all[so_all["po_receipt_date"].notna()].copy()
+            so_with_date["receipt_month"] = so_with_date["po_receipt_date"].dt.strftime("%Y-%m")
+            m_so = so_with_date[so_with_date["receipt_month"] == daily_month].copy()
+            if not m_so.empty:
+                m_so["day"] = m_so["po_receipt_date"].dt.strftime("%m-%d")
+                daily_so = m_so.groupby("day")["amount_krw"].sum().reset_index()
+                total_so_amt = daily_so["amount_krw"].sum()
+                st.metric("수주 합계", fmt_krw(total_so_amt), help=f"{m_so['SO_ID'].nunique()}건")
+                fig_so_d = px.bar(daily_so, x="day", y="amount_krw",
+                                  labels={"day": "날짜", "amount_krw": "수주금액"},
+                                  color_discrete_sequence=[C_INPUT])
+                fig_so_d.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
+                fig_so_d.update_layout(height=300, margin=dict(t=10, b=30),
+                                       xaxis=dict(type="category"))
+                st.plotly_chart(fig_so_d, use_container_width=True)
+            else:
+                st.info("수주 데이터 없음")
+
+    # 일별 출고
+    with dc2:
+        st.markdown(f"**{daily_month} 일별 출고**")
+        if not dn_all.empty:
+            m_dn = dn_all[dn_all["dispatch_month"] == daily_month].copy()
+            if not m_dn.empty:
+                m_dn["day"] = m_dn["dispatch_date"].dt.strftime("%m-%d")
+                daily_dn = m_dn.groupby("day")["amount_krw"].sum().reset_index()
+                total_dn_amt = daily_dn["amount_krw"].sum()
+                st.metric("출고 합계", fmt_krw(total_dn_amt), help=f"{m_dn['DN_ID'].nunique()}건")
+                fig_dn_d = px.bar(daily_dn, x="day", y="amount_krw",
+                                  labels={"day": "날짜", "amount_krw": "출고금액"},
+                                  color_discrete_sequence=[C_OUTPUT])
+                fig_dn_d.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
+                fig_dn_d.update_layout(height=300, margin=dict(t=10, b=30),
+                                       xaxis=dict(type="category"))
+                st.plotly_chart(fig_dn_d, use_container_width=True)
+            else:
+                st.info("출고 데이터 없음")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1133,6 +1596,250 @@ def pg_product(market, sectors, customers, year, month):
             yaxis=dict(autorange="reversed"),
         )
         st.plotly_chart(fig5, use_container_width=True)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 제품 심층 분석
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.divider()
+    st.header("제품 심층 분석")
+
+    # ── 1. 제품 ABC 세그먼트 ──
+    st.subheader("제품 세그먼트 (ABC)")
+    total_sales = by_amt.sum()
+    if total_sales > 0:
+        abc_p = by_amt.reset_index()
+        abc_p.columns = ["제품", "매출"]
+        abc_p["누적비율"] = abc_p["매출"].cumsum() / total_sales * 100
+        abc_p["등급"] = abc_p["누적비율"].apply(
+            lambda p: "A" if p <= 80 else ("B" if p <= 95 else "C")
+        )
+        grade_p = abc_p.groupby("등급").agg(제품수=("제품", "count"), 매출합=("매출", "sum")).reset_index()
+        grade_p["매출비중"] = (grade_p["매출합"] / total_sales * 100).round(1)
+
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            colors_abc = {"A": C_INPUT, "B": "#ff9800", "C": "#999999"}
+            fig_pabc = px.bar(grade_p, x="등급", y="제품수", color="등급",
+                              text="제품수", color_discrete_map=colors_abc)
+            fig_pabc.update_traces(texttemplate="%{text}종", textposition="outside",
+                                   hovertemplate="<b>%{x}등급</b><br>%{y}종<extra></extra>")
+            fig_pabc.update_layout(height=300, margin=dict(t=30, b=30), showlegend=False)
+            st.plotly_chart(fig_pabc, use_container_width=True)
+        with pc2:
+            for _, r in grade_p.iterrows():
+                st.metric(f"{r['등급']}등급", f"{r['제품수']}종 · 매출 {r['매출비중']}%")
+
+    # ── 2. 제품 성장률 ──
+    st.subheader("제품 성장률")
+    if so["period"].nunique() >= 2:
+        periods = sorted(so["period"].unique())
+        latest_p = periods[-1]
+        prev_p = periods[-2]
+        cur_p = so[so["period"] == latest_p].groupby("os_name")["amount_krw"].sum()
+        prev_pp = so[so["period"] == prev_p].groupby("os_name")["amount_krw"].sum()
+        growth_p = pd.DataFrame({"현재": cur_p, "이전": prev_pp}).fillna(0)
+        growth_p["증감"] = growth_p["현재"] - growth_p["이전"]
+        prev_safe = growth_p["이전"].where(growth_p["이전"] != 0)
+        growth_p["성장률"] = (growth_p["증감"] / prev_safe * 100).round(1)
+        growth_p = growth_p.reset_index().rename(columns={"os_name": "제품"})
+
+        gp1, gp2 = st.columns(2)
+        with gp1:
+            st.markdown(f"**성장 Top 5** ({prev_p} → {latest_p})")
+            top_gp = growth_p.dropna(subset=["성장률"]).nlargest(5, "성장률")
+            if not top_gp.empty:
+                fig_gp = px.bar(top_gp, y="제품", x="성장률", orientation="h",
+                                color_discrete_sequence=[C_ENDING])
+                fig_gp.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f}%<extra></extra>")
+                fig_gp.update_layout(height=250, margin=dict(t=10, l=150),
+                                     yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_gp, use_container_width=True)
+        with gp2:
+            st.markdown(f"**감소 Top 5** ({prev_p} → {latest_p})")
+            bot_gp = growth_p.dropna(subset=["성장률"]).nsmallest(5, "성장률")
+            bot_gp = bot_gp[bot_gp["성장률"] < 0]
+            if not bot_gp.empty:
+                fig_gpd = px.bar(bot_gp, y="제품", x="성장률", orientation="h",
+                                 color_discrete_sequence=[C_DANGER])
+                fig_gpd.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f}%<extra></extra>")
+                fig_gpd.update_layout(height=250, margin=dict(t=10, l=150),
+                                      yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_gpd, use_container_width=True)
+            else:
+                st.info("감소 제품 없음")
+
+    # ── 3. 제품 × 고객 매트릭스 ──
+    st.subheader("제품 × 고객 매트릭스")
+    top_prods_hm = by_amt.head(10).index.tolist()
+    top_custs_hm = so.groupby("customer_name")["amount_krw"].sum().nlargest(10).index.tolist()
+    sub_hm = so[so["os_name"].isin(top_prods_hm) & so["customer_name"].isin(top_custs_hm)]
+    if not sub_hm.empty:
+        pivot_hm = sub_hm.pivot_table(
+            index="customer_name", columns="os_name",
+            values="amount_krw", aggfunc="sum", fill_value=0,
+        )
+        hover_hm = pivot_hm.map(lambda v: fmt_krw(v) if v > 0 else "-")
+        fig_hm = go.Figure(data=go.Heatmap(
+            z=pivot_hm.values,
+            x=pivot_hm.columns.tolist(),
+            y=pivot_hm.index.tolist(),
+            text=hover_hm.values,
+            texttemplate="%{text}",
+            hovertemplate="<b>%{y}</b> × %{x}<br>₩%{z:,.0f}<extra></extra>",
+            colorscale="Blues",
+        ))
+        fig_hm.update_layout(
+            height=max(300, 50 + len(pivot_hm) * 35),
+            margin=dict(t=20, b=30, l=150),
+            xaxis=dict(title="제품", side="top"),
+            yaxis=dict(title="고객", autorange="reversed"),
+        )
+        st.plotly_chart(fig_hm, use_container_width=True)
+        st.caption("빈 칸(0원) = Cross-sell 기회 — 해당 고객에 해당 제품을 제안해 볼 수 있습니다")
+
+    # ── 4. 제품별 납기 준수율 (OTD) ──
+    st.subheader("제품별 납기 준수율 (OTD)")
+    dn_raw = load_dn()
+    dn_ej = enrich_dn(dn_raw, load_so())
+    dn_f = filt(dn_ej, market, sectors, customers, period_col=None)
+    so_del = so[["SO_ID", "line_item", "delivery_date"]].drop_duplicates()
+    if not dn_f.empty and not so_del.empty:
+        otd_raw = dn_f.merge(so_del, on=["SO_ID", "line_item"], how="left")
+        otd_raw = otd_raw[otd_raw["delivery_date"].notna() & otd_raw["dispatch_date"].notna()]
+        if not otd_raw.empty and "os_name" in otd_raw.columns:
+            otd_raw["on_time"] = otd_raw["dispatch_date"] <= otd_raw["delivery_date"]
+            otd_prod = otd_raw.groupby("os_name").agg(
+                총건수=("on_time", "count"),
+                정시건수=("on_time", "sum"),
+            ).reset_index()
+            otd_prod["OTD"] = (otd_prod["정시건수"] / otd_prod["총건수"] * 100).round(1)
+            otd_prod = otd_prod.rename(columns={"os_name": "제품"})
+            otd_prod = otd_prod[otd_prod["총건수"] >= 2].sort_values("OTD")
+
+            if not otd_prod.empty:
+                fig_otd_p = px.bar(otd_prod.head(15), y="제품", x="OTD", orientation="h",
+                                   color="OTD",
+                                   color_continuous_scale=["#d62728", "#ff9800", "#2ca02c"],
+                                   range_color=[0, 100])
+                fig_otd_p.update_traces(hovertemplate="<b>%{y}</b><br>OTD: %{x:.1f}%<extra></extra>")
+                fig_otd_p.update_layout(height=max(300, len(otd_prod.head(15)) * 28),
+                                        margin=dict(t=30, l=150),
+                                        yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_otd_p, use_container_width=True)
+                st.caption("OTD 낮은 제품 = 생산 병목 가능성 — 공정 리드타임 점검 필요")
+
+    # ── 5. 제품별 수익성 ──
+    st.subheader("제품별 수익성")
+    po_data = load_po_detail()
+    if not so.empty and not po_data.empty:
+        margin_p = calc_margin(so, po_data)
+        costed_p = margin_p[margin_p["has_cost"]]
+        if not costed_p.empty:
+            prod_margin = costed_p.groupby("os_name").agg(
+                매출=("amount_krw", "sum"),
+                원가=("po_total_ico", "sum"),
+            ).reset_index()
+            prod_margin["마진"] = prod_margin["매출"] - prod_margin["원가"]
+            sales_safe = prod_margin["매출"].where(prod_margin["매출"] != 0)
+            prod_margin["마진율"] = (prod_margin["마진"] / sales_safe * 100).round(1)
+            prod_margin = prod_margin.rename(columns={"os_name": "제품"})
+
+            pm1, pm2 = st.columns(2)
+            with pm1:
+                st.markdown("**고매출-저마진 제품** (마진율 < 20%)")
+                low_mp = prod_margin[prod_margin["마진율"] < 20].sort_values("매출", ascending=False).head(10)
+                if not low_mp.empty:
+                    fig_lmp = px.bar(low_mp, y="제품", x="마진율", orientation="h",
+                                     color="마진율",
+                                     color_continuous_scale=["#d62728", "#ff9800", "#2ca02c"],
+                                     range_color=[0, 50])
+                    fig_lmp.update_traces(hovertemplate="<b>%{y}</b><br>마진율: %{x:.1f}%<extra></extra>")
+                    fig_lmp.update_layout(height=300, margin=dict(t=10, l=150),
+                                          yaxis=dict(autorange="reversed"))
+                    st.plotly_chart(fig_lmp, use_container_width=True)
+                else:
+                    st.success("저마진 제품 없음")
+            with pm2:
+                st.markdown("**고마진 제품 Top 10**")
+                top_mp = prod_margin.nlargest(10, "마진")
+                fig_tmp = px.bar(top_mp, y="제품", x="마진", orientation="h",
+                                 color_discrete_sequence=[C_ENDING])
+                fig_tmp.update_traces(hovertemplate="<b>%{y}</b><br>마진: ₩%{x:,.0f}<extra></extra>")
+                fig_tmp.update_layout(height=300, margin=dict(t=10, l=150),
+                                      yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_tmp, use_container_width=True)
+
+    # ── 6. 제품 집중도 ──
+    st.subheader("제품 집중도")
+    if total_sales > 0:
+        top1_pct = by_amt.iloc[0] / total_sales * 100 if len(by_amt) >= 1 else 0
+        top3_pct = by_amt.head(3).sum() / total_sales * 100 if len(by_amt) >= 1 else 0
+        # HHI (Herfindahl-Hirschman Index)
+        shares = by_amt / total_sales * 100
+        hhi = (shares ** 2).sum()
+
+        cc1, cc2, cc3 = st.columns(3)
+        cc1.metric("Top 1 비중", f"{top1_pct:.1f}%", help=by_amt.index[0] if len(by_amt) else "")
+        cc2.metric("Top 3 비중", f"{top3_pct:.1f}%")
+        cc3.metric("HHI 지수", f"{hhi:.0f}",
+                    help="< 1500: 분산 · 1500~2500: 보통 · > 2500: 집중")
+
+    # ── 7. 신규 제품 추이 ──
+    st.subheader("신규 제품 추이")
+    so_all_raw = filt(load_so(), market, sectors, customers)
+    if not so_all_raw.empty:
+        first_prod = so_all_raw.groupby("os_name")["period"].min().reset_index()
+        first_prod.columns = ["제품", "첫수주월"]
+        monthly_new_p = first_prod.groupby("첫수주월").size().reset_index(name="신규제품수")
+        monthly_active_p = so_all_raw.groupby("period")["os_name"].nunique().reset_index()
+        monthly_active_p.columns = ["period", "활성제품수"]
+        merged_np = monthly_active_p.merge(monthly_new_p, left_on="period", right_on="첫수주월", how="left").fillna(0)
+        # 필터 기간과 일치하도록 표시 기간 한정
+        display_periods = set(so["period"].unique())
+        merged_np = merged_np[merged_np["period"].isin(display_periods)]
+
+        fig_np = go.Figure()
+        fig_np.add_trace(go.Bar(x=merged_np["period"], y=merged_np["신규제품수"],
+                                name="신규 제품", marker_color=C_ENDING,
+                                hovertemplate="<b>%{x}</b><br>신규: %{y}<extra></extra>"))
+        fig_np.add_trace(go.Scatter(x=merged_np["period"], y=merged_np["활성제품수"],
+                                    name="활성 제품 수", mode="lines+markers",
+                                    line=dict(color=C_INPUT, width=2),
+                                    hovertemplate="<b>%{x}</b><br>활성: %{y}<extra></extra>"))
+        fig_np.update_layout(height=300, margin=dict(t=30, b=30),
+                             xaxis=dict(type="category", title="월"),
+                             yaxis=dict(title="제품 수"))
+        st.plotly_chart(fig_np, use_container_width=True)
+
+    # ── 8. 제품별 고객 수 ──
+    st.subheader("제품별 고객 수")
+    if not so.empty:
+        prod_cust = so.groupby("os_name").agg(
+            고객수=("customer_name", "nunique"),
+            매출=("amount_krw", "sum"),
+        ).reset_index().rename(columns={"os_name": "제품"})
+
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            single_cust = prod_cust[prod_cust["고객수"] == 1].sort_values("매출", ascending=False)
+            st.markdown(f"**단일 고객 의존 제품: {len(single_cust)}종**")
+            if not single_cust.empty:
+                # 해당 고객명 추가
+                single_ids = single_cust["제품"].tolist()
+                sc_detail = so[so["os_name"].isin(single_ids)].groupby("os_name").agg(
+                    고객=("customer_name", "first"), 매출=("amount_krw", "sum"),
+                ).reset_index().rename(columns={"os_name": "제품"}).sort_values("매출", ascending=False)
+                sc_detail["매출"] = sc_detail["매출"].apply(fmt_krw)
+                st.dataframe(sc_detail.head(10), use_container_width=True, hide_index=True)
+        with pc2:
+            top_spread = prod_cust.nlargest(15, "고객수")
+            fig_pcs = px.bar(top_spread, y="제품", x="고객수", orientation="h",
+                             color_discrete_sequence=[C_INPUT])
+            fig_pcs.update_traces(hovertemplate="<b>%{y}</b><br>%{x}개사<extra></extra>")
+            fig_pcs.update_layout(height=max(300, len(top_spread) * 28),
+                                  margin=dict(t=30, l=150),
+                                  yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_pcs, use_container_width=True)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1336,10 +2043,10 @@ def pg_customer(market, sectors, customers, year, month):
 
     # Pareto (상위 20)
     st.subheader("고객 집중도 (Pareto)")
+    _all_cust_total = by_cust.sum()
     pareto = by_cust.head(20).reset_index()
     pareto.columns = ["고객", "매출"]
-    _pareto_total = pareto["매출"].sum()
-    pareto["누적비율"] = pareto["매출"].cumsum() / _pareto_total * 100 if _pareto_total else 0
+    pareto["누적비율"] = pareto["매출"].cumsum() / _all_cust_total * 100 if _all_cust_total else 0
     fig2 = go.Figure()
     fig2.add_trace(go.Bar(x=pareto["고객"], y=pareto["매출"],
                           name="매출", marker_color=C_INPUT,
@@ -1394,12 +2101,799 @@ def pg_customer(market, sectors, customers, year, month):
                            xaxis=dict(type="category"))
         st.plotly_chart(fig3, use_container_width=True)
 
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # 고객 심층 분석
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.divider()
+    st.header("고객 심층 분석")
+
+    # ── 1. ABC 세그먼트 ──
+    st.subheader("고객 세그먼트 (ABC)")
+    abc = by_cust.reset_index()
+    abc.columns = ["고객", "매출"]
+    total_sales = abc["매출"].sum()
+    if total_sales > 0:
+        abc["누적비율"] = abc["매출"].cumsum() / total_sales * 100
+        abc["등급"] = abc["누적비율"].apply(
+            lambda p: "A" if p <= 80 else ("B" if p <= 95 else "C")
+        )
+        grade_summary = abc.groupby("등급").agg(고객수=("고객", "count"), 매출합=("매출", "sum")).reset_index()
+        grade_summary["매출비중"] = (grade_summary["매출합"] / total_sales * 100).round(1)
+
+        gc1, gc2 = st.columns(2)
+        with gc1:
+            colors_abc = {"A": C_INPUT, "B": "#ff9800", "C": "#999999"}
+            fig_abc = px.bar(grade_summary, x="등급", y="고객수", color="등급",
+                             text="고객수", color_discrete_map=colors_abc)
+            fig_abc.update_traces(texttemplate="%{text}개사", textposition="outside",
+                                  hovertemplate="<b>%{x}등급</b><br>%{y}개사<extra></extra>")
+            fig_abc.update_layout(height=300, margin=dict(t=30, b=30), showlegend=False)
+            st.plotly_chart(fig_abc, use_container_width=True)
+        with gc2:
+            for _, r in grade_summary.iterrows():
+                st.metric(f"{r['등급']}등급", f"{r['고객수']}개사 · 매출 {r['매출비중']}%")
+
+        with st.expander("ABC 상세"):
+            abc_tbl = abc.copy()
+            abc_tbl["매출"] = abc_tbl["매출"].apply(fmt_krw)
+            st.dataframe(abc_tbl[["고객", "매출", "등급"]], use_container_width=True, hide_index=True)
+
+    # ── 2. 고객 성장률 ──
+    st.subheader("고객 성장률")
+    if not so.empty and so["period"].nunique() >= 2:
+        periods = sorted(so["period"].unique())
+        # 최근 2개 기간 비교
+        if len(periods) >= 2:
+            latest_p = periods[-1]
+            prev_p = periods[-2]
+            cur = so[so["period"] == latest_p].groupby("customer_name")["amount_krw"].sum()
+            prev = so[so["period"] == prev_p].groupby("customer_name")["amount_krw"].sum()
+            growth = pd.DataFrame({"현재": cur, "이전": prev}).fillna(0)
+            growth["증감"] = growth["현재"] - growth["이전"]
+            prev_safe = growth["이전"].where(growth["이전"] != 0)
+            growth["성장률"] = (growth["증감"] / prev_safe * 100).round(1)
+            growth = growth.reset_index().rename(columns={"customer_name": "고객"})
+
+            gr1, gr2 = st.columns(2)
+            with gr1:
+                st.markdown(f"**성장 Top 5** ({prev_p} → {latest_p})")
+                top_growth = growth.dropna(subset=["성장률"]).nlargest(5, "성장률")
+                if not top_growth.empty:
+                    fig_gr = px.bar(top_growth, y="고객", x="성장률", orientation="h",
+                                    color_discrete_sequence=[C_ENDING])
+                    fig_gr.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f}%<extra></extra>")
+                    fig_gr.update_layout(height=250, margin=dict(t=10, l=150),
+                                         yaxis=dict(autorange="reversed"))
+                    st.plotly_chart(fig_gr, use_container_width=True)
+            with gr2:
+                st.markdown(f"**감소 Top 5** ({prev_p} → {latest_p})")
+                bot_growth = growth.dropna(subset=["성장률"]).nsmallest(5, "성장률")
+                bot_growth = bot_growth[bot_growth["성장률"] < 0]
+                if not bot_growth.empty:
+                    fig_gd = px.bar(bot_growth, y="고객", x="성장률", orientation="h",
+                                    color_discrete_sequence=[C_DANGER])
+                    fig_gd.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f}%<extra></extra>")
+                    fig_gd.update_layout(height=250, margin=dict(t=10, l=150),
+                                         yaxis=dict(autorange="reversed"))
+                    st.plotly_chart(fig_gd, use_container_width=True)
+                else:
+                    st.info("감소 고객 없음")
+
+    # ── 3. 신규 vs 기존 고객 ──
+    st.subheader("신규 vs 기존 고객")
+    so_all_raw = filt(load_so(), market, sectors, customers)
+    if not so_all_raw.empty:
+        first_order = so_all_raw.groupby("customer_name")["period"].min().reset_index()
+        first_order.columns = ["고객", "첫수주월"]
+        monthly_new = first_order.groupby("첫수주월").size().reset_index(name="신규고객수")
+        # 월별 전체 활성 고객 수
+        monthly_active = so_all_raw.groupby("period")["customer_name"].nunique().reset_index()
+        monthly_active.columns = ["period", "활성고객수"]
+        merged_nc = monthly_active.merge(monthly_new, left_on="period", right_on="첫수주월", how="left").fillna(0)
+        merged_nc["기존고객수"] = merged_nc["활성고객수"] - merged_nc["신규고객수"]
+        # 필터 기간과 일치하도록 표시 기간 한정
+        display_periods = set(so["period"].unique())
+        merged_nc = merged_nc[merged_nc["period"].isin(display_periods)]
+
+        fig_nc = go.Figure()
+        fig_nc.add_trace(go.Bar(x=merged_nc["period"], y=merged_nc["기존고객수"],
+                                name="기존 고객", marker_color=C_INPUT,
+                                hovertemplate="<b>%{x}</b><br>기존: %{y}<extra></extra>"))
+        fig_nc.add_trace(go.Bar(x=merged_nc["period"], y=merged_nc["신규고객수"],
+                                name="신규 고객", marker_color=C_ENDING,
+                                hovertemplate="<b>%{x}</b><br>신규: %{y}<extra></extra>"))
+        fig_nc.update_layout(barmode="stack", height=300, margin=dict(t=30, b=30),
+                             xaxis=dict(type="category", title="월"),
+                             yaxis=dict(title="고객 수"))
+        st.plotly_chart(fig_nc, use_container_width=True)
+
+    # ── 4. 고객 리텐션 ──
+    st.subheader("고객 리텐션")
+    if not so_all_raw.empty and so_all_raw["period"].nunique() >= 3:
+        all_periods = sorted(so_all_raw["period"].unique())
+        retention_data = []
+        for i, p in enumerate(all_periods):
+            if i < 1:
+                continue
+            prev_custs = set(so_all_raw[so_all_raw["period"] < p]["customer_name"].unique())
+            if not prev_custs:
+                continue
+            curr_custs = set(so_all_raw[so_all_raw["period"] == p]["customer_name"].unique())
+            retained = prev_custs & curr_custs
+            retention_rate = len(retained) / len(prev_custs) * 100 if prev_custs else 0
+            retention_data.append({"월": p, "리텐션율": round(retention_rate, 1),
+                                   "활성": len(curr_custs), "재구매": len(retained)})
+        if retention_data:
+            ret_df = pd.DataFrame(retention_data)
+            # 필터 기간과 일치하도록 표시 기간 한정
+            ret_df = ret_df[ret_df["월"].isin(display_periods)]
+            if not ret_df.empty:
+                fig_ret = go.Figure()
+                fig_ret.add_trace(go.Scatter(
+                    x=ret_df["월"], y=ret_df["리텐션율"], mode="lines+markers",
+                    line=dict(color=C_PURPLE, width=2),
+                    hovertemplate="<b>%{x}</b><br>리텐션: %{y:.1f}%<extra></extra>",
+                ))
+                fig_ret.update_layout(height=300, margin=dict(t=30, b=30),
+                                      xaxis=dict(type="category"),
+                                      yaxis=dict(title="리텐션율 (%)", range=[0, 105]))
+                st.plotly_chart(fig_ret, use_container_width=True)
+                st.caption("리텐션율 = 이전까지 수주 이력이 있는 고객 중 해당 월에도 수주한 비율")
+
+    # ── 5. RFM 스코어 ──
+    st.subheader("RFM 분석")
+    if not so.empty:
+        # Recency 기준: 데이터 최신월 (DB 동기화 지연/과거 필터 대응)
+        ref_period = so["period"].max()
+        rfm = so.groupby("customer_name").agg(
+            최근수주=("period", "max"),
+            주문횟수=("SO_ID", "nunique"),
+            총금액=("amount_krw", "sum"),
+        ).reset_index()
+        rfm.columns = ["고객", "최근수주", "Frequency", "Monetary"]
+        # Recency: 최근 수주로부터 몇 개월
+        rfm["Recency"] = rfm["최근수주"].apply(
+            lambda p: (pd.Timestamp(ref_period + "-01") - pd.Timestamp(p + "-01")).days // 30
+        )
+        # 점수 (각 지표를 4분위로 스코어링, 고객 4명 미만 시 분위 수 축소)
+        n_customers = len(rfm)
+        q = min(4, n_customers) if n_customers >= 2 else 0
+        if q >= 2:
+            labels = list(range(1, q + 1))
+            for col, ascending in [("Recency", True), ("Frequency", False), ("Monetary", False)]:
+                rfm[f"{col}_점수"] = pd.qcut(rfm[col].rank(method="first"), q=q, labels=labels).astype(int)
+                if ascending:
+                    rfm[f"{col}_점수"] = (q + 1) - rfm[f"{col}_점수"]
+        else:
+            for col in ["Recency", "Frequency", "Monetary"]:
+                rfm[f"{col}_점수"] = 2  # 고객 1명이면 중간 점수
+        rfm["RFM점수"] = rfm["Recency_점수"] + rfm["Frequency_점수"] + rfm["Monetary_점수"]
+        # 등급 경계를 q에 비례하여 산출 (q=4 기준 10/7/4 → 83%/58%/33%)
+        _max = q * 3 if q >= 2 else 6
+        _vip_th = round(_max * 10 / 12)
+        _good_th = round(_max * 7 / 12)
+        _normal_th = round(_max * 4 / 12)
+        rfm["등급"] = rfm["RFM점수"].apply(
+            lambda s: "VIP" if s >= _vip_th else ("우수" if s >= _good_th else ("보통" if s >= _normal_th else "관심"))
+        )
+
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            rfm_summary = rfm["등급"].value_counts().reindex(["VIP", "우수", "보통", "관심"]).fillna(0).astype(int)
+            rfm_colors = {"VIP": C_INPUT, "우수": C_ENDING, "보통": "#ff9800", "관심": C_DANGER}
+            fig_rfm = px.bar(x=rfm_summary.index, y=rfm_summary.values, color=rfm_summary.index,
+                             color_discrete_map=rfm_colors, text=rfm_summary.values)
+            fig_rfm.update_traces(texttemplate="%{text}개사", textposition="outside",
+                                   hovertemplate="<b>%{x}</b><br>%{y}개사<extra></extra>")
+            fig_rfm.update_layout(height=300, margin=dict(t=30, b=30), showlegend=False,
+                                  xaxis=dict(title=""), yaxis=dict(title="고객 수"))
+            st.plotly_chart(fig_rfm, use_container_width=True)
+        with rc2:
+            st.markdown(
+                f"**RFM 등급 기준** (만점 {_max}점)\n"
+                f"- **VIP** ({_vip_th}점 이상): 최근 구매, 자주, 고액\n"
+                f"- **우수** ({_good_th}점 이상): 양호한 고객\n"
+                f"- **보통** ({_normal_th}점 이상): 평균적 고객\n"
+                f"- **관심** ({_normal_th}점 미만): 이탈 위험"
+            )
+        with st.expander("RFM 상세"):
+            rfm_tbl = rfm[["고객", "최근수주", "Recency", "Frequency", "Monetary", "RFM점수", "등급"]].copy()
+            rfm_tbl = rfm_tbl.sort_values("RFM점수", ascending=False)
+            rfm_tbl["Monetary"] = rfm_tbl["Monetary"].apply(fmt_krw)
+            rfm_tbl.rename(columns={"Recency": "최근(개월)", "Frequency": "주문횟수"}, inplace=True)
+            st.dataframe(rfm_tbl, use_container_width=True, hide_index=True)
+
+    # ── 6. 고객별 제품 다양성 ──
+    st.subheader("고객별 제품 다양성")
+    if not so.empty:
+        diversity = so.groupby("customer_name").agg(
+            제품종류=("os_name", "nunique"),
+            매출=("amount_krw", "sum"),
+        ).reset_index().rename(columns={"customer_name": "고객"})
+        diversity = diversity.sort_values("매출", ascending=False)
+
+        dv1, dv2 = st.columns(2)
+        with dv1:
+            single = diversity[diversity["제품종류"] == 1]
+            st.metric("단일 제품 고객", f"{len(single)}개사",
+                      help="1가지 제품만 구매 → Cross-sell 기회")
+            multi = diversity[diversity["제품종류"] >= 3]
+            st.metric("다품목 고객 (3+)", f"{len(multi)}개사")
+        with dv2:
+            fig_dv = px.scatter(diversity.head(30), x="매출", y="제품종류",
+                                text="고객", size="매출",
+                                labels={"매출": "매출(KRW)", "제품종류": "제품 종류 수"},
+                                color_discrete_sequence=[C_INPUT])
+            fig_dv.update_traces(textposition="top center", textfont_size=9,
+                                  hovertemplate="<b>%{text}</b><br>매출: ₩%{x:,.0f}<br>제품: %{y}종<extra></extra>")
+            fig_dv.update_layout(height=350, margin=dict(t=30, b=30))
+            st.plotly_chart(fig_dv, use_container_width=True)
+
+    # ── 7. 고객별 납기 준수율 ──
+    st.subheader("고객별 납기 준수율 (OTD)")
+    dn_raw = load_dn()
+    dn_ej = enrich_dn(dn_raw, load_so())
+    dn_f = filt(dn_ej, market, sectors, customers, period_col=None)
+    so_del = so[["SO_ID", "line_item", "delivery_date"]].drop_duplicates()
+    if not dn_f.empty and not so_del.empty:
+        otd_raw = dn_f.merge(so_del, on=["SO_ID", "line_item"], how="left")
+        otd_raw = otd_raw[otd_raw["delivery_date"].notna() & otd_raw["dispatch_date"].notna()]
+        if not otd_raw.empty:
+            otd_raw["on_time"] = otd_raw["dispatch_date"] <= otd_raw["delivery_date"]
+            otd_cust = otd_raw.groupby("customer_name").agg(
+                총건수=("on_time", "count"),
+                정시건수=("on_time", "sum"),
+            ).reset_index()
+            otd_cust["OTD"] = (otd_cust["정시건수"] / otd_cust["총건수"] * 100).round(1)
+            otd_cust = otd_cust.rename(columns={"customer_name": "고객"})
+            otd_cust = otd_cust[otd_cust["총건수"] >= 2].sort_values("OTD")  # 2건 이상만
+
+            if not otd_cust.empty:
+                avg_otd = otd_cust["정시건수"].sum() / otd_cust["총건수"].sum() * 100
+                st.metric("전체 OTD", f"{avg_otd:.1f}%", help="약속 납기 이내 출고 비율")
+
+                fig_otd = px.bar(otd_cust.head(20), y="고객", x="OTD", orientation="h",
+                                 color="OTD",
+                                 color_continuous_scale=["#d62728", "#ff9800", "#2ca02c"],
+                                 range_color=[0, 100])
+                fig_otd.update_traces(hovertemplate="<b>%{y}</b><br>OTD: %{x:.1f}%<extra></extra>")
+                fig_otd.update_layout(height=max(300, len(otd_cust.head(20)) * 28),
+                                      margin=dict(t=30, l=150),
+                                      yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_otd, use_container_width=True)
+            else:
+                st.info("OTD 분석 대상 없음")
+        else:
+            st.info("납기/출고 데이터 부족")
+
+    # ── 8. 고객 수익성 ──
+    st.subheader("고객 수익성")
+    po_data = load_po_detail()
+    if not so.empty and not po_data.empty:
+        margin = calc_margin(so, po_data)
+        costed = margin[margin["has_cost"]]
+        if not costed.empty:
+            cust_margin = costed.groupby("customer_name").agg(
+                매출=("amount_krw", "sum"),
+                원가=("po_total_ico", "sum"),
+            ).reset_index()
+            cust_margin["마진"] = cust_margin["매출"] - cust_margin["원가"]
+            sales_safe = cust_margin["매출"].where(cust_margin["매출"] != 0)
+            cust_margin["마진율"] = (cust_margin["마진"] / sales_safe * 100).round(1)
+            cust_margin = cust_margin.rename(columns={"customer_name": "고객"})
+            cust_margin = cust_margin.sort_values("매출", ascending=False)
+
+            cm1, cm2 = st.columns(2)
+            with cm1:
+                st.markdown("**고매출-저마진 고객** (마진율 < 20%)")
+                low = cust_margin[cust_margin["마진율"] < 20].head(10)
+                if not low.empty:
+                    fig_lm = px.bar(low, y="고객", x="마진율", orientation="h",
+                                    color="마진율",
+                                    color_continuous_scale=["#d62728", "#ff9800", "#2ca02c"],
+                                    range_color=[0, 50])
+                    fig_lm.update_traces(hovertemplate="<b>%{y}</b><br>마진율: %{x:.1f}%<extra></extra>")
+                    fig_lm.update_layout(height=300, margin=dict(t=10, l=150),
+                                         yaxis=dict(autorange="reversed"))
+                    st.plotly_chart(fig_lm, use_container_width=True)
+                else:
+                    st.success("저마진 고객 없음")
+            with cm2:
+                st.markdown("**고마진 고객 Top 10**")
+                top_m = cust_margin.nlargest(10, "마진")
+                fig_tm = px.bar(top_m, y="고객", x="마진", orientation="h",
+                                color_discrete_sequence=[C_ENDING])
+                fig_tm.update_traces(hovertemplate="<b>%{y}</b><br>마진: ₩%{x:,.0f}<extra></extra>")
+                fig_tm.update_layout(height=300, margin=dict(t=10, l=150),
+                                     yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_tm, use_container_width=True)
+        else:
+            st.info("원가 데이터 없음")
+
 
 # ═══════════════════════════════════════════════════════════════
-# Page 6: Order Book (백로그)
+# 커버리지 / 마진 순수 계산 함수 (테스트 가능)
+# ═══════════════════════════════════════════════════════════════
+def calc_coverage(so: pd.DataFrame, po: pd.DataFrame,
+                  po_all_status: pd.DataFrame | None = None) -> pd.DataFrame:
+    """SO_ID 단위로 SO↔PO 커버리지 계산. 순수 함수.
+
+    커버리지 판정: PO 존재 여부 + PO Status 기반 (수량 비교 아님).
+    PO line_item은 SO와 1:1 대응하지 않으므로 (본체+부속 합산 발주 등) 수량 비교 불가.
+
+    - 미발주: 해당 SO에 PO가 없음
+    - 발주 진행중: PO 존재, Open/Sent 포함
+    - 발주 확정: PO 존재, 모두 Confirmed/Invoiced
+    - 발주취소: 모든 PO가 Cancelled (po_all_status로 판별, 결과에서 제외)
+    """
+    if so.empty:
+        return pd.DataFrame()
+    # 발주취소 SO 제외 (모든 PO가 Cancelled인 SO)
+    if po_all_status is not None and not po_all_status.empty:
+        cancelled_only = (
+            po_all_status.groupby("SO_ID")["po_status"]
+            .apply(lambda s: s.str.startswith("Cancelled").all() | (s == "Cancelled").all())
+            .reset_index()
+        )
+        cancelled_so_ids = set(cancelled_only[cancelled_only["po_status"]]["SO_ID"])
+        if cancelled_so_ids:
+            so = so[~so["SO_ID"].isin(cancelled_so_ids)]
+    if so.empty:
+        return pd.DataFrame()
+    # SO를 SO_ID 단위로 집계
+    so_agg = so.groupby("SO_ID").agg(
+        customer_name=("customer_name", "first"),
+        os_name=("os_name", lambda x: ", ".join(sorted(x.unique()))),
+        sector=("sector", "first"),
+        market=("market", "first"),
+        period=("period", "first"),
+        qty=("qty", "sum"),
+        amount_krw=("amount_krw", "sum"),
+        delivery_date=("delivery_date", "min"),
+        status=("status", "first"),
+    ).reset_index()
+    # PO 조인 (PO는 이미 SO_ID 단위, Cancelled 제외됨)
+    if not po.empty:
+        po_dedup = po.groupby("SO_ID").agg(
+            po_qty=("po_qty", "sum"),
+            po_total_ico=("po_total_ico", "sum"),
+            po_statuses=("po_statuses", lambda x: ",".join(sorted(set(",".join(x).split(",")) - {""}))),
+        ).reset_index()
+        merged = so_agg.merge(po_dedup, on="SO_ID", how="left")
+    else:
+        merged = so_agg.copy()
+    merged["po_qty"] = merged["po_qty"].fillna(0) if "po_qty" in merged.columns else 0
+    merged["po_total_ico"] = merged["po_total_ico"].fillna(0) if "po_total_ico" in merged.columns else 0
+    merged["po_statuses"] = merged["po_statuses"].fillna("") if "po_statuses" in merged.columns else ""
+    # 커버리지 판정: PO 존재 + Status 기반
+    def _coverage_status(row):
+        # Open = PO 생성만 됨, 공장 발주 전 → 미발주
+        # Sent = 공장에 발주함 → 발주 진행중
+        # Confirmed/Invoiced = 공장 확인/출고 → 발주 확정
+        if not row["po_statuses"]:
+            return "미발주"
+        statuses = {s.strip() for s in row["po_statuses"].split(",") if s.strip()}
+        has_open = "Open" in statuses
+        has_ordered = any(
+            s.startswith("Sent") or s.startswith("Confirmed") or s.startswith("Invoiced")
+            for s in statuses
+        )
+        if has_open and has_ordered:
+            return "부분 발주"  # Open + 발주된 PO 혼합
+        if has_open:
+            return "미발주"    # Open만
+        all_confirmed = all(
+            s.startswith("Confirmed") or s.startswith("Invoiced") for s in statuses
+        )
+        return "발주 확정" if all_confirmed else "발주 진행중"
+    merged["coverage_status"] = merged.apply(_coverage_status, axis=1)
+    return merged
+
+
+def calc_margin(so: pd.DataFrame, po: pd.DataFrame) -> pd.DataFrame:
+    """SO_ID 단위로 SO↔PO 마진 계산. 순수 함수.
+
+    반환값은 SO_ID별 1행.
+    """
+    if so.empty:
+        return pd.DataFrame()
+    # SO를 SO_ID 단위로 집계
+    so_agg = so.groupby("SO_ID").agg(
+        customer_name=("customer_name", "first"),
+        os_name=("os_name", lambda x: ", ".join(sorted(x.unique()))),
+        sector=("sector", "first"),
+        market=("market", "first"),
+        period=("period", "first"),
+        qty=("qty", "sum"),
+        amount_krw=("amount_krw", "sum"),
+    ).reset_index()
+    # PO 조인
+    if not po.empty:
+        po_dedup = po.groupby("SO_ID").agg(
+            po_total_ico=("po_total_ico", "sum"),
+        ).reset_index()
+        merged = so_agg.merge(po_dedup, on="SO_ID", how="left")
+    else:
+        merged = so_agg.copy()
+    merged["po_total_ico"] = merged["po_total_ico"].fillna(0) if "po_total_ico" in merged.columns else 0
+    merged["has_cost"] = merged["po_total_ico"] > 0
+    merged["margin_amount"] = merged["amount_krw"] - merged["po_total_ico"]
+    margin_raw = merged["margin_amount"] / merged["amount_krw"].where(merged["amount_krw"] != 0) * 100
+    merged["margin_pct"] = margin_raw.where(margin_raw.notna(), 0.0)
+    return merged
+
+
+# ═══════════════════════════════════════════════════════════════
+# Page 6: 발주 커버리지
+# ═══════════════════════════════════════════════════════════════
+def pg_po_coverage(market, sectors, customers, year, month):
+    st.title("발주 커버리지")
+    so = filt(load_so(), market, sectors, customers, year=year, month=month)
+    # 출고 완료 건 제외 — 이미 끝난 건은 커버리지 분석 불필요
+    if not so.empty:
+        so = so[so["status"] != "출고 완료"]
+    po = load_po_detail()
+    po_all = load_po_status()  # Cancelled 포함 전체 PO Status
+    if so.empty:
+        st.info("데이터 없음")
+        return
+
+    merged = calc_coverage(so, po, po_all_status=po_all)
+    if merged.empty:
+        st.info("데이터 없음")
+        return
+
+    # ── KPI 카드 ──
+    unordered = merged[merged["coverage_status"] == "미발주"]
+    partial = merged[merged["coverage_status"] == "부분 발주"]
+    in_progress = merged[merged["coverage_status"] == "발주 진행중"]
+    confirmed = merged[merged["coverage_status"] == "발주 확정"]
+    total_lines = len(merged)
+    # 미발주 + 부분발주 = 발주 필요 건
+    need_order = pd.concat([unordered, partial])
+    need_order_amt = need_order["amount_krw"].sum()
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        with st.container(border=True):
+            st.markdown("**미발주**")
+            st.markdown(f"### {len(unordered)}건")
+            st.caption("PO 없음 / Open")
+    with c2:
+        with st.container(border=True):
+            st.markdown("**부분 발주**")
+            st.markdown(f"### {len(partial)}건")
+            st.caption("일부 Open + 일부 발주")
+    with c3:
+        with st.container(border=True):
+            st.markdown("**발주 진행중**")
+            st.markdown(f"### {len(in_progress)}건")
+            st.caption("Sent — 공장 확인 대기")
+    with c4:
+        with st.container(border=True):
+            st.markdown("**발주 확정**")
+            st.markdown(f"### {len(confirmed)}건")
+            st.caption("Confirmed/Invoiced")
+    with c5:
+        with st.container(border=True):
+            st.markdown("**발주 필요 금액**")
+            st.markdown(f"### {fmt_krw(need_order_amt)}")
+            st.caption(f"미발주+부분 {len(need_order)}건")
+
+    # ── 커버리지 요약 Stacked Bar ──
+    st.subheader("커버리지 요약")
+    status_counts = merged["coverage_status"].value_counts()
+    status_order = ["미발주", "부분 발주", "발주 진행중", "발주 확정"]
+    status_colors = {"미발주": C_DANGER, "부분 발주": "#e65100", "발주 진행중": "#ff9800", "발주 확정": C_ENDING}
+    fig_stack = go.Figure()
+    for s in status_order:
+        cnt = status_counts.get(s, 0)
+        pct = cnt / total_lines * 100 if total_lines else 0
+        fig_stack.add_trace(go.Bar(
+            x=[pct], y=["커버리지"], orientation="h", name=s,
+            marker_color=status_colors[s], text=f"{s} {cnt}건 ({pct:.0f}%)",
+            textposition="inside",
+            hovertemplate=f"<b>{s}</b><br>{cnt}건 ({pct:.1f}%)<extra></extra>",
+        ))
+    fig_stack.update_layout(
+        barmode="stack", height=100, margin=dict(t=10, b=10, l=80),
+        xaxis=dict(title="비율 (%)", range=[0, 100]),
+        showlegend=True, legend=dict(orientation="h", y=-0.5),
+    )
+    st.plotly_chart(fig_stack, use_container_width=True)
+
+    # ── 미발주 상세 테이블 ──
+    st.subheader("미발주 상세")
+    st.caption("PO 없음 또는 Open 상태 (공장 발주 전)")
+    if not unordered.empty:
+        unord_tbl = unordered[["SO_ID", "customer_name", "os_name", "qty", "amount_krw", "delivery_date"]].copy()
+        unord_tbl.columns = ["SO_ID", "고객명", "품목", "수량", "매출금액", "납기일"]
+        unord_tbl = unord_tbl.sort_values("납기일")
+        unord_tbl["납기일"] = unord_tbl["납기일"].apply(fmt_date)
+        unord_tbl["수량"] = unord_tbl["수량"].apply(fmt_qty)
+        unord_tbl["매출금액"] = unord_tbl["매출금액"].apply(fmt_num)
+        st.dataframe(unord_tbl, use_container_width=True, hide_index=True)
+    else:
+        st.success("미발주 건 없음")
+
+    # ── 부분 발주 상세 테이블 ──
+    st.subheader("부분 발주 상세")
+    st.caption("일부 PO는 발주(Sent/Confirmed), 일부는 Open — Open 부분 발주 필요")
+    if not partial.empty:
+        part_tbl = partial[["SO_ID", "customer_name", "os_name", "qty", "amount_krw", "delivery_date", "po_statuses"]].copy()
+        part_tbl.columns = ["SO_ID", "고객명", "품목", "수량", "매출금액", "납기일", "PO Status"]
+        part_tbl = part_tbl.sort_values("납기일")
+        part_tbl["납기일"] = part_tbl["납기일"].apply(fmt_date)
+        part_tbl["수량"] = part_tbl["수량"].apply(fmt_qty)
+        part_tbl["매출금액"] = part_tbl["매출금액"].apply(fmt_num)
+        st.dataframe(part_tbl, use_container_width=True, hide_index=True)
+    else:
+        st.success("부분 발주 건 없음")
+
+    # ── 발주 진행중 상세 테이블 ──
+    st.subheader("발주 진행중 상세")
+    st.caption("공장에 발주(Sent)했으나 Confirmed 전 단계")
+    if not in_progress.empty:
+        prog_tbl = in_progress[["SO_ID", "customer_name", "os_name", "qty", "amount_krw", "delivery_date", "po_statuses"]].copy()
+        prog_tbl.columns = ["SO_ID", "고객명", "품목", "수량", "매출금액", "납기일", "PO Status"]
+        prog_tbl = prog_tbl.sort_values("납기일")
+        prog_tbl["납기일"] = prog_tbl["납기일"].apply(fmt_date)
+        prog_tbl["수량"] = prog_tbl["수량"].apply(fmt_qty)
+        prog_tbl["매출금액"] = prog_tbl["매출금액"].apply(fmt_num)
+        st.dataframe(prog_tbl, use_container_width=True, hide_index=True)
+    else:
+        st.success("발주 진행중 건 없음")
+
+    # ── 고객별 미발주금액 Top 10 | 섹터별 커버리지율 ──
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("고객별 발주필요 금액 Top 10")
+        if not need_order.empty:
+            cust_unord = need_order.groupby("customer_name")["amount_krw"].sum().nlargest(10).reset_index()
+            cust_unord.columns = ["고객", "발주필요금액"]
+            fig_cu = px.bar(cust_unord, y="고객", x="발주필요금액", orientation="h",
+                            color_discrete_sequence=[C_DANGER])
+            fig_cu.update_traces(hovertemplate="<b>%{y}</b><br>₩%{x:,.0f}<extra></extra>")
+            fig_cu.update_layout(height=350, margin=dict(t=30, l=150),
+                                 yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_cu, use_container_width=True)
+        else:
+            st.info("미발주 건 없음")
+
+    with col2:
+        st.subheader("섹터별 커버리지율")
+        sec_cov = merged.groupby("sector").agg(
+            총SO수량=("qty", "sum"), 총PO수량=("po_qty", "sum"),
+        ).reset_index()
+        sec_qty_safe = sec_cov["총SO수량"].replace(0, pd.NA)
+        sec_cov["커버리지%"] = (sec_cov["총PO수량"] / sec_qty_safe * 100).fillna(100).round(1)
+        sec_cov = sec_cov.sort_values("커버리지%", ascending=False)
+        fig_sc = px.bar(sec_cov, x="sector", y="커버리지%",
+                        labels={"sector": "섹터"},
+                        color_discrete_sequence=[C_INPUT])
+        fig_sc.update_traces(hovertemplate="<b>%{x}</b><br>커버리지: %{y:.1f}%<extra></extra>")
+        fig_sc.add_hline(y=100, line_dash="dash", line_color="gray",
+                         annotation_text="100%")
+        fig_sc.update_layout(height=350, margin=dict(t=30, b=30))
+        st.plotly_chart(fig_sc, use_container_width=True)
+
+    # ── PO Status 파이프라인 ──
+    st.subheader("PO Status 파이프라인")
+    po_with_status = merged[merged["po_statuses"] != ""]
+    if not po_with_status.empty:
+        def _classify_po_status(s):
+            if not s:
+                return "No PO"
+            for token in s.split(","):
+                token = token.strip()
+                if token.startswith("Invoiced"):
+                    return "Invoiced"
+            if "Confirmed" in s:
+                return "Confirmed"
+            if "Sent" in s:
+                return "Sent"
+            if "Open" in s:
+                return "Open"
+            return s.split(",")[0].strip() or "Other"
+
+        po_with_status = po_with_status.copy()
+        po_with_status["po_stage"] = po_with_status["po_statuses"].apply(_classify_po_status)
+        stage_counts = po_with_status["po_stage"].value_counts().reset_index()
+        stage_counts.columns = ["Stage", "건수"]
+        stage_order = ["Open", "Sent", "Confirmed", "Invoiced"]
+        stage_counts["sort_key"] = stage_counts["Stage"].apply(
+            lambda x: stage_order.index(x) if x in stage_order else len(stage_order)
+        )
+        stage_counts = stage_counts.sort_values("sort_key")
+        fig_pipe = px.bar(stage_counts, x="Stage", y="건수",
+                          color_discrete_sequence=[C_PURPLE])
+        fig_pipe.update_traces(hovertemplate="<b>%{x}</b><br>%{y}건<extra></extra>")
+        fig_pipe.update_layout(height=300, margin=dict(t=30, b=30))
+        st.plotly_chart(fig_pipe, use_container_width=True)
+    else:
+        st.info("PO 데이터 없음")
+
+
+# ═══════════════════════════════════════════════════════════════
+# Page 7: 수익성 분석
+# ═══════════════════════════════════════════════════════════════
+def pg_margin(market, sectors, customers, year, month):
+    st.title("수익성 분석")
+    so = filt(load_so(), market, sectors, customers, year=year, month=month)
+    po = load_po_detail()
+    if so.empty:
+        st.info("데이터 없음")
+        return
+
+    merged = calc_margin(so, po)
+
+    # DN 출고금액 조인 (미출고금액 계산용) — SO_ID 단위
+    dn = load_dn()
+    if not dn.empty:
+        dn_agg = dn.groupby("SO_ID").agg(
+            dn_amount=("amount_krw", "sum"),
+        ).reset_index()
+        merged = merged.merge(dn_agg, on="SO_ID", how="left")
+    merged["dn_amount"] = merged["dn_amount"].fillna(0) if "dn_amount" in merged.columns else 0
+    merged["unbilled_amount"] = merged["amount_krw"] - merged["dn_amount"]
+
+    # 원가 확정 건만 마진 계산
+    costed = merged[merged["has_cost"]]
+    total_sales = costed["amount_krw"].sum()
+    total_ico = costed["po_total_ico"].sum()
+    total_margin = total_sales - total_ico
+    margin_rate = total_margin / total_sales * 100 if total_sales else 0
+
+    # ── KPI 카드 ──
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        with st.container(border=True):
+            st.markdown("**총매출**")
+            st.markdown(f"### {fmt_krw(total_sales)}")
+    with c2:
+        with st.container(border=True):
+            st.markdown("**총원가(ICO)**")
+            st.markdown(f"### {fmt_krw(total_ico)}")
+    with c3:
+        with st.container(border=True):
+            st.markdown("**총마진**")
+            st.markdown(f"### {fmt_krw(total_margin)}")
+    with c4:
+        with st.container(border=True):
+            st.markdown("**마진율**")
+            st.markdown(f"### {margin_rate:.1f}%")
+            if total_sales:
+                st.progress(min(margin_rate / 100, 1.0))
+
+    # 원가 미확정 건 안내
+    no_cost = merged[~merged["has_cost"]]
+    if not no_cost.empty:
+        st.caption(f"원가 미확정 {len(no_cost)}건 (매출 {fmt_krw(no_cost['amount_krw'].sum())})은 마진 계산에서 제외")
+
+    # ── 월별 마진 추이 ──
+    st.subheader("월별 마진 추이")
+    if not costed.empty:
+        monthly = costed.groupby("period").agg(
+            매출=("amount_krw", "sum"),
+            원가=("po_total_ico", "sum"),
+        ).reset_index().sort_values("period")
+        monthly["마진"] = monthly["매출"] - monthly["원가"]
+        monthly_safe = monthly["매출"].replace(0, pd.NA)
+        monthly["마진율"] = (monthly["마진"] / monthly_safe * 100).fillna(0)
+
+        fig_mm = go.Figure()
+        fig_mm.add_trace(go.Bar(x=monthly["period"], y=monthly["매출"],
+                                name="매출", marker_color=C_INPUT,
+                                hovertemplate="<b>%{x}</b><br>매출: ₩%{y:,.0f}<extra></extra>"))
+        fig_mm.add_trace(go.Bar(x=monthly["period"], y=monthly["원가"],
+                                name="원가(ICO)", marker_color=C_OUTPUT,
+                                hovertemplate="<b>%{x}</b><br>원가: ₩%{y:,.0f}<extra></extra>"))
+        fig_mm.add_trace(go.Scatter(
+            x=monthly["period"], y=monthly["마진율"], name="마진율(%)",
+            mode="lines+markers", yaxis="y2",
+            line=dict(color=C_ENDING, width=2),
+            hovertemplate="<b>%{x}</b><br>마진율: %{y:.1f}%<extra></extra>",
+        ))
+        fig_mm.update_layout(
+            barmode="group", height=400, margin=dict(t=30, b=30),
+            xaxis=dict(type="category"),
+            yaxis2=dict(title="마진율(%)", overlaying="y", side="right"),
+        )
+        st.plotly_chart(fig_mm, use_container_width=True)
+    else:
+        st.info("원가 확정 건 없음")
+
+    # ── 탭: 고객별 | 섹터별 | 모델별 ──
+    tab_cust, tab_sec, tab_model = st.tabs(["고객별", "섹터별", "모델별"])
+
+    def _margin_analysis(df, group_col, label, tab):
+        """그룹별 마진 분석 — Top 15 bar + 상세 테이블"""
+        with tab:
+            if df.empty:
+                st.info("데이터 없음")
+                return
+            grp = df.groupby(group_col).agg(
+                매출=("amount_krw", "sum"),
+                원가=("po_total_ico", "sum"),
+                미출고금액=("unbilled_amount", "sum"),
+            ).reset_index()
+            grp["마진"] = grp["매출"] - grp["원가"]
+            sales_safe = grp["매출"].replace(0, pd.NA)
+            grp["마진율"] = (grp["마진"] / sales_safe * 100).fillna(0).round(1)
+            grp = grp.sort_values("매출", ascending=False)
+
+            # Top 15 마진율 bar
+            top15 = grp.head(15)
+            fig = px.bar(top15, y=group_col, x="마진율", orientation="h",
+                         labels={group_col: label, "마진율": "마진율(%)"},
+                         color="마진율",
+                         color_continuous_scale=["#d62728", "#ff9800", "#2ca02c"],
+                         range_color=[0, 50])
+            fig.update_traces(hovertemplate=f"<b>%{{y}}</b><br>마진율: %{{x:.1f}}%<extra></extra>")
+            fig.update_layout(height=max(350, len(top15) * 28),
+                              margin=dict(t=30, l=200),
+                              yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # 상세 테이블
+            tbl = grp.copy()
+            tbl["매출"] = tbl["매출"].apply(fmt_num)
+            tbl["원가"] = tbl["원가"].apply(fmt_num)
+            tbl["마진"] = tbl["마진"].apply(fmt_num)
+            tbl["미출고금액"] = tbl["미출고금액"].apply(fmt_num)
+            tbl.rename(columns={group_col: label}, inplace=True)
+            st.dataframe(tbl, use_container_width=True, hide_index=True)
+
+    _margin_analysis(merged[merged["has_cost"]], "customer_name", "고객", tab_cust)
+    _margin_analysis(merged[merged["has_cost"]], "sector", "섹터", tab_sec)
+    _margin_analysis(merged[merged["has_cost"]], "os_name", "모델", tab_model)
+
+    # ── 저마진 경보 Top 10 ──
+    st.subheader("저마진 경보 Top 10")
+    if not costed.empty:
+        so_margin = costed.groupby("SO_ID").agg(
+            고객명=("customer_name", "first"),
+            품목=("os_name", lambda x: ", ".join(x.unique())),
+            매출=("amount_krw", "sum"),
+            원가=("po_total_ico", "sum"),
+        ).reset_index()
+        so_margin["마진"] = so_margin["매출"] - so_margin["원가"]
+        sales_safe = so_margin["매출"].replace(0, pd.NA)
+        so_margin["마진율"] = (so_margin["마진"] / sales_safe * 100).fillna(0).round(1)
+        low_margin = so_margin[so_margin["마진율"] < 20].nlargest(10, "매출")
+        if not low_margin.empty:
+            lm = low_margin.copy()
+            lm["매출"] = lm["매출"].apply(fmt_num)
+            lm["원가"] = lm["원가"].apply(fmt_num)
+            lm["마진"] = lm["마진"].apply(fmt_num)
+            st.dataframe(lm, use_container_width=True, hide_index=True,
+                         column_config={
+                             "마진율": st.column_config.ProgressColumn(
+                                 "마진율(%)", format="%.1f%%", min_value=0, max_value=100),
+                         })
+        else:
+            st.success("마진율 20% 미만 건 없음")
+
+    # ── 미출고금액 Top 10 (고객별) ──
+    st.subheader("미출고금액 Top 10 (고객별)")
+    unbilled = merged.groupby("customer_name")["unbilled_amount"].sum().nlargest(10).reset_index()
+    unbilled.columns = ["고객", "미출고금액"]
+    if not unbilled.empty and unbilled["미출고금액"].sum() > 0:
+        fig_ub = px.bar(unbilled, y="고객", x="미출고금액", orientation="h",
+                        color_discrete_sequence=[C_PURPLE])
+        fig_ub.update_traces(hovertemplate="<b>%{y}</b><br>미출고: ₩%{x:,.0f}<extra></extra>")
+        fig_ub.update_layout(height=350, margin=dict(t=30, l=150),
+                             yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_ub, use_container_width=True)
+    else:
+        st.info("미출고 건 없음")
+
+
+# ═══════════════════════════════════════════════════════════════
+# Page 8: Order Book (백로그) — 3탭 구조
 # ═══════════════════════════════════════════════════════════════
 def pg_orderbook(market, sectors, customers, **_):
-    st.title("Order Book (백로그)")
+    st.title("Order Book")
     if _.get("year", "전체") != "전체" or _.get("month", "전체") != "전체":
         st.caption("ℹ️ 이 페이지는 현재 잔고 기준입니다 — 연도/월 필터는 적용되지 않습니다.")
 
@@ -1407,7 +2901,7 @@ def pg_orderbook(market, sectors, customers, **_):
 
     today_ts = pd.Timestamp.today().normalize()
 
-    # KPI
+    # ── KPI 카드 (상단 고정) ──
     c1, c2, c3, c4 = st.columns(4)
     if not backlog.empty:
         bl_total = backlog["ending_amount"].sum()
@@ -1428,24 +2922,17 @@ def pg_orderbook(market, sectors, customers, **_):
         c3.metric("납기 지연", "0건")
         c4.metric("납기 임박", "0건")
 
-    # ── 월별 Input / Output / Ending 추이 (order_book.sql) ──
-    try:
-        ob = load_order_book()
-    except Exception as e:
-        st.error(f"Order Book 데이터 로드 실패: {e}")
-        ob = pd.DataFrame()
+    # ── OB 데이터 로드 (탭 공용) ──
+    ob = load_order_book()
+    ob_monthly = pd.DataFrame()
     if not ob.empty:
         ob = ob.rename(columns={"구분": "market", "Sector": "sector", "Customer name": "customer_name"})
         ob = filt(ob, market, sectors, customers, period_col=None)
-        st.subheader("월별 수주잔고 추이 — 실시간")
-        st.caption("현재 DB 상태 기준 계산 (마감 확정치 아님)")
-        # Input/Output은 flow → 단순 합산, Ending은 stock → 라인별 forward-fill 후 합산
         _line_key = ["SO_ID", "OS name", "Expected delivery date"]
         ob_flow = ob.groupby("Period").agg(
             Input=("Value_Input_amount", "sum"),
             Output=("Value_Output_amount", "sum"),
         ).reset_index()
-        # Ending: 라인별 마지막 이벤트 Ending을 빈 월로 전파 후 합산
         _line_end = ob.groupby(_line_key + ["Period"])["Value_Ending_amount"].sum().reset_index()
         _pivot = _line_end.pivot_table(
             index=_line_key, columns="Period", values="Value_Ending_amount",
@@ -1453,7 +2940,114 @@ def pg_orderbook(market, sectors, customers, **_):
         _monthly_ending = _pivot.sum(axis=0).reset_index()
         _monthly_ending.columns = ["Period", "Ending"]
         ob_monthly = ob_flow.merge(_monthly_ending, on="Period", how="outer").fillna(0).sort_values("Period")
+
+    # ═══ 3탭 구조 ═══
+    tab_exec, tab_risk, tab_conv = st.tabs(["Executive", "Risk", "Conversion"])
+
+    # ──────────────────────────────────────────────
+    # Executive 탭
+    # ──────────────────────────────────────────────
+    with tab_exec:
+        # 워터폴 차트 — Opening → Input → Output → Ending
         if not ob_monthly.empty:
+            st.subheader("Order Book 워터폴")
+
+            # 뷰 모드 토글 + 월 선택
+            wf_col1, wf_col2 = st.columns([1, 2])
+            with wf_col1:
+                wf_mode = st.radio("보기", ["월별", "누적"], horizontal=True, key="wf_mode")
+            with wf_col2:
+                if wf_mode == "월별":
+                    periods = ob_monthly["Period"].tolist()
+                    wf_sel_period = st.selectbox(
+                        "기준 월", periods, index=len(periods) - 1, key="wf_period",
+                    )
+                else:
+                    wf_sel_period = None
+
+            if wf_mode == "월별":
+                # 선택 월 워터폴
+                sel_row = ob_monthly[ob_monthly["Period"] == wf_sel_period].iloc[0]
+                opening = sel_row["Ending"] - sel_row["Input"] + sel_row["Output"]
+
+                wf_labels = ["Opening", "수주(Input)", "출고(Output)", "Ending"]
+                wf_values = [opening, sel_row["Input"], -sel_row["Output"], sel_row["Ending"]]
+                wf_measures = ["absolute", "relative", "relative", "total"]
+
+                fig_wf = go.Figure(go.Waterfall(
+                    x=wf_labels, y=wf_values, measure=wf_measures,
+                    connector=dict(line=dict(color="gray", dash="dot")),
+                    increasing=dict(marker=dict(color=C_INPUT)),
+                    decreasing=dict(marker=dict(color=C_OUTPUT)),
+                    totals=dict(marker=dict(color=C_ENDING)),
+                    textposition="outside",
+                    text=[fmt_krw(abs(v)) for v in wf_values],
+                    hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>",
+                ))
+                fig_wf.update_layout(
+                    height=400, margin=dict(t=30, b=30),
+                    yaxis=dict(title="금액 (KRW)"),
+                    title=dict(text=f"기준 월: {wf_sel_period}", font=dict(size=14)),
+                )
+                st.plotly_chart(fig_wf, use_container_width=True)
+
+            else:  # 누적
+                total_input = ob_monthly["Input"].sum()
+                total_output = ob_monthly["Output"].sum()
+                first_opening = ob_monthly.iloc[0]["Ending"] - ob_monthly.iloc[0]["Input"] + ob_monthly.iloc[0]["Output"]
+                final_ending = ob_monthly.iloc[-1]["Ending"]
+                period_range = f"{ob_monthly['Period'].min()} ~ {ob_monthly['Period'].max()}"
+
+                wf_labels = ["Opening", "총 수주(Input)", "총 출고(Output)", "Ending"]
+                wf_values = [first_opening, total_input, -total_output, final_ending]
+                wf_measures = ["absolute", "relative", "relative", "total"]
+
+                fig_wf = go.Figure(go.Waterfall(
+                    x=wf_labels, y=wf_values, measure=wf_measures,
+                    connector=dict(line=dict(color="gray", dash="dot")),
+                    increasing=dict(marker=dict(color=C_INPUT)),
+                    decreasing=dict(marker=dict(color=C_OUTPUT)),
+                    totals=dict(marker=dict(color=C_ENDING)),
+                    textposition="outside",
+                    text=[fmt_krw(abs(v)) for v in wf_values],
+                    hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>",
+                ))
+                fig_wf.update_layout(
+                    height=400, margin=dict(t=30, b=30),
+                    yaxis=dict(title="금액 (KRW)"),
+                    title=dict(text=f"누적 기간: {period_range}", font=dict(size=14)),
+                )
+                st.plotly_chart(fig_wf, use_container_width=True)
+
+            latest_period = ob_monthly["Period"].max()
+            latest = ob_monthly[ob_monthly["Period"] == latest_period].iloc[0]
+
+            # 3대 KPI
+            kc1, kc2, kc3 = st.columns(3)
+            # Backlog Cover (months)
+            recent_3 = ob_monthly.tail(3)
+            avg_output_3m = recent_3["Output"].mean()
+            backlog_cover = latest["Ending"] / avg_output_3m if avg_output_3m else float("inf")
+            kc1.metric("Backlog Cover",
+                       f"{backlog_cover:.1f}개월" if backlog_cover != float("inf") else "N/A",
+                       help="Ending / 최근 3개월 평균 Output")
+            # Past Due Ratio
+            if not backlog.empty:
+                overdue_amt = backlog[backlog["delivery_date"] < today_ts]["ending_amount"].sum()
+                past_due_pct = overdue_amt / bl_total * 100 if bl_total else 0
+                kc2.metric("Past Due Ratio", f"{past_due_pct:.1f}%",
+                           help="지연 Backlog / 총 Backlog")
+            else:
+                kc2.metric("Past Due Ratio", "0%")
+            # Book-to-Bill
+            btb_val = latest["Input"] / latest["Output"] if latest["Output"] else float("inf")
+            kc3.metric("Book-to-Bill",
+                       f"{btb_val:.2f}" if btb_val != float("inf") else "N/A",
+                       help="Input / Output (>1: 수주 우세)")
+
+            # 월별 Input/Output/Ending 추이
+            st.subheader("월별 수주잔고 추이")
+            st.caption("현재 DB 상태 기준 계산 (마감 확정치 아님)")
             fig_ob = go.Figure()
             fig_ob.add_trace(go.Bar(x=ob_monthly["Period"], y=ob_monthly["Input"],
                                     name="수주(Input)", marker_color=C_INPUT,
@@ -1473,126 +3067,388 @@ def pg_orderbook(market, sectors, customers, **_):
             )
             st.plotly_chart(fig_ob, use_container_width=True)
 
-    # ── Aging 분석 ──
-    if not backlog.empty:
-        st.subheader("Backlog Aging 분석")
-        bl = backlog.copy()
-        bl["days"] = (bl["delivery_date"] - today_ts).dt.days
-
-        def _aging(d):
-            if pd.isna(d):
-                return "날짜없음"
-            if d < -30:
-                return "① 30일+ 지연"
-            if d < 0:
-                return "② 0~30일 지연"
-            if d <= 14:
-                return "③ 2주 이내"
-            if d <= 30:
-                return "④ 2주~1개월"
-            if d <= 90:
-                return "⑤ 1~3개월"
-            return "⑥ 3개월+"
-
-        bl["aging"] = bl["days"].apply(_aging)
-        aging_agg = bl.groupby("aging").agg(
-            건수=("SO_ID", "count"),
-            금액=("ending_amount", "sum"),
-        ).reset_index().sort_values("aging")
-
-        col1, col2 = st.columns(2)
-        with col1:
-            fig_a = px.bar(aging_agg, x="aging", y="금액",
-                           color="aging", labels={"aging": "구간", "금액": "Backlog 금액"},
-                           color_discrete_sequence=px.colors.sequential.RdBu_r)
-            fig_a.update_traces(hovertemplate="<b>%{x}</b><br>Backlog: ₩%{y:,.0f}<extra></extra>")
-            fig_a.update_layout(height=350, margin=dict(t=30, b=30), showlegend=False)
-            event_aging = st.plotly_chart(fig_a, use_container_width=True,
-                                          on_select="rerun", key="aging_bar")
-
-        with col2:
-            fig_a2 = px.pie(aging_agg, names="aging", values="금액", hole=0.4)
-            fig_a2.update_traces(hovertemplate="<b>%{label}</b><br>₩%{value:,.0f} (%{percent})<extra></extra>")
-            fig_a2.update_layout(height=350, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_a2, use_container_width=True)
-
-        # Aging 드릴다운
-        selected_aging = None
-        if event_aging and event_aging.selection and event_aging.selection.points:
-            selected_aging = event_aging.selection.points[0]["x"]
-        if selected_aging:
-            st.subheader(f"📌 {selected_aging} 상세")
-            aging_detail = bl[bl["aging"] == selected_aging]
-            ad = aging_detail[["market", "SO_ID", "customer_name", "os_name",
-                               "delivery_date", "ending_qty", "ending_amount"]].copy()
-            ad.columns = ["구분", "SO_ID", "고객명", "품목", "납기일", "잔여수량", "잔여금액"]
-            ad["납기일"] = ad["납기일"].apply(fmt_date)
-            ad["잔여수량"] = ad["잔여수량"].apply(lambda x: f"{int(x):,}")
-            ad["잔여금액"] = ad["잔여금액"].apply(fmt_num)
-            st.dataframe(ad, use_container_width=True, hide_index=True)
-
-    # ── 섹터별 / 고객별 Backlog ──
-    if not backlog.empty:
-        col3, col4 = st.columns(2)
-        with col3:
-            st.subheader("섹터별 Backlog")
-            bl_sec = backlog.groupby("sector")["ending_amount"].sum().sort_values(ascending=False).reset_index()
-            bl_sec.columns = ["섹터", "금액"]
-            fig_s = px.bar(bl_sec, x="섹터", y="금액", color_discrete_sequence=[C_INPUT])
-            fig_s.update_traces(hovertemplate="<b>%{x}</b><br>Backlog: ₩%{y:,.0f}<extra></extra>")
-            fig_s.update_layout(height=350, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_s, use_container_width=True)
-
-        with col4:
-            st.subheader("고객별 Backlog Top 10")
-            bl_cust = backlog.groupby("customer_name")["ending_amount"].sum().nlargest(10).reset_index()
-            bl_cust.columns = ["고객", "금액"]
-            fig_c = px.bar(bl_cust, y="고객", x="금액", orientation="h",
-                           color_discrete_sequence=[C_OUTPUT])
-            fig_c.update_traces(hovertemplate="<b>%{y}</b><br>Backlog: ₩%{x:,.0f}<extra></extra>")
-            fig_c.update_layout(height=350, margin=dict(t=30, l=150),
-                                yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_c, use_container_width=True)
-
-    # ── 납기 분포 히트맵 ──
-    if not backlog.empty:
-        st.subheader("납기 분포 히트맵")
-        st.caption(f"금월 ~ {today_ts.year}년 말 — 월별 × 섹터 납기 예정 금액")
-        bl_heat = backlog.copy()
-        bl_heat["delivery_date"] = pd.to_datetime(bl_heat["delivery_date"], errors="coerce")
-        month_start = today_ts.replace(day=1)
-        month_end = pd.Timestamp(today_ts.year, 12, 31)
-        bl_heat = bl_heat[
-            (bl_heat["delivery_date"] >= month_start)
-            & (bl_heat["delivery_date"] <= month_end)
-        ]
-        if not bl_heat.empty:
-            bl_heat["month"] = bl_heat["delivery_date"].dt.to_period("M").astype(str)
-            bl_heat["sector"] = bl_heat["sector"].fillna("미분류")
-            pivot = bl_heat.pivot_table(
-                index="sector", columns="month",
-                values="ending_amount", aggfunc="sum", fill_value=0,
-            )
-            # hover에 금액 포맷 표시
-            hover_text = pivot.map(lambda v: fmt_krw(v))
-            fig_hm = go.Figure(data=go.Heatmap(
-                z=pivot.values,
-                x=pivot.columns.tolist(),
-                y=pivot.index.tolist(),
-                text=hover_text.values,
-                texttemplate="%{text}",
-                hovertemplate="<b>%{y}</b> · %{x}<br>₩%{z:,.0f}<extra></extra>",
-                colorscale="YlOrRd",
-            ))
-            fig_hm.update_layout(
-                height=max(250, 50 + len(pivot) * 40),
-                margin=dict(t=20, b=30),
-                xaxis=dict(type="category", title="납기월"),
-                yaxis=dict(title="섹터", autorange="reversed"),
-            )
-            st.plotly_chart(fig_hm, use_container_width=True)
+            # 섹터별 / 고객별 Backlog
+            if not backlog.empty:
+                col3, col4 = st.columns(2)
+                with col3:
+                    st.subheader("섹터별 Backlog")
+                    bl_sec = backlog.groupby("sector")["ending_amount"].sum().sort_values(ascending=False).reset_index()
+                    bl_sec.columns = ["섹터", "금액"]
+                    fig_s = px.bar(bl_sec, x="섹터", y="금액", color_discrete_sequence=[C_INPUT])
+                    fig_s.update_traces(hovertemplate="<b>%{x}</b><br>Backlog: ₩%{y:,.0f}<extra></extra>")
+                    fig_s.update_layout(height=350, margin=dict(t=30, b=30))
+                    st.plotly_chart(fig_s, use_container_width=True)
+                with col4:
+                    st.subheader("고객별 Backlog Top 10")
+                    bl_cust = backlog.groupby("customer_name")["ending_amount"].sum().nlargest(10).reset_index()
+                    bl_cust.columns = ["고객", "금액"]
+                    fig_c = px.bar(bl_cust, y="고객", x="금액", orientation="h",
+                                   color_discrete_sequence=[C_OUTPUT])
+                    fig_c.update_traces(hovertemplate="<b>%{y}</b><br>Backlog: ₩%{x:,.0f}<extra></extra>")
+                    fig_c.update_layout(height=350, margin=dict(t=30, l=150),
+                                        yaxis=dict(autorange="reversed"))
+                    st.plotly_chart(fig_c, use_container_width=True)
         else:
-            st.info("연말까지 납기 예정 건 없음")
+            st.info("Order Book 데이터 없음")
+
+    # ──────────────────────────────────────────────
+    # Risk 탭
+    # ──────────────────────────────────────────────
+    with tab_risk:
+        # Aging 분석
+        if not backlog.empty:
+            st.subheader("Backlog Aging 분석")
+            bl = backlog.copy()
+            bl["days"] = (bl["delivery_date"] - today_ts).dt.days
+
+            def _aging(d):
+                if pd.isna(d):
+                    return "날짜없음"
+                if d < -30:
+                    return "① 30일+ 지연"
+                if d < 0:
+                    return "② 0~30일 지연"
+                if d <= 14:
+                    return "③ 2주 이내"
+                if d <= 30:
+                    return "④ 2주~1개월"
+                if d <= 90:
+                    return "⑤ 1~3개월"
+                return "⑥ 3개월+"
+
+            bl["aging"] = bl["days"].apply(_aging)
+            aging_agg = bl.groupby("aging").agg(
+                건수=("SO_ID", "count"),
+                금액=("ending_amount", "sum"),
+            ).reset_index().sort_values("aging")
+
+            col1, col2 = st.columns(2)
+            with col1:
+                fig_a = px.bar(aging_agg, x="aging", y="금액",
+                               color="aging", labels={"aging": "구간", "금액": "Backlog 금액"},
+                               color_discrete_sequence=px.colors.sequential.RdBu_r)
+                fig_a.update_traces(hovertemplate="<b>%{x}</b><br>Backlog: ₩%{y:,.0f}<extra></extra>")
+                fig_a.update_layout(height=350, margin=dict(t=30, b=30), showlegend=False)
+                event_aging = st.plotly_chart(fig_a, use_container_width=True,
+                                              on_select="rerun", key="aging_bar")
+            with col2:
+                fig_a2 = px.pie(aging_agg, names="aging", values="금액", hole=0.4)
+                fig_a2.update_traces(hovertemplate="<b>%{label}</b><br>₩%{value:,.0f} (%{percent})<extra></extra>")
+                fig_a2.update_layout(height=350, margin=dict(t=30, b=30))
+                st.plotly_chart(fig_a2, use_container_width=True)
+
+            # Aging 드릴다운
+            selected_aging = None
+            if event_aging and event_aging.selection and event_aging.selection.points:
+                selected_aging = event_aging.selection.points[0]["x"]
+            if selected_aging:
+                st.subheader(f"📌 {selected_aging} 상세")
+                aging_detail = bl[bl["aging"] == selected_aging]
+                ad = aging_detail[["market", "SO_ID", "customer_name", "os_name",
+                                   "delivery_date", "ending_qty", "ending_amount"]].copy()
+                ad.columns = ["구분", "SO_ID", "고객명", "품목", "납기일", "잔여수량", "잔여금액"]
+                ad["납기일"] = ad["납기일"].apply(fmt_date)
+                ad["잔여수량"] = ad["잔여수량"].apply(lambda x: f"{int(x):,}")
+                ad["잔여금액"] = ad["잔여금액"].apply(fmt_num)
+                st.dataframe(ad, use_container_width=True, hide_index=True)
+
+            # 고금액 위험건 Top 10
+            st.subheader("고금액 위험건 Top 10")
+            overdue_bl = bl[bl["delivery_date"] < today_ts].nlargest(10, "ending_amount")
+            if not overdue_bl.empty:
+                risk = overdue_bl[["market", "SO_ID", "customer_name", "os_name",
+                                   "delivery_date", "ending_qty", "ending_amount", "days"]].copy()
+                risk.columns = ["구분", "SO_ID", "고객명", "품목", "납기일", "잔여수량", "잔여금액", "지연일"]
+                risk["지연일"] = risk["지연일"].apply(lambda d: f"{abs(int(d))}일")
+                risk["납기일"] = risk["납기일"].apply(fmt_date)
+                risk["잔여수량"] = risk["잔여수량"].apply(lambda x: f"{int(x):,}")
+                risk["잔여금액"] = risk["잔여금액"].apply(fmt_num)
+                st.dataframe(risk, use_container_width=True, hide_index=True)
+            else:
+                st.success("납기 지연 건 없음")
+
+            # 납기 분포 히트맵
+            st.subheader("납기 분포 히트맵")
+            st.caption(f"금월 ~ {today_ts.year}년 말 — 월별 x 섹터 납기 예정 금액")
+            bl_heat = backlog.copy()
+            bl_heat["delivery_date"] = pd.to_datetime(bl_heat["delivery_date"], errors="coerce")
+            month_start = today_ts.replace(day=1)
+            month_end = pd.Timestamp(today_ts.year, 12, 31)
+            bl_heat = bl_heat[
+                (bl_heat["delivery_date"] >= month_start)
+                & (bl_heat["delivery_date"] <= month_end)
+            ]
+            if not bl_heat.empty:
+                bl_heat["month"] = bl_heat["delivery_date"].dt.to_period("M").astype(str)
+                bl_heat["sector"] = bl_heat["sector"].fillna("미분류")
+                pivot = bl_heat.pivot_table(
+                    index="sector", columns="month",
+                    values="ending_amount", aggfunc="sum", fill_value=0,
+                )
+                hover_text = pivot.map(lambda v: fmt_krw(v))
+                fig_hm = go.Figure(data=go.Heatmap(
+                    z=pivot.values,
+                    x=pivot.columns.tolist(),
+                    y=pivot.index.tolist(),
+                    text=hover_text.values,
+                    texttemplate="%{text}",
+                    hovertemplate="<b>%{y}</b> · %{x}<br>₩%{z:,.0f}<extra></extra>",
+                    colorscale="YlOrRd",
+                ))
+                fig_hm.update_layout(
+                    height=max(250, 50 + len(pivot) * 40),
+                    margin=dict(t=20, b=30),
+                    xaxis=dict(type="category", title="납기월"),
+                    yaxis=dict(title="섹터", autorange="reversed"),
+                )
+                st.plotly_chart(fig_hm, use_container_width=True)
+            else:
+                st.info("연말까지 납기 예정 건 없음")
+        else:
+            st.info("Backlog 데이터 없음")
+
+    # ──────────────────────────────────────────────
+    # Conversion 탭
+    # ──────────────────────────────────────────────
+    with tab_conv:
+        so = load_so()
+        so_f = filt(so, market, sectors, customers)
+        dn_raw = load_dn()
+        dn_ej = enrich_dn(dn_raw, so)
+        dn_f = filt(dn_ej, market, sectors, customers, period_col=None)
+        po = load_po_detail()
+
+        # 전환 퍼널 — 필터된 SO_ID 범위로 제한
+        st.subheader("전환 퍼널")
+        so_ids = set(so_f["SO_ID"].unique()) if not so_f.empty else set()
+        po_so_ids = set(po["SO_ID"].unique()) & so_ids if not po.empty else set()
+        dn_so_ids = set(dn_f["SO_ID"].unique()) & so_ids if not dn_f.empty else set()
+
+        so_cnt = len(so_ids)
+        po_cnt = len(po_so_ids)
+        dn_cnt = len(dn_so_ids)
+
+        if so_cnt > 0:
+            fig_funnel = go.Figure(go.Funnel(
+                y=["SO 수주", "PO 발행", "DN 출고"],
+                x=[so_cnt, po_cnt, dn_cnt],
+                textinfo="value+percent initial",
+                marker=dict(color=[C_INPUT, C_PURPLE, C_OUTPUT]),
+                hovertemplate="<b>%{y}</b><br>%{x}건<extra></extra>",
+            ))
+            fig_funnel.update_layout(height=300, margin=dict(t=30, b=30))
+            st.plotly_chart(fig_funnel, use_container_width=True)
+
+            # 전환율 메트릭
+            mc1, mc2 = st.columns(2)
+            so_po_pct = po_cnt / so_cnt * 100 if so_cnt else 0
+            po_dn_pct = dn_cnt / po_cnt * 100 if po_cnt else 0
+            mc1.metric("SO → PO 전환율", f"{so_po_pct:.1f}%")
+            mc2.metric("PO → DN 전환율", f"{po_dn_pct:.1f}%")
+        else:
+            st.info("SO 데이터 없음")
+
+        # 리드타임 분석 — 수주→출고
+        st.subheader("리드타임 분석 (수주 → 출고)")
+        if not so_f.empty and not dn_f.empty:
+            # SO Period(1일 기준) → DN dispatch_date (필터 범위 내)
+            so_period = so_f[["SO_ID", "period"]].drop_duplicates(subset=["SO_ID"])
+            so_period["so_date"] = pd.to_datetime(so_period["period"] + "-01", errors="coerce")
+            dn_first = dn_f.groupby("SO_ID")["dispatch_date"].min().reset_index()
+            dn_first.columns = ["SO_ID", "first_dispatch"]
+            lt = so_period.merge(dn_first, on="SO_ID", how="inner")
+            lt["lead_days"] = (lt["first_dispatch"] - lt["so_date"]).dt.days
+            lt = lt[lt["lead_days"] >= 0]  # 음수 제거
+
+            if not lt.empty:
+                # KPI 카드 — 핵심 수치 먼저 표시
+                lt_mean = lt["lead_days"].mean()
+                lt_median = lt["lead_days"].median()
+                lt_min = lt["lead_days"].min()
+                lt_max = lt["lead_days"].max()
+                lk1, lk2, lk3, lk4 = st.columns(4)
+                lk1.metric("평균", f"{lt_mean:.0f}일")
+                lk2.metric("중앙값", f"{lt_median:.0f}일")
+                lk3.metric("최단", f"{lt_min:.0f}일")
+                lk4.metric("최장", f"{lt_max:.0f}일")
+
+                col_lt1, col_lt2 = st.columns(2)
+                with col_lt1:
+                    fig_box = px.box(lt, y="lead_days",
+                                     labels={"lead_days": "리드타임 (일)"},
+                                     color_discrete_sequence=[C_INPUT])
+                    fig_box.update_layout(height=350, margin=dict(t=30, b=30),
+                                          title="수주→출고 리드타임 분포")
+                    st.plotly_chart(fig_box, use_container_width=True)
+
+                with col_lt2:
+                    # 월별 평균 리드타임
+                    lt["so_month"] = lt["period"]
+                    lt_monthly = lt.groupby("so_month")["lead_days"].mean().reset_index()
+                    lt_monthly.columns = ["월", "평균리드타임"]
+                    lt_monthly = lt_monthly.sort_values("월")
+                    fig_lt = px.line(lt_monthly, x="월", y="평균리드타임",
+                                    markers=True,
+                                    labels={"평균리드타임": "평균 리드타임 (일)"},
+                                    color_discrete_sequence=[C_PURPLE])
+                    fig_lt.update_traces(hovertemplate="<b>%{x}</b><br>%{y:.0f}일<extra></extra>")
+                    fig_lt.update_layout(height=350, margin=dict(t=30, b=30),
+                                         xaxis=dict(type="category"),
+                                         title="월별 평균 리드타임 추이")
+                    st.plotly_chart(fig_lt, use_container_width=True)
+
+                q1 = lt["lead_days"].quantile(0.25)
+                q3 = lt["lead_days"].quantile(0.75)
+                iqr = q3 - q1
+                outlier_threshold = q3 + 1.5 * iqr
+                n_outliers = int((lt["lead_days"] > outlier_threshold).sum())
+                spread = "안정적" if iqr <= 30 else ("다소 편차 있음" if iqr <= 60 else "편차가 큼")
+                skew = "빠른 쪽에 집중" if lt_mean > lt_median else ("느린 쪽에 집중" if lt_mean < lt_median else "고르게 분포")
+
+                lines = [
+                    f"**수주→출고 리드타임** {len(lt)}건 분석 결과:\n",
+                    f"- 절반의 건이 **{lt_median:.0f}일 이내**에 출고됩니다 (중앙값)",
+                    f"- 대부분(75%)의 건이 **{q1:.0f}~{q3:.0f}일** 사이에 완료됩니다 (상자 범위)",
+                    f"- 가장 빨리 출고된 건은 **{lt_min:.0f}일**, 가장 오래 걸린 건은 **{lt_max:.0f}일**",
+                    f"- 분포 특성: **{spread}** (상자 폭 {iqr:.0f}일) · {skew}",
+                ]
+                if n_outliers > 0:
+                    lines.append(f"- **이상치 {n_outliers}건** — {outlier_threshold:.0f}일 초과, 개별 원인 확인 필요")
+                else:
+                    lines.append("- 이상치 없음 — 리드타임이 일정하게 관리되고 있습니다")
+                st.markdown("\n".join(lines))
+
+                # 이상치 상세 (expander)
+                if n_outliers > 0:
+                    lt_outliers = lt[lt["lead_days"] > outlier_threshold].copy()
+                    # 고객명 조인
+                    so_cust = so_f[["SO_ID", "customer_name"]].drop_duplicates(subset=["SO_ID"])
+                    lt_outliers = lt_outliers.merge(so_cust, on="SO_ID", how="left")
+                    lt_outliers = lt_outliers.sort_values("lead_days", ascending=False)
+                    with st.expander(f"이상치 {n_outliers}건 상세"):
+                        otbl = lt_outliers[["SO_ID", "customer_name", "period", "first_dispatch", "lead_days"]].copy()
+                        otbl.columns = ["SO_ID", "고객명", "수주월", "최초출고일", "리드타임(일)"]
+                        otbl["최초출고일"] = otbl["최초출고일"].apply(fmt_date)
+                        otbl["리드타임(일)"] = otbl["리드타임(일)"].apply(lambda x: f"{int(x)}일")
+                        st.dataframe(otbl, use_container_width=True, hide_index=True)
+            else:
+                st.info("리드타임 분석 가능한 데이터 없음")
+
+        # 해외 물류 리드타임 (출고→픽업→선적) — 국내 필터 시 비표시
+        if market != "국내":
+            ship_df = load_dn_export_shipping()
+            if not ship_df.empty:
+                # SO 메타 조인으로 sector 필터 적용 (customer_name은 ship_df에 이미 존재)
+                so_meta = so[["SO_ID", "sector"]].drop_duplicates(subset=["SO_ID"])
+                ship_df = ship_df.merge(so_meta, on="SO_ID", how="left")
+                ship_df["sector"] = ship_df["sector"].fillna("")
+                if sectors:
+                    ship_df = ship_df[ship_df["sector"].isin(sectors)]
+                if customers:
+                    ship_df = ship_df[ship_df["customer_name"].isin(customers)]
+
+            if not ship_df.empty:
+                st.subheader("해외 물류 리드타임 (출고 → 픽업 → 선적)")
+                st.caption("공장 출고 후 각 구간별 소요일 — 어디서 병목이 생기는지 비교")
+                ship = ship_df.copy()
+                ship["출고_픽업"] = (ship["pickup_date"] - ship["factory_date"]).dt.days
+                ship["픽업_선적"] = (ship["ship_date"] - ship["pickup_date"]).dt.days
+
+                # KPI 카드 — 구간별 평균
+                seg_stats = []
+                lt_data = []
+                for label, col in [("출고→픽업", "출고_픽업"), ("픽업→선적", "픽업_선적")]:
+                    valid = ship[ship[col].notna() & (ship[col] >= 0)]
+                    if not valid.empty:
+                        seg_stats.append((label, valid[col].mean(), valid[col].median(), len(valid)))
+                        for _, r in valid.iterrows():
+                            lt_data.append({"구간": label, "리드타임(일)": r[col]})
+
+                if seg_stats:
+                    sk_cols = st.columns(len(seg_stats) * 2)
+                    for i, (label, avg, med, cnt) in enumerate(seg_stats):
+                        sk_cols[i * 2].metric(f"{label} 평균", f"{avg:.0f}일")
+                        sk_cols[i * 2 + 1].metric(f"{label} 중앙값", f"{med:.0f}일", help=f"{cnt}건 기준")
+
+                if lt_data:
+                    lt_df = pd.DataFrame(lt_data)
+                    fig_lt_box = px.box(lt_df, x="구간", y="리드타임(일)",
+                                        color="구간",
+                                        color_discrete_sequence=[C_INPUT, C_OUTPUT])
+                    fig_lt_box.update_layout(height=350, margin=dict(t=30, b=30),
+                                              showlegend=False)
+                    st.plotly_chart(fig_lt_box, use_container_width=True)
+                    # 구간별 상세 통계 기반 동적 해석
+                    seg_details = {}
+                    for label, col in [("출고→픽업", "출고_픽업"), ("픽업→선적", "픽업_선적")]:
+                        valid = ship[ship[col].notna() & (ship[col] >= 0)][col]
+                        if not valid.empty:
+                            sq1, sq3 = valid.quantile(0.25), valid.quantile(0.75)
+                            s_iqr = sq3 - sq1
+                            s_outlier_th = sq3 + 1.5 * s_iqr
+                            seg_details[label] = {
+                                "median": valid.median(), "q1": sq1, "q3": sq3,
+                                "iqr": s_iqr, "min": valid.min(), "max": valid.max(),
+                                "n_outliers": int((valid > s_outlier_th).sum()),
+                                "count": len(valid),
+                            }
+
+                    lines = ["**해외 물류 구간별 분석**\n"]
+                    total_ship_outliers = 0
+                    for label, s in seg_details.items():
+                        spread = "안정적" if s["iqr"] <= 5 else ("다소 편차 있음" if s["iqr"] <= 15 else "편차가 큼")
+                        lines.append(f"**{label}** ({s['count']}건)")
+                        lines.append(f"- 절반이 **{s['median']:.0f}일 이내** · 대부분 **{s['q1']:.0f}~{s['q3']:.0f}일** 사이")
+                        lines.append(f"- 최단 {s['min']:.0f}일 ~ 최장 {s['max']:.0f}일 · {spread}")
+                        if s["n_outliers"] > 0:
+                            lines.append(f"- 이상치 {s['n_outliers']}건 — 비정상적 지연 발생")
+                            total_ship_outliers += s["n_outliers"]
+                        lines.append("")
+
+                    # 구간 간 비교
+                    if len(seg_details) == 2:
+                        seg_labels = list(seg_details.keys())
+                        s0, s1 = seg_details[seg_labels[0]], seg_details[seg_labels[1]]
+                        if s0["median"] > s1["median"]:
+                            bottleneck = seg_labels[0]
+                        elif s1["median"] > s0["median"]:
+                            bottleneck = seg_labels[1]
+                        else:
+                            bottleneck = None
+                        if bottleneck:
+                            lines.append(f"**병목 구간: {bottleneck}** — 중앙값 기준으로 이 구간이 더 오래 걸립니다.")
+                        else:
+                            lines.append("두 구간의 소요일이 비슷합니다.")
+
+                    st.markdown("\n".join(lines))
+
+                    # 이상치 상세 (expander)
+                    if total_ship_outliers > 0:
+                        outlier_rows = []
+                        for label, col in [("출고→픽업", "출고_픽업"), ("픽업→선적", "픽업_선적")]:
+                            if label not in seg_details:
+                                continue
+                            s = seg_details[label]
+                            s_th = s["q3"] + 1.5 * s["iqr"]
+                            ov = ship[ship[col].notna() & (ship[col] > s_th)].copy()
+                            if not ov.empty:
+                                ov["구간"] = label
+                                ov["소요일"] = ov[col]
+                                outlier_rows.append(ov)
+                        if outlier_rows:
+                            ship_otbl = pd.concat(outlier_rows, ignore_index=True)
+                            ship_otbl = ship_otbl.sort_values("소요일", ascending=False)
+                            with st.expander(f"이상치 {total_ship_outliers}건 상세"):
+                                disp = ship_otbl[["구간", "DN_ID", "SO_ID", "customer_name",
+                                                   "factory_date", "pickup_date", "ship_date", "소요일"]].copy()
+                                disp.columns = ["구간", "DN_ID", "SO_ID", "고객명",
+                                                "공장출고일", "픽업일", "선적일", "소요일"]
+                                for dc in ("공장출고일", "픽업일", "선적일"):
+                                    disp[dc] = disp[dc].apply(fmt_date)
+                                disp["소요일"] = disp["소요일"].apply(lambda x: f"{int(x)}일")
+                                st.dataframe(disp, use_container_width=True, hide_index=True)
+                else:
+                    st.info("해외 물류 리드타임 데이터 없음")
 
 
 if __name__ == "__main__":
