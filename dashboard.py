@@ -907,8 +907,11 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
 
             if not day_dn.empty:
                 # SO에서 customer_po 조인
-                so_po = so_pending[["SO_ID", "customer_po"]].drop_duplicates(subset=["SO_ID"])
-                day_dn = day_dn.merge(so_po, on="SO_ID", how="left")
+                if not so_pending.empty and "customer_po" in so_pending.columns:
+                    so_po = so_pending[["SO_ID", "customer_po"]].drop_duplicates(subset=["SO_ID"])
+                    day_dn = day_dn.merge(so_po, on="SO_ID", how="left")
+                if "customer_po" not in day_dn.columns:
+                    day_dn["customer_po"] = ""
                 day_dn["customer_po"] = day_dn["customer_po"].fillna("")
                 agg_dict = dict(
                     총수량=("qty", "sum"),
@@ -1008,11 +1011,10 @@ def pg_today(market, sectors, customers, **_):
     st.subheader("🔴 EXW 출고 지연")
     po_st = load_po_status()
     if not so_pending.empty and not po_st.empty and "exw_noah" in so_pending.columns:
-        # PO Status가 Invoiced/Cancelled인 SO_ID → 완료 처리
-        done_so = set(
-            po_st[po_st["po_status"].str.startswith("Invoiced") | (po_st["po_status"] == "Cancelled")]
-            ["SO_ID"].unique()
-        )
+        # PO Status가 모든 행이 Invoiced/Cancelled인 SO_ID만 완료 처리
+        _done_flag = po_st["po_status"].str.startswith("Invoiced") | (po_st["po_status"] == "Cancelled")
+        _done_ratio = po_st.assign(_d=_done_flag).groupby("SO_ID")["_d"].mean()
+        done_so = set(_done_ratio[_done_ratio == 1.0].index)
         # EXW 지난 건 중 PO가 Invoiced가 아닌 건
         exw_overdue = so_pending[
             so_pending["exw_noah"].notna()
@@ -1424,52 +1426,57 @@ def pg_orders(market, sectors, customers, year, month):
     if not dn_all.empty:
         available_months.update(dn_all["dispatch_month"].dropna().unique())
     available_months = sorted(available_months)
-    default_idx = available_months.index(kpi_month) if kpi_month in available_months else len(available_months) - 1
-    daily_month = st.selectbox("월 선택", available_months, index=default_idx, key="daily_month")
+    if not available_months:
+        st.info("선택된 필터 조건에 해당하는 수주/출고 데이터가 없습니다.")
+        daily_month = None
+    else:
+        default_idx = available_months.index(kpi_month) if kpi_month in available_months else len(available_months) - 1
+        daily_month = st.selectbox("월 선택", available_months, index=default_idx, key="daily_month")
 
-    dc1, dc2 = st.columns(2)
+    if daily_month:
+        dc1, dc2 = st.columns(2)
 
-    # 일별 수주 (PO receipt date 기준)
-    with dc1:
-        st.markdown(f"**{daily_month} 일별 수주**")
-        if not so_all.empty and "po_receipt_date" in so_all.columns:
-            so_with_date = so_all[so_all["po_receipt_date"].notna()].copy()
-            so_with_date["receipt_month"] = so_with_date["po_receipt_date"].dt.strftime("%Y-%m")
-            m_so = so_with_date[so_with_date["receipt_month"] == daily_month].copy()
-            if not m_so.empty:
-                m_so["day"] = m_so["po_receipt_date"].dt.strftime("%m-%d")
-                daily_so = m_so.groupby("day")["amount_krw"].sum().reset_index()
-                total_so_amt = daily_so["amount_krw"].sum()
-                st.metric("수주 합계", fmt_krw(total_so_amt), help=f"{m_so['SO_ID'].nunique()}건")
-                fig_so_d = px.bar(daily_so, x="day", y="amount_krw",
-                                  labels={"day": "날짜", "amount_krw": "수주금액"},
-                                  color_discrete_sequence=[C_INPUT])
-                fig_so_d.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
-                fig_so_d.update_layout(height=300, margin=dict(t=10, b=30),
-                                       xaxis=dict(type="category"))
-                st.plotly_chart(fig_so_d, use_container_width=True)
-            else:
-                st.info("수주 데이터 없음")
+        # 일별 수주 (PO receipt date 기준)
+        with dc1:
+            st.markdown(f"**{daily_month} 일별 수주**")
+            if not so_all.empty and "po_receipt_date" in so_all.columns:
+                so_with_date = so_all[so_all["po_receipt_date"].notna()].copy()
+                so_with_date["receipt_month"] = so_with_date["po_receipt_date"].dt.strftime("%Y-%m")
+                m_so = so_with_date[so_with_date["receipt_month"] == daily_month].copy()
+                if not m_so.empty:
+                    m_so["day"] = m_so["po_receipt_date"].dt.strftime("%m-%d")
+                    daily_so = m_so.groupby("day")["amount_krw"].sum().reset_index()
+                    total_so_amt = daily_so["amount_krw"].sum()
+                    st.metric("수주 합계", fmt_krw(total_so_amt), help=f"{m_so['SO_ID'].nunique()}건")
+                    fig_so_d = px.bar(daily_so, x="day", y="amount_krw",
+                                      labels={"day": "날짜", "amount_krw": "수주금액"},
+                                      color_discrete_sequence=[C_INPUT])
+                    fig_so_d.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
+                    fig_so_d.update_layout(height=300, margin=dict(t=10, b=30),
+                                           xaxis=dict(type="category"))
+                    st.plotly_chart(fig_so_d, use_container_width=True)
+                else:
+                    st.info("수주 데이터 없음")
 
-    # 일별 출고
-    with dc2:
-        st.markdown(f"**{daily_month} 일별 출고**")
-        if not dn_all.empty:
-            m_dn = dn_all[dn_all["dispatch_month"] == daily_month].copy()
-            if not m_dn.empty:
-                m_dn["day"] = m_dn["dispatch_date"].dt.strftime("%m-%d")
-                daily_dn = m_dn.groupby("day")["amount_krw"].sum().reset_index()
-                total_dn_amt = daily_dn["amount_krw"].sum()
-                st.metric("출고 합계", fmt_krw(total_dn_amt), help=f"{m_dn['DN_ID'].nunique()}건")
-                fig_dn_d = px.bar(daily_dn, x="day", y="amount_krw",
-                                  labels={"day": "날짜", "amount_krw": "출고금액"},
-                                  color_discrete_sequence=[C_OUTPUT])
-                fig_dn_d.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
-                fig_dn_d.update_layout(height=300, margin=dict(t=10, b=30),
-                                       xaxis=dict(type="category"))
-                st.plotly_chart(fig_dn_d, use_container_width=True)
-            else:
-                st.info("출고 데이터 없음")
+        # 일별 출고
+        with dc2:
+            st.markdown(f"**{daily_month} 일별 출고**")
+            if not dn_all.empty:
+                m_dn = dn_all[dn_all["dispatch_month"] == daily_month].copy()
+                if not m_dn.empty:
+                    m_dn["day"] = m_dn["dispatch_date"].dt.strftime("%m-%d")
+                    daily_dn = m_dn.groupby("day")["amount_krw"].sum().reset_index()
+                    total_dn_amt = daily_dn["amount_krw"].sum()
+                    st.metric("출고 합계", fmt_krw(total_dn_amt), help=f"{m_dn['DN_ID'].nunique()}건")
+                    fig_dn_d = px.bar(daily_dn, x="day", y="amount_krw",
+                                      labels={"day": "날짜", "amount_krw": "출고금액"},
+                                      color_discrete_sequence=[C_OUTPUT])
+                    fig_dn_d.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
+                    fig_dn_d.update_layout(height=300, margin=dict(t=10, b=30),
+                                           xaxis=dict(type="category"))
+                    st.plotly_chart(fig_dn_d, use_container_width=True)
+                else:
+                    st.info("출고 데이터 없음")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3252,7 +3259,8 @@ def pg_orderbook(market, sectors, customers, **_):
         st.subheader("리드타임 분석 (수주 → 출고)")
         if not so_f.empty and not dn_f.empty:
             # SO Period(1일 기준) → DN dispatch_date (필터 범위 내)
-            so_period = so_f[["SO_ID", "period"]].drop_duplicates(subset=["SO_ID"])
+            so_period = so_f[["SO_ID", "period"]].dropna(subset=["period"])
+            so_period = so_period.sort_values("period").drop_duplicates(subset=["SO_ID"], keep="first")
             so_period["so_date"] = pd.to_datetime(so_period["period"] + "-01", errors="coerce")
             dn_first = dn_f.groupby("SO_ID")["dispatch_date"].min().reset_index()
             dn_first.columns = ["SO_ID", "first_dispatch"]
