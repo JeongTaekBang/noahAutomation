@@ -20,6 +20,52 @@
 
 ---
 
+## 2026-03-22: 오늘의 현황 — PO 확정 지연 / EXW 미출고 / 납기 현황 개선
+
+### 배경
+오늘의 현황 페이지에 공장 발주→출고→납품 파이프라인의 병목을 단계별로 모니터링하는 섹션 추가 및 기존 섹션 개선.
+
+### 신규 섹션
+
+**📋 PO 확정 지연 (Sent → Confirmed 미전환)**
+- PO 테이블의 `공장 발주 날짜` 기준 경과일 계산
+- Status = "Sent"인 PO 라인만 캡처
+- 국내/해외 탭 분리, 7/14/30일+ 버킷 그룹화
+- 새 로더: `load_po_sent_pending()`
+
+**🚨 EXW 완료 미출고 (PO 공장 EXW < 오늘 & 미Invoiced)**
+- 기존 "EXW 출고지연" 대체 — SO 기반 → **PO line item 기반**으로 전면 재작성
+- PO 테이블의 `공장 EXW date` + `Status` 기준 (SO의 exw_noah이 아님)
+- Invoiced/Cancelled 제외, EXW 경과 라인만 정확히 캡처
+- 새 로더: `load_po_exw_pending()`
+- 설명: "공장에 EXW date 재확인 필요"
+
+### 기존 섹션 개선
+
+**📦 납기 현황 (미완료 건) — DN qty 레벨 매칭 추가**
+- 기존: SO status 기반 단순 표시 → 개선: DN qty 매칭으로 부분출고 정확 반영
+- delivery_date < 오늘 AND (DN 미생성 OR 출고 qty < 주문 qty)
+- 잔여수량/잔여금액 표시 (예: "잔여 11/14 · ₩1,568만/₩1,788만")
+- 설명: "DN 발급 또는 납기 일정 확인 필요"
+
+**🚢 해외 선적 Action Items — 그룹화 개선**
+- 선적 대기 / 포워더 미정 탭 분리
+- 공장출고일 기준 경과일 버킷 그룹화 (7/14/30일+)
+
+### 공통 변경
+
+**Expander + 테이블 UI 패턴 적용 (4개 섹션 모두)**
+- 카드 렌더링 → `st.expander` + `st.dataframe` 전환
+- 접었다 펼치면 line item 상세 테이블 표시
+- 버킷 헬퍼: `_OVERDUE_BUCKETS`, `_assign_bucket()`, `_render_bucketed_cards()`
+
+### 핵심 설계 판단
+- **EXW 섹션은 PO 데이터 기반**: SO의 EXW NOAH은 계획일, PO의 공장 EXW date가 실제 출고일
+- **납기 섹션은 SO+DN 데이터 기반**: 납기 경과 라인만 표시 (미래 납기 라인 제외)
+- **부분출고 qty 레벨 매칭**: DN line item별 출고수량 vs SO 주문수량 비교
+
+---
+
 ## 2026-03-21: 대시보드 제품/고객 분석 버그 수정
 
 ### 배경

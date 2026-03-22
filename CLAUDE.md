@@ -92,7 +92,7 @@ DB layer:
 | `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`) |
 | `sql/order_book.sql` | 이벤트 기반 Order Book SQL (Input/Output 이벤트 월만 행 생성, 재귀 CTE 없음) |
 | `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL (마감 고정 + Variance) |
-| `dashboard.py` | Streamlit 대시보드 (8페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book, 납기 캘린더, 세금계산서 미발행, Order Book 3탭(Executive/Risk/Conversion), 리드타임 분석) |
+| `dashboard.py` | Streamlit 대시보드 (8페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book, PO확정지연, EXW미출고, 납기현황(DN qty매칭), 납기캘린더, 해외선적, 세금계산서미발행, Order Book 3탭) |
 
 ## Business Rules
 

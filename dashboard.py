@@ -271,6 +271,100 @@ def load_po_detail() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
+def load_po_sent_pending() -> pd.DataFrame:
+    """PO Status='Sent' (확정 대기) 건 — 공장 발주 날짜 포함."""
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query("""
+            SELECT SO_ID,
+                   PO_ID,
+                   COALESCE([공장 발주 날짜], '') AS order_date,
+                   COALESCE([공장 EXW date], '') AS factory_exw,
+                   CAST([Item qty] AS REAL) AS po_qty,
+                   CAST([Total ICO] AS REAL) AS po_total_ico,
+                   COALESCE([NOAH O.C No.], '') AS noah_oc,
+                   '국내' AS market
+            FROM po_domestic
+            WHERE COALESCE(Status, '') = 'Sent'
+            UNION ALL
+            SELECT SO_ID,
+                   PO_ID,
+                   COALESCE([공장 발주 날짜], '') AS order_date,
+                   COALESCE([공장 EXW date], '') AS factory_exw,
+                   CAST([Item qty] AS REAL) AS po_qty,
+                   CAST([Total ICO] AS REAL) AS po_total_ico,
+                   COALESCE([NOAH O.C No.], '') AS noah_oc,
+                   '해외' AS market
+            FROM po_export
+            WHERE COALESCE(Status, '') = 'Sent'
+        """, conn)
+    except Exception as e:
+        logger.warning("PO sent pending 로드 실패: %s", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    if not df.empty:
+        df["po_qty"] = pd.to_numeric(df["po_qty"], errors="coerce").fillna(0)
+        df["po_total_ico"] = pd.to_numeric(df["po_total_ico"], errors="coerce").fillna(0)
+        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+        df["factory_exw"] = pd.to_datetime(df["factory_exw"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=300)
+def load_po_exw_pending() -> pd.DataFrame:
+    """PO 공장 EXW date 경과 & 미Invoiced 라인 — line item 단위."""
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query("""
+            SELECT SO_ID, PO_ID,
+                   CAST([Line item] AS INTEGER) AS line_item,
+                   COALESCE([Item name], '') AS item_name,
+                   CAST([Item qty] AS REAL) AS po_qty,
+                   CAST([Total ICO] AS REAL) AS po_total_ico,
+                   COALESCE([공장 발주 날짜], '') AS order_date,
+                   COALESCE([공장 EXW date], '') AS factory_exw,
+                   COALESCE(Status, '') AS po_status,
+                   COALESCE([NOAH O.C No.], '') AS noah_oc,
+                   '국내' AS market
+            FROM po_domestic
+            WHERE COALESCE([공장 EXW date], '') != ''
+              AND NOT COALESCE(Status, '') LIKE 'Invoiced%'
+              AND COALESCE(Status, '') != 'Cancelled'
+            UNION ALL
+            SELECT SO_ID, PO_ID,
+                   CAST([Line item] AS INTEGER),
+                   COALESCE([Item name], ''),
+                   CAST([Item qty] AS REAL),
+                   CAST([Total ICO] AS REAL),
+                   COALESCE([공장 발주 날짜], ''),
+                   COALESCE([공장 EXW date], ''),
+                   COALESCE(Status, ''),
+                   COALESCE([NOAH O.C No.], ''),
+                   '해외'
+            FROM po_export
+            WHERE COALESCE([공장 EXW date], '') != ''
+              AND NOT COALESCE(Status, '') LIKE 'Invoiced%'
+              AND COALESCE(Status, '') != 'Cancelled'
+        """, conn)
+    except Exception as e:
+        logger.warning("PO EXW pending 로드 실패: %s", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    if not df.empty:
+        df["po_qty"] = pd.to_numeric(df["po_qty"], errors="coerce").fillna(0)
+        df["po_total_ico"] = pd.to_numeric(df["po_total_ico"], errors="coerce").fillna(0)
+        df["order_date"] = pd.to_datetime(df["order_date"], errors="coerce")
+        df["factory_exw"] = pd.to_datetime(df["factory_exw"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=300)
 def load_dn_tax_pending() -> pd.DataFrame:
     """국내 DN 세금계산서 미발행 건 — 출고 완료 but 세금계산서/선수금 세금계산서 모두 미발행."""
     conn = _conn()
@@ -479,6 +573,43 @@ def _render_cards(items: list[dict], cols_per_row: int = 3):
                     st.markdown(item["title"])
                     for line in item["lines"]:
                         st.caption(line)
+
+
+# 지연 버킷 (PO 확정 지연 / EXW 완료 미출고 공통)
+_OVERDUE_BUCKETS: list[tuple[int | None, str, str]] = [
+    (7,    "🟡", "~7일"),
+    (14,   "🟠", "8~14일"),
+    (30,   "🔴", "15~30일"),
+    (None, "⚫", "30일+"),
+]
+
+
+def _assign_bucket(days: int) -> tuple[int, str, str]:
+    """경과일 → (sort_key, icon, label)"""
+    for i, (threshold, icon, label) in enumerate(_OVERDUE_BUCKETS):
+        if threshold is None or days <= threshold:
+            return (i, icon, label)
+    return (len(_OVERDUE_BUCKETS) - 1, "⚫", "30일+")
+
+
+def _render_bucketed_cards(items_with_bucket: list[dict], cols_per_row: int = 2):
+    """버킷별 그룹 헤더 + 카드 렌더링.
+
+    items_with_bucket: [{"bucket_key": int, "bucket_icon": str, "bucket_label": str, "title": ..., "lines": [...]}]
+    """
+    if not items_with_bucket:
+        return
+    items_with_bucket.sort(key=lambda x: (-x["bucket_key"], x.get("days", 0)))
+    # 심각도 높은 버킷부터 (역순)
+    from itertools import groupby as _groupby
+    for bkey, grp in _groupby(
+        sorted(items_with_bucket, key=lambda x: x["bucket_key"], reverse=True),
+        key=lambda x: (x["bucket_key"], x["bucket_icon"], x["bucket_label"]),
+    ):
+        grp_list = list(grp)
+        _, icon, label = bkey
+        st.caption(f"{icon} **{label}** ({len(grp_list)}건)")
+        _render_cards(grp_list, cols_per_row=cols_per_row)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1007,100 +1138,312 @@ def pg_today(market, sectors, customers, **_):
     # ── 납기 캘린더 ──
     _render_delivery_calendar(so_pending, dn)
 
-    # ── EXW 출고 지연 (EXW NOAH < 오늘 & PO 미완료) ──
-    st.subheader("🔴 EXW 출고 지연")
-    po_st = load_po_status()
-    if not so_pending.empty and not po_st.empty and "exw_noah" in so_pending.columns:
-        # PO Status가 모든 행이 Invoiced/Cancelled인 SO_ID만 완료 처리
-        _done_flag = po_st["po_status"].str.startswith("Invoiced") | (po_st["po_status"] == "Cancelled")
-        _done_ratio = po_st.assign(_d=_done_flag).groupby("SO_ID")["_d"].mean()
-        done_so = set(_done_ratio[_done_ratio == 1.0].index)
-        # EXW 지난 건 중 PO가 Invoiced가 아닌 건
-        exw_overdue = so_pending[
-            so_pending["exw_noah"].notna()
-            & (so_pending["exw_noah"].dt.date < _TODAY_DATE)
-            & (~so_pending["SO_ID"].isin(done_so))
-        ].copy()
-        if not exw_overdue.empty:
-            # PO Status 조인 (SO별 대표 status)
-            po_repr = po_st[~po_st["po_status"].isin(("Cancelled",))].drop_duplicates(subset=["SO_ID"])
-            exw_overdue = exw_overdue.merge(po_repr[["SO_ID", "po_status"]], on="SO_ID", how="left")
-            exw_overdue["po_status"] = exw_overdue["po_status"].fillna("")
+    # ── PO 확정 지연 (Sent → Confirmed 미전환) ──
+    st.subheader("📋 PO 확정 지연")
+    po_sent = load_po_sent_pending()
+    if not po_sent.empty:
+        # 사이드바 필터 적용
+        if market != "전체":
+            po_sent = po_sent[po_sent["market"] == market]
+        # SO 메타 조인 (customer_name, sector)
+        so_meta = so[["SO_ID", "customer_name", "sector"]].drop_duplicates(subset=["SO_ID"])
+        po_sent = po_sent.merge(so_meta, on="SO_ID", how="left")
+        po_sent["customer_name"] = po_sent["customer_name"].fillna("")
+        po_sent["sector"] = po_sent["sector"].fillna("")
+        if sectors:
+            po_sent = po_sent[po_sent["sector"].isin(sectors)]
+        if customers:
+            po_sent = po_sent[po_sent["customer_name"].isin(customers)]
 
-            agg = dict(
-                고객명=("customer_name", "first"),
-                요청납기=("requested_date", "min"),
-                EXW=("exw_noah", "min"),
-                마켓=("market", "first"),
-                품목수=("line_item", "nunique"),
-                총수량=("qty", "sum"),
-                총금액=("amount_krw", "sum"),
-                PO상태=("po_status", "first"),
+    if not po_sent.empty and po_sent["order_date"].notna().any():
+        # SO_ID + PO_ID 기준 집계
+        g = po_sent.groupby(["SO_ID", "PO_ID"]).agg(
+            고객명=("customer_name", "first"),
+            마켓=("market", "first"),
+            품목수=("po_qty", "count"),
+            총수량=("po_qty", "sum"),
+            총ICO=("po_total_ico", "sum"),
+            발주일=("order_date", "min"),
+            공장EXW=("factory_exw", "min"),
+            OC번호=("noah_oc", "first"),
+        ).reset_index()
+        g = g[g["발주일"].notna()].copy()
+        g["경과일"] = g["발주일"].apply(lambda d: (_TODAY_DATE - d.date()).days if pd.notna(d) else 0)
+        g = g[g["경과일"] > 0].copy()
+
+        if not g.empty:
+            st.caption(f"공장 발주(Sent) 후 확정(Confirmed) 미전환 건: **{len(g)}건**")
+            g = g.copy()
+            g[["bk", "bk_icon", "bk_label"]] = g["경과일"].apply(
+                lambda d: pd.Series(_assign_bucket(d))
             )
-            if "customer_po" in exw_overdue.columns:
-                agg["고객PO"] = ("customer_po", "first")
-            g = exw_overdue.groupby("SO_ID").agg(**agg).reset_index().sort_values("EXW")
 
-            st.caption(f"EXW NOAH 일자가 경과했으나 공장 출고가 완료되지 않은 건: **{len(g)}건**")
-            items = []
-            for _, r in g.iterrows():
-                days_late = (_TODAY_DATE - r["EXW"].date()).days
-                mkt_tag = "🇰🇷" if r["마켓"] == "국내" else "🌏"
-                po_info = f" · PO: {r['고객PO']}" if r.get("고객PO") else ""
-                req = fmt_date(r["요청납기"]) if pd.notna(r["요청납기"]) else "ASAP"
-                items.append({
-                    "title": f"🔴 {mkt_tag} **{r['SO_ID']}**  {r['고객명']}",
-                    "lines": [
-                        f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
-                        f"🏭 EXW {fmt_date(r['EXW'])} (**{days_late}일 지연**) · 납기 {req}",
-                        f"📋 PO: {r['PO상태'] if r['PO상태'] else '—'}",
-                    ],
-                })
-            _render_cards(items, cols_per_row=2)
+            tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
+            for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
+                with tab:
+                    mkt_g = g[g["마켓"] == mkt]
+                    if mkt_g.empty:
+                        st.info(f"{mkt} 해당 건 없음")
+                        continue
+                    mkt_g = mkt_g.sort_values(["bk", "경과일"], ascending=[False, False])
+
+                    from itertools import groupby as _igroupby
+                    for bkey, grp in _igroupby(
+                        mkt_g.itertuples(),
+                        key=lambda r: (r.bk, r.bk_icon, r.bk_label),
+                    ):
+                        grp_list = list(grp)
+                        _, icon, label = bkey
+                        st.caption(f"{icon} **{label}** ({len(grp_list)}건)")
+                        for r in grp_list:
+                            so_id = r.SO_ID
+                            po_id = r.PO_ID
+                            cust = getattr(r, "고객명", "")
+                            n_items = getattr(r, "품목수", 0)
+                            tot_qty = int(getattr(r, "총수량", 0))
+                            tot_ico = getattr(r, "총ICO", 0)
+                            ord_dt = getattr(r, "발주일", pd.NaT)
+                            exw_dt = getattr(r, "공장EXW", pd.NaT)
+                            oc = getattr(r, "OC번호", "")
+                            days = getattr(r, "경과일", 0)
+                            oc_info = f" · OC: {oc}" if oc else ""
+                            exw_info = f" · EXW {fmt_date(exw_dt)}" if pd.notna(exw_dt) else ""
+                            header = (
+                                f"{icon} **{po_id}**  {cust} — "
+                                f"SO: {so_id} · 품목 {n_items}건 · 수량 {tot_qty:,} · {fmt_krw(tot_ico)}{oc_info} · "
+                                f"발주일 {fmt_date(ord_dt)} (**{days}일**){exw_info}"
+                            )
+                            with st.expander(header):
+                                detail = po_sent[
+                                    (po_sent["SO_ID"] == so_id) & (po_sent["PO_ID"] == po_id)
+                                ][["SO_ID", "PO_ID", "po_qty", "po_total_ico", "order_date", "factory_exw", "noah_oc"]].copy()
+                                detail.columns = ["SO_ID", "PO_ID", "수량", "ICO 금액", "발주일", "공장 EXW", "OC No."]
+                                detail["ICO 금액"] = detail["ICO 금액"].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
+                                detail["수량"] = detail["수량"].apply(lambda v: int(v) if pd.notna(v) else 0)
+                                detail["발주일"] = detail["발주일"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
+                                detail["공장 EXW"] = detail["공장 EXW"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
+                                st.dataframe(detail, use_container_width=True, hide_index=True)
         else:
-            st.success("EXW 출고 지연 건 없음")
+            st.success("PO 확정 지연 건 없음")
     else:
-        st.info("데이터 없음")
+        st.success("PO 확정 지연 건 없음")
 
-    # ── 납기 현황 (국내/해외 탭) ──
-    st.subheader("납기 현황 (미완료 건)")
-    # 이번 주 + 지연 건 합산
-    show_due = pd.concat([overdue, week_due]).drop_duplicates() if not overdue.empty or not week_due.empty else pd.DataFrame()
+    # ── EXW 완료 미출고 (PO 공장 EXW date < 오늘 & 미Invoiced) ──
+    # PO line item 단위: 공장 EXW 경과했는데 Invoiced 안 된 라인
+    st.subheader("🚨 EXW 완료 미출고")
+    po_exw = load_po_exw_pending()
+    if not po_exw.empty:
+        # 공장 EXW < 오늘 필터
+        po_exw = po_exw[po_exw["factory_exw"].notna() & (po_exw["factory_exw"].dt.date < _TODAY_DATE)].copy()
+        # 사이드바 필터 적용
+        if market != "전체":
+            po_exw = po_exw[po_exw["market"] == market]
+        # SO 메타 조인
+        so_meta = so[["SO_ID", "customer_name", "sector", "customer_po", "delivery_date"]].drop_duplicates(subset=["SO_ID"])
+        po_exw = po_exw.merge(so_meta, on="SO_ID", how="left")
+        po_exw["customer_name"] = po_exw["customer_name"].fillna("")
+        po_exw["sector"] = po_exw["sector"].fillna("")
+        if sectors:
+            po_exw = po_exw[po_exw["sector"].isin(sectors)]
+        if customers:
+            po_exw = po_exw[po_exw["customer_name"].isin(customers)]
 
-    if not show_due.empty:
+    if not po_exw.empty:
+        # SO_ID 단위 집계 (PO line 기준)
+        g = po_exw.groupby("SO_ID").agg(
+            고객명=("customer_name", "first"),
+            고객PO=("customer_po", "first"),
+            PO_ID=("PO_ID", "first"),
+            OC번호=("noah_oc", "first"),
+            마켓=("market", "first"),
+            품목수=("line_item", "nunique"),
+            총수량=("po_qty", "sum"),
+            총ICO=("po_total_ico", "sum"),
+            EXW=("factory_exw", "min"),
+            납기=("delivery_date", "min"),
+        ).reset_index().sort_values("EXW")
+        g["경과일"] = g["EXW"].apply(lambda d: (_TODAY_DATE - d.date()).days if pd.notna(d) else 0)
+
+        st.caption(
+            f"EXW 일자 경과 후 Invoiced 미완료 건: **{len(g)}건** "
+            "— 공장에 EXW date 재확인 필요"
+        )
+
         tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
         for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
             with tab:
-                mkt_df = show_due[show_due["market"] == mkt]
-                if mkt_df.empty:
-                    st.info(f"{mkt} 납기 예정/지연 건 없음")
+                mkt_g = g[g["마켓"] == mkt]
+                if mkt_g.empty:
+                    st.info(f"{mkt} 해당 건 없음")
                     continue
-                # SO_ID별 그룹
-                g = mkt_df.groupby("SO_ID").agg(
-                    고객명=("customer_name", "first"),
-                    고객PO=("customer_po", "first"),
-                    품목수=("line_item", "nunique"),
-                    총수량=("qty", "sum"),
-                    총금액=("amount_krw", "sum"),
-                    납기일=("delivery_date", "min"),
-                    공장출고일=("exw_noah", "min"),
-                    Status=("status", "first"),
-                ).reset_index().sort_values("납기일")
-                g["지연"] = g["납기일"].dt.date < _TODAY_DATE
-                items = []
-                for _, r in g.iterrows():
-                    icon = _status_icon(r["Status"], r["지연"])
-                    po_info = f" · PO: {r['고객PO']}" if r["고객PO"] else ""
-                    items.append({
-                        "title": f"{icon}  **{r['SO_ID']}**  {r['고객명']}",
-                        "lines": [
-                            f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
-                            f"📅 납기 {fmt_date(r['납기일'])} · EXW {fmt_date(r['공장출고일'])}",
-                        ],
-                    })
-                _render_cards(items)
+                mkt_g = mkt_g.copy()
+                mkt_g[["bk", "bk_icon", "bk_label"]] = mkt_g["경과일"].apply(
+                    lambda d: pd.Series(_assign_bucket(d))
+                )
+                mkt_g = mkt_g.sort_values(["bk", "경과일"], ascending=[False, False])
+                mkt_lines = po_exw[po_exw["market"] == mkt]
+
+                from itertools import groupby as _igroupby
+                for bkey, grp in _igroupby(
+                    mkt_g.itertuples(),
+                    key=lambda r: (r.bk, r.bk_icon, r.bk_label),
+                ):
+                    grp_list = list(grp)
+                    _, icon, label = bkey
+                    st.caption(f"{icon} **{label}** ({len(grp_list)}건)")
+                    for r in grp_list:
+                        so_id = r.SO_ID
+                        cust = getattr(r, "고객명", "")
+                        cust_po = getattr(r, "고객PO", "")
+                        po_id = r.PO_ID
+                        oc = r.OC번호
+                        n_items = getattr(r, "품목수", 0)
+                        tot_qty = getattr(r, "총수량", 0)
+                        tot_ico = getattr(r, "총ICO", 0)
+                        exw_dt = r.EXW
+                        days = getattr(r, "경과일", 0)
+                        del_dt = getattr(r, "납기", pd.NaT)
+                        po_info = f" · PO: {cust_po}" if cust_po else ""
+                        oc_info = f" · OC: {oc}" if oc else ""
+                        req = fmt_date(del_dt) if pd.notna(del_dt) else "—"
+                        header = (
+                            f"{icon} **{so_id}** ({po_id})  {cust} — "
+                            f"품목 {n_items}건 · 수량 {int(tot_qty):,} · {fmt_krw(tot_ico)}{po_info}{oc_info} · "
+                            f"EXW {fmt_date(exw_dt)} (**{days}일**)"
+                        )
+                        with st.expander(header):
+                            detail = mkt_lines[mkt_lines["SO_ID"] == so_id][
+                                ["line_item", "item_name", "po_qty", "po_total_ico", "factory_exw", "po_status"]
+                            ].copy()
+                            detail.columns = ["Line", "품목명", "수량", "ICO 금액", "공장 EXW", "Status"]
+                            detail["ICO 금액"] = detail["ICO 금액"].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
+                            detail["공장 EXW"] = detail["공장 EXW"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
+                            detail = detail.sort_values("Line").reset_index(drop=True)
+                            st.dataframe(detail, use_container_width=True, hide_index=True)
     else:
-        st.info("납기 예정/지연 건 없음")
+        st.success("EXW 미출고 건 없음")
+
+    # ── 납기 현황 (납기 경과 & DN 미생성/부분출고) ──
+    # 납품 추적: 납기 지났는데 DN이 없거나 출고 수량이 부족한 건
+    # → 납기 경과 라인이 있는 SO 식별 후, 해당 SO의 **전체 라인** 집계
+    st.subheader("📦 납기 현황 (미완료 건)")
+
+    # Step 1: 납기 경과 라인에서 SO_ID 후보 식별
+    _so_due_lines = so[
+        so["delivery_date"].notna()
+        & (so["delivery_date"].dt.date < _TODAY_DATE)
+        & (so["status"] != "출고 완료")
+    ] if not so.empty else pd.DataFrame()
+
+    if not _so_due_lines.empty:
+        # DN qty+금액 집계
+        if not dn.empty:
+            dn_agg = dn.groupby(["SO_ID", "line_item"]).agg(
+                dn_qty=("qty", "sum"),
+                dn_amount=("amount_krw", "sum"),
+            ).reset_index()
+        else:
+            dn_agg = pd.DataFrame(columns=["SO_ID", "line_item", "dn_qty", "dn_amount"])
+
+        # Step 2: 납기 경과 라인에 DN 매칭 → 잔여 있는 SO_ID만, 납기 경과 라인만
+        due_check = _so_due_lines.merge(dn_agg, on=["SO_ID", "line_item"], how="left")
+        due_check["dn_qty"] = due_check["dn_qty"].fillna(0)
+        due_check["dn_amount"] = due_check["dn_amount"].fillna(0)
+        due_check["remaining_qty"] = due_check["qty"] - due_check["dn_qty"]
+        due_check["remaining_amount"] = due_check["amount_krw"] - due_check["dn_amount"]
+        so_ids_with_remaining = set(due_check.loc[due_check["remaining_qty"] > 0, "SO_ID"])
+
+        # 납기 경과 라인 중 잔여 있는 SO만 (미래 납기 라인 제외)
+        due_pending = due_check[due_check["SO_ID"].isin(so_ids_with_remaining)].copy() if so_ids_with_remaining else pd.DataFrame()
+
+        if not due_pending.empty:
+            _n_so = due_pending["SO_ID"].nunique()
+            st.caption(
+                f"납기 경과 후 DN 미생성 또는 부분출고 건: **{_n_so}건** "
+                "— DN 발급 또는 납기 일정 확인 필요"
+            )
+            tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
+            for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
+                with tab:
+                    mkt_df = due_pending[due_pending["market"] == mkt]
+                    if mkt_df.empty:
+                        st.info(f"{mkt} 납기 지연 건 없음")
+                        continue
+                    g = mkt_df.groupby("SO_ID").agg(
+                        고객명=("customer_name", "first"),
+                        고객PO=("customer_po", "first"),
+                        품목수=("line_item", "nunique"),
+                        총수량=("qty", "sum"),
+                        출고수량=("dn_qty", "sum"),
+                        잔여수량=("remaining_qty", "sum"),
+                        총금액=("amount_krw", "sum"),
+                        잔여금액=("remaining_amount", "sum"),
+                        납기일=("delivery_date", "min"),
+                        공장출고일=("exw_noah", "min"),
+                        Status=("status", "first"),
+                    ).reset_index().sort_values("납기일")
+                    g["경과일"] = g["납기일"].apply(
+                        lambda d: (_TODAY_DATE - d.date()).days if pd.notna(d) else 0
+                    )
+                    # 버킷 분류
+                    g = g.copy()
+                    g[["bk", "bk_icon", "bk_label"]] = g["경과일"].apply(
+                        lambda d: pd.Series(_assign_bucket(d))
+                    )
+                    g = g.sort_values(["bk", "경과일"], ascending=[False, False])
+
+                    from itertools import groupby as _igroupby
+                    for bkey, grp in _igroupby(
+                        g.itertuples(),
+                        key=lambda r: (r.bk, r.bk_icon, r.bk_label),
+                    ):
+                        grp_list = list(grp)
+                        _, icon, label = bkey
+                        st.caption(f"{icon} **{label}** ({len(grp_list)}건)")
+                        for r in grp_list:
+                            so_id = r.SO_ID
+                            cust = getattr(r, "고객명", "")
+                            cust_po = getattr(r, "고객PO", "")
+                            n_items = getattr(r, "품목수", 0)
+                            tot_qty = int(getattr(r, "총수량", 0))
+                            dn_shipped = int(getattr(r, "출고수량", 0))
+                            remaining = int(getattr(r, "잔여수량", 0))
+                            tot_amt = getattr(r, "총금액", 0)
+                            rem_amt = getattr(r, "잔여금액", 0)
+                            del_dt = getattr(r, "납기일", pd.NaT)
+                            exw_dt = getattr(r, "공장출고일", pd.NaT)
+                            days = getattr(r, "경과일", 0)
+                            po_info = f" · PO: {cust_po}" if cust_po else ""
+                            qty_tag = f"잔여 {remaining:,}/{tot_qty:,}" if dn_shipped > 0 else f"수량 {tot_qty:,}"
+                            amt_tag = f"{fmt_krw(rem_amt)}/{fmt_krw(tot_amt)}" if dn_shipped > 0 else fmt_krw(tot_amt)
+                            header = (
+                                f"{icon} **{so_id}**  {cust} — "
+                                f"{qty_tag} · {amt_tag}{po_info} · "
+                                f"납기 {fmt_date(del_dt)} (**{days}일**)"
+                            )
+                            with st.expander(header):
+                                detail = mkt_df[mkt_df["SO_ID"] == so_id][
+                                    ["line_item", "item_name", "qty", "dn_qty", "remaining_qty",
+                                     "amount_krw", "dn_amount", "remaining_amount", "delivery_date", "exw_noah"]
+                                ].copy()
+                                detail.columns = [
+                                    "Line", "품목명", "주문", "출고", "잔여",
+                                    "주문금액", "출고금액", "잔여금액", "납기", "EXW",
+                                ]
+                                detail["주문금액"] = detail["주문금액"].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
+                                detail["출고금액"] = detail["출고금액"].apply(lambda v: f"{int(v):,}" if v else "")
+                                detail["잔여금액"] = detail["잔여금액"].apply(lambda v: f"{int(v):,}" if v else "")
+                                detail["주문"] = detail["주문"].apply(lambda v: int(v) if pd.notna(v) else 0)
+                                detail["출고"] = detail["출고"].apply(lambda v: int(v) if v else 0)
+                                detail["잔여"] = detail["잔여"].apply(lambda v: int(v) if v else 0)
+                                detail["납기"] = detail["납기"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
+                                detail["EXW"] = detail["EXW"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
+                                detail = detail.sort_values("Line").reset_index(drop=True)
+                                st.dataframe(detail, use_container_width=True, hide_index=True)
+        else:
+            st.success("납기 지연 건 없음")
+    else:
+        st.info("납기 지연 건 없음")
 
     # ── 해외 선적 Action Items ──
     if market != "국내":
@@ -1135,41 +1478,70 @@ def pg_today(market, sectors, customers, **_):
                     운송업체=("carrier", "first"),
                 ).reset_index().sort_values("공장출고일")
 
+                # 공장출고일 기준 경과일 + 버킷
+                ps["경과일"] = ps["공장출고일"].apply(
+                    lambda d: (_TODAY_DATE - d.date()).days if pd.notna(d) else 0
+                )
+                ps[["bk", "bk_icon", "bk_label"]] = ps["경과일"].apply(
+                    lambda d: pd.Series(_assign_bucket(d))
+                )
+
+                # 포워더 미정 / 선적 대기 탭
                 ps_no_carrier = ps[ps["운송업체"] == ""]
                 ps_has_carrier = ps[ps["운송업체"] != ""]
 
-                def _build_ship_cards(df, arranging=False):
-                    items = []
-                    for _, r in df.iterrows():
-                        bl = r["BL"] if pd.notna(r["BL"]) else ""
-                        po_info = f" · PO: {r['고객PO']}" if r["고객PO"] else ""
-                        carrier_txt = r["운송업체"] if r["운송업체"] else "arranging..."
-                        lines = [
-                            f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
-                            f"출고 {fmt_date(r['공장출고일'])} → 픽업 {fmt_date(r['픽업일'])} → 선적예정 {fmt_date(r['선적예정일'])}",
-                            f"🚛 운송 업체: {carrier_txt}",
-                        ]
-                        if bl:
-                            lines.append(f"B/L: {bl}")
-                        icon = "🔴" if arranging else "⏳"
-                        items.append({
-                            "title": f"{icon} **{r['DN_ID']}**  {r['고객명']}",
-                            "lines": lines,
-                        })
-                    return items
-
-                # 포워더 미정 (먼저 표시)
-                if not ps_no_carrier.empty:
-                    st.markdown(f"**🔴 포워더 미정** — {len(ps_no_carrier)}건 arrange 필요")
-                    _render_cards(_build_ship_cards(ps_no_carrier, arranging=True))
-
-                # 포워더 확정
-                if not ps_has_carrier.empty:
-                    st.markdown(f"**⏳ 선적 대기** — {len(ps_has_carrier)}건")
-                    _render_cards(_build_ship_cards(ps_has_carrier, arranging=False))
-
-                if ps_no_carrier.empty and ps_has_carrier.empty:
-                    st.success("선적 대기 건 없음")
+                tab_has, tab_no = st.tabs([
+                    f"⏳ 선적 대기 ({len(ps_has_carrier)}건)",
+                    f"🔴 포워더 미정 ({len(ps_no_carrier)}건)",
+                ])
+                for tab, df, icon_char in [
+                    (tab_has, ps_has_carrier, "⏳"),
+                    (tab_no, ps_no_carrier, "🔴"),
+                ]:
+                    with tab:
+                        if df.empty:
+                            st.success("해당 건 없음")
+                            continue
+                        df = df.sort_values(["bk", "경과일"], ascending=[False, False])
+                        from itertools import groupby as _igroupby
+                        for bkey, grp in _igroupby(
+                            df.itertuples(),
+                            key=lambda r: (r.bk, r.bk_icon, r.bk_label),
+                        ):
+                            grp_list = list(grp)
+                            _, bk_icon, label = bkey
+                            st.caption(f"{bk_icon} **{label}** ({len(grp_list)}건)")
+                            for r in grp_list:
+                                dn_id = r.DN_ID
+                                cust = getattr(r, "고객명", "")
+                                cust_po = getattr(r, "고객PO", "")
+                                n_items = getattr(r, "품목수", 0)
+                                tot_qty = int(getattr(r, "총수량", 0))
+                                tot_amt = getattr(r, "총금액", 0)
+                                days = getattr(r, "경과일", 0)
+                                carrier = getattr(r, "운송업체", "")
+                                bl = r.BL if pd.notna(r.BL) else ""
+                                po_info = f" · PO: {cust_po}" if cust_po else ""
+                                carrier_txt = carrier if carrier else "arranging..."
+                                bl_tag = f" · B/L: {bl}" if bl else ""
+                                header = (
+                                    f"{icon_char} **{dn_id}**  {cust} — "
+                                    f"품목 {n_items}건 · 수량 {tot_qty:,} · {fmt_krw(tot_amt)}{po_info} · "
+                                    f"출고 {fmt_date(getattr(r, '공장출고일', pd.NaT))} (**{days}일**) · "
+                                    f"🚛 {carrier_txt}{bl_tag}"
+                                )
+                                with st.expander(header):
+                                    detail = pending_ship[pending_ship["DN_ID"] == dn_id][
+                                        ["SO_ID", "item_name", "qty", "amount_krw",
+                                         "factory_date", "pickup_date", "expected_ship_date", "carrier"]
+                                    ].copy()
+                                    detail.columns = ["SO_ID", "품목명", "수량", "금액", "공장출고", "픽업", "선적예정", "운송업체"]
+                                    detail["금액"] = detail["금액"].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
+                                    detail["수량"] = detail["수량"].apply(lambda v: int(v) if pd.notna(v) else 0)
+                                    for dc in ("공장출고", "픽업", "선적예정"):
+                                        detail[dc] = detail[dc].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
+                                    detail["운송업체"] = detail["운송업체"].fillna("")
+                                    st.dataframe(detail, use_container_width=True, hide_index=True)
             else:
                 st.success("선적 대기 건 없음")
 
