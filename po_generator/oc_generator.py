@@ -222,8 +222,8 @@ def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> No
 
     currency = get_value(order_data, 'currency', '')
     if currency:
-        ws.range(f'H{total_row}').value = currency
-        logger.debug(f"Currency 업데이트: H{total_row} = {currency}")
+        ws.range(f'{COL_CURRENCY}{total_row}').value = currency
+        logger.debug(f"Currency 업데이트: {COL_CURRENCY}{total_row} = {currency}")
 
     sum_formula = f"=SUM(I{ITEM_START_ROW}:I{last_item_row})"
     ws.range(f'I{total_row}').formula = sum_formula
