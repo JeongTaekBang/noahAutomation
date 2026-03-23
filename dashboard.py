@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import streamlit as st
 
 from po_generator.config import DB_FILE
@@ -280,6 +281,7 @@ def load_po_sent_pending() -> pd.DataFrame:
         df = pd.read_sql_query("""
             SELECT SO_ID,
                    PO_ID,
+                   COALESCE([Item name], '') AS item_name,
                    COALESCE([공장 발주 날짜], '') AS order_date,
                    COALESCE([공장 EXW date], '') AS factory_exw,
                    CAST([Item qty] AS REAL) AS po_qty,
@@ -291,6 +293,7 @@ def load_po_sent_pending() -> pd.DataFrame:
             UNION ALL
             SELECT SO_ID,
                    PO_ID,
+                   COALESCE([Item name], '') AS item_name,
                    COALESCE([공장 발주 날짜], '') AS order_date,
                    COALESCE([공장 EXW date], '') AS factory_exw,
                    CAST([Item qty] AS REAL) AS po_qty,
@@ -627,6 +630,113 @@ def main():
         st.info("위 명령어로 Excel → SQLite 동기화를 먼저 수행하세요.")
         return
 
+    # ── 테마 전환 (시스템 테마 감지 → 토글로 반대 테마) ──
+    try:
+        sys_dark = st.context.theme.type == "dark"
+    except AttributeError:
+        sys_dark = st.get_option("theme.base") != "light"
+    toggle_label = ":sunny: Light Mode" if sys_dark else ":crescent_moon: Dark Mode"
+    override = st.sidebar.toggle(toggle_label, value=False, key="theme_toggle")
+    want_dark = (not sys_dark) if override else sys_dark
+
+    _DARK_CSS = """
+    <style>
+    .stApp, [data-testid="stAppViewContainer"] { background-color: #0e1117 !important; color: #fafafa !important; }
+    [data-testid="stSidebar"], [data-testid="stSidebar"] > div { background-color: #1a1d24 !important; color: #fafafa !important; }
+    [data-testid="stHeader"] { background-color: #0e1117 !important; }
+    [data-testid="stMetric"], [data-testid="stMetricValue"],
+    [data-testid="stMetricLabel"], [data-testid="stMetricDelta"] { color: #fafafa !important; }
+    .stMarkdown, .stMarkdown p, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown li,
+    label, .stSelectbox label, .stMultiSelect label, .stRadio label, [data-testid="stWidgetLabel"] { color: #fafafa !important; }
+    [data-testid="stExpander"] { border-color: #333 !important; }
+    [data-testid="stExpander"] summary { color: #fafafa !important; }
+    .stDataFrame, .stTable { color: #fafafa !important; }
+    .stTabs [data-baseweb="tab-list"] button { color: #ccc !important; }
+    .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] { color: #fafafa !important; }
+    hr { border-color: #333 !important; }
+    </style>
+    """
+    _LIGHT_CSS = """
+    <style>
+    /* 메인 배경 */
+    .stApp, [data-testid="stAppViewContainer"] { background-color: #ffffff !important; color: #1a1a1a !important; }
+    /* 사이드바 */
+    [data-testid="stSidebar"], [data-testid="stSidebar"] > div { background-color: #f0f2f6 !important; color: #1a1a1a !important; }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] .stRadio label,
+    [data-testid="stSidebar"] [data-testid="stWidgetLabel"],
+    [data-testid="stSidebar"] [data-baseweb="radio"] label,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] p { color: #1a1a1a !important; }
+    /* 헤더 */
+    [data-testid="stHeader"] { background-color: #ffffff !important; }
+    /* metric */
+    [data-testid="stMetric"], [data-testid="stMetricValue"],
+    [data-testid="stMetricLabel"], [data-testid="stMetricDelta"] { color: #1a1a1a !important; }
+    /* 텍스트 전체 */
+    .stMarkdown, .stMarkdown p, .stMarkdown h1, .stMarkdown h2, .stMarkdown h3, .stMarkdown h4, .stMarkdown li,
+    label, .stSelectbox label, .stMultiSelect label, .stRadio label,
+    [data-testid="stWidgetLabel"], span, p { color: #1a1a1a !important; }
+    /* selectbox / multiselect / date_input — 테두리 + 텍스트 */
+    [data-baseweb="select"] { background-color: #ffffff !important; }
+    [data-baseweb="select"] > div { background-color: #ffffff !important; border-color: #ccc !important; color: #1a1a1a !important; }
+    [data-baseweb="select"] span, [data-baseweb="select"] div { color: #1a1a1a !important; }
+    [data-baseweb="input"] { background-color: #ffffff !important; border-color: #ccc !important; color: #1a1a1a !important; }
+    [data-baseweb="input"] input { color: #1a1a1a !important; }
+    [data-baseweb="popover"] li { color: #1a1a1a !important; background-color: #ffffff !important; }
+    [data-baseweb="popover"] li:hover { background-color: #e8e8e8 !important; }
+    /* date input */
+    [data-testid="stDateInput"] input { background-color: #ffffff !important; border-color: #ccc !important; color: #1a1a1a !important; }
+    [data-testid="stDateInput"] [data-baseweb="calendar"] { background-color: #ffffff !important; color: #1a1a1a !important; }
+    /* multiselect 태그 */
+    [data-baseweb="tag"] { background-color: #e0e0e0 !important; color: #1a1a1a !important; }
+    /* expander */
+    [data-testid="stExpander"] { border-color: #ddd !important; }
+    [data-testid="stExpander"] summary,
+    [data-testid="stExpander"] summary span { color: #1a1a1a !important; }
+    /* 데이터프레임/테이블 */
+    .stDataFrame, .stTable { color: #1a1a1a !important; }
+    /* 탭 */
+    .stTabs [data-baseweb="tab-list"] button { color: #555 !important; }
+    .stTabs [data-baseweb="tab-list"] button[aria-selected="true"] { color: #1a1a1a !important; }
+    /* divider */
+    hr { border-color: #ddd !important; }
+    /* caption */
+    .stCaption, [data-testid="stCaptionContainer"] { color: #666 !important; }
+    /* 버튼 (새로고침, 이전달/다음달 등) */
+    .stButton > button,
+    [data-testid="stSidebar"] .stButton > button,
+    [data-testid="baseButton-secondary"] {
+        background-color: #f0f2f6 !important;
+        color: #1a1a1a !important;
+        border: 1px solid #ccc !important;
+    }
+    .stButton > button:hover,
+    [data-testid="stSidebar"] .stButton > button:hover,
+    [data-testid="baseButton-secondary"]:hover {
+        background-color: #e0e2e6 !important;
+        border-color: #999 !important;
+    }
+    /* 아이콘 버튼 (캘린더 화살표 등) */
+    [data-baseweb="button-group"] button,
+    [data-baseweb="calendar"] button,
+    button[kind="icon"] {
+        color: #1a1a1a !important;
+        background-color: transparent !important;
+    }
+    [data-baseweb="button-group"] button:hover,
+    [data-baseweb="calendar"] button:hover {
+        background-color: #e0e2e6 !important;
+    }
+    </style>
+    """
+    # Plotly 템플릿 전역 설정
+    pio.templates.default = "plotly" if not want_dark else "plotly_dark"
+    if override:
+        st.markdown(_DARK_CSS if want_dark else _LIGHT_CSS, unsafe_allow_html=True)
+
     # ── 사이드바 ──
     st.sidebar.title("NOAH 대시보드")
     page = st.sidebar.radio("페이지", [
@@ -918,6 +1028,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
         if not day_exw.empty:
             agg = dict(
                 고객명=("customer_name", "first"),
+                섹터=("sector", "first"),
                 품목수=("line_item", "nunique") if "line_item" in day_exw.columns else ("os_name", "count"),
                 총수량=("qty", "sum"),
                 총금액=("amount_krw", "sum"),
@@ -941,8 +1052,9 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 ]
                 if pd.notna(r["납품예정일"]):
                     lines.append(f"📦 납품 예정일 {fmt_date(r['납품예정일'])}")
+                sec_tag = f" · {r['섹터']}" if r["섹터"] else ""
                 items.append({
-                    "title": f"{icon} {mkt_tag} **{r['SO_ID']}**  {r['고객명']}",
+                    "title": f"{icon} {mkt_tag} **{r['SO_ID']}**  {r['고객명']}{sec_tag}",
                     "lines": lines,
                 })
             _render_cards(items, cols_per_row=2)
@@ -959,11 +1071,13 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
         st.markdown("**🚛 공장 픽업** — 해외 DN 공장 픽업 예정")
         if not day_pickup.empty:
             day_pickup["carrier"] = day_pickup["carrier"].fillna("")
-            so_meta = load_so()[["SO_ID", "customer_po"]].drop_duplicates(subset=["SO_ID"])
+            so_meta = load_so()[["SO_ID", "customer_po", "sector"]].drop_duplicates(subset=["SO_ID"])
             day_pickup = day_pickup.merge(so_meta, on="SO_ID", how="left")
             day_pickup["customer_po"] = day_pickup["customer_po"].fillna("")
+            day_pickup["sector"] = day_pickup["sector"].fillna("")
             pk = day_pickup.groupby("DN_ID").agg(
                 고객명=("customer_name", "first"),
+                섹터=("sector", "first"),
                 고객PO=("customer_po", "first"),
                 품목수=("item_name", "nunique"),
                 총수량=("qty", "sum"),
@@ -982,8 +1096,9 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 ]
                 if r["운송업체"]:
                     lines.append(f"🚛 운송 업체: {r['운송업체']}")
+                sec_tag = f" · {r['섹터']}" if r["섹터"] else ""
                 items.append({
-                    "title": f"🚛 **{r['DN_ID']}**  {r['고객명']}",
+                    "title": f"🚛 **{r['DN_ID']}**  {r['고객명']}{sec_tag}",
                     "lines": lines,
                 })
             _render_cards(items, cols_per_row=2)
@@ -1003,6 +1118,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
             if not day_so.empty:
                 agg = dict(
                     고객명=("customer_name", "first"),
+                    섹터=("sector", "first"),
                     품목수=("line_item", "nunique") if "line_item" in day_so.columns else ("os_name", "count"),
                     총수량=("qty", "sum"),
                     총금액=("amount_krw", "sum"),
@@ -1017,8 +1133,9 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 for _, r in g.iterrows():
                     icon = _status_icon(r["Status"], overdue_flag)
                     po_info = f" · PO: {r['고객PO']}" if r.get("고객PO") else ""
+                    sec_tag = f" · {r['섹터']}" if r.get("섹터") else ""
                     items.append({
-                        "title": f"{icon}  **{r['SO_ID']}**  {r['고객명']}",
+                        "title": f"{icon}  **{r['SO_ID']}**  {r['고객명']}{sec_tag}",
                         "lines": [
                             f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
                             f"📅 EXW {fmt_date(r['공장출고일'])}",
@@ -1051,6 +1168,8 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 )
                 if "customer_name" in day_dn.columns:
                     agg_dict["고객명"] = ("customer_name", "first")
+                if "sector" in day_dn.columns:
+                    agg_dict["섹터"] = ("sector", "first")
                 agg_dict["SO_ID"] = ("SO_ID", "first")
                 if "line_item" in day_dn.columns:
                     agg_dict["품목수"] = ("line_item", "nunique")
@@ -1060,8 +1179,10 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                     cust = r.get("고객명", "")
                     n_items = r.get("품목수", "?")
                     po_info = f" · PO: {r['고객PO']}" if r.get("고객PO") else ""
+                    sec = r.get("섹터", "")
+                    sec_tag = f" · {sec}" if sec else ""
                     items.append({
-                        "title": f"📦 **{r['DN_ID']}**  {cust}",
+                        "title": f"📦 **{r['DN_ID']}**  {cust}{sec_tag}",
                         "lines": [
                             f"SO: {r['SO_ID']} · 품목 {n_items}건{po_info}",
                             f"수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}",
@@ -1159,6 +1280,7 @@ def pg_today(market, sectors, customers, **_):
         # SO_ID + PO_ID 기준 집계
         g = po_sent.groupby(["SO_ID", "PO_ID"]).agg(
             고객명=("customer_name", "first"),
+            섹터=("sector", "first"),
             마켓=("market", "first"),
             품목수=("po_qty", "count"),
             총수량=("po_qty", "sum"),
@@ -1206,18 +1328,20 @@ def pg_today(market, sectors, customers, **_):
                             exw_dt = getattr(r, "공장EXW", pd.NaT)
                             oc = getattr(r, "OC번호", "")
                             days = getattr(r, "경과일", 0)
+                            sec = getattr(r, "섹터", "")
+                            sec_tag = f" [{sec}]" if sec else ""
                             oc_info = f" · OC: {oc}" if oc else ""
                             exw_info = f" · EXW {fmt_date(exw_dt)}" if pd.notna(exw_dt) else ""
                             header = (
-                                f"{icon} **{po_id}**  {cust} — "
+                                f"{icon} **{po_id}**  {cust}{sec_tag} — "
                                 f"SO: {so_id} · 품목 {n_items}건 · 수량 {tot_qty:,} · {fmt_krw(tot_ico)}{oc_info} · "
                                 f"발주일 {fmt_date(ord_dt)} (**{days}일**){exw_info}"
                             )
                             with st.expander(header):
                                 detail = po_sent[
                                     (po_sent["SO_ID"] == so_id) & (po_sent["PO_ID"] == po_id)
-                                ][["SO_ID", "PO_ID", "po_qty", "po_total_ico", "order_date", "factory_exw", "noah_oc"]].copy()
-                                detail.columns = ["SO_ID", "PO_ID", "수량", "ICO 금액", "발주일", "공장 EXW", "OC No."]
+                                ][["SO_ID", "PO_ID", "item_name", "po_qty", "po_total_ico", "order_date", "factory_exw", "noah_oc"]].copy()
+                                detail.columns = ["SO_ID", "PO_ID", "품목명", "수량", "ICO 금액", "발주일", "공장 EXW", "OC No."]
                                 detail["ICO 금액"] = detail["ICO 금액"].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
                                 detail["수량"] = detail["수량"].apply(lambda v: int(v) if pd.notna(v) else 0)
                                 detail["발주일"] = detail["발주일"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
@@ -1252,6 +1376,7 @@ def pg_today(market, sectors, customers, **_):
         # SO_ID 단위 집계 (PO line 기준)
         g = po_exw.groupby("SO_ID").agg(
             고객명=("customer_name", "first"),
+            섹터=("sector", "first"),
             고객PO=("customer_po", "first"),
             PO_ID=("PO_ID", "first"),
             OC번호=("noah_oc", "first"),
@@ -1294,6 +1419,7 @@ def pg_today(market, sectors, customers, **_):
                     for r in grp_list:
                         so_id = r.SO_ID
                         cust = getattr(r, "고객명", "")
+                        sec = getattr(r, "섹터", "")
                         cust_po = getattr(r, "고객PO", "")
                         po_id = r.PO_ID
                         oc = r.OC번호
@@ -1305,9 +1431,10 @@ def pg_today(market, sectors, customers, **_):
                         del_dt = getattr(r, "납기", pd.NaT)
                         po_info = f" · PO: {cust_po}" if cust_po else ""
                         oc_info = f" · OC: {oc}" if oc else ""
+                        sec_tag = f" [{sec}]" if sec else ""
                         req = fmt_date(del_dt) if pd.notna(del_dt) else "—"
                         header = (
-                            f"{icon} **{so_id}** ({po_id})  {cust} — "
+                            f"{icon} **{so_id}** ({po_id})  {cust}{sec_tag} — "
                             f"품목 {n_items}건 · 수량 {int(tot_qty):,} · {fmt_krw(tot_ico)}{po_info}{oc_info} · "
                             f"EXW {fmt_date(exw_dt)} (**{days}일**)"
                         )
@@ -1371,6 +1498,7 @@ def pg_today(market, sectors, customers, **_):
                         continue
                     g = mkt_df.groupby("SO_ID").agg(
                         고객명=("customer_name", "first"),
+                        섹터=("sector", "first"),
                         고객PO=("customer_po", "first"),
                         품목수=("line_item", "nunique"),
                         총수량=("qty", "sum"),
@@ -1403,6 +1531,7 @@ def pg_today(market, sectors, customers, **_):
                         for r in grp_list:
                             so_id = r.SO_ID
                             cust = getattr(r, "고객명", "")
+                            sec = getattr(r, "섹터", "")
                             cust_po = getattr(r, "고객PO", "")
                             n_items = getattr(r, "품목수", 0)
                             tot_qty = int(getattr(r, "총수량", 0))
@@ -1414,10 +1543,11 @@ def pg_today(market, sectors, customers, **_):
                             exw_dt = getattr(r, "공장출고일", pd.NaT)
                             days = getattr(r, "경과일", 0)
                             po_info = f" · PO: {cust_po}" if cust_po else ""
+                            sec_tag = f" [{sec}]" if sec else ""
                             qty_tag = f"잔여 {remaining:,}/{tot_qty:,}" if dn_shipped > 0 else f"수량 {tot_qty:,}"
                             amt_tag = f"{fmt_krw(rem_amt)}/{fmt_krw(tot_amt)}" if dn_shipped > 0 else fmt_krw(tot_amt)
                             header = (
-                                f"{icon} **{so_id}**  {cust} — "
+                                f"{icon} **{so_id}**  {cust}{sec_tag} — "
                                 f"{qty_tag} · {amt_tag}{po_info} · "
                                 f"납기 {fmt_date(del_dt)} (**{days}일**)"
                             )
@@ -1467,6 +1597,7 @@ def pg_today(market, sectors, customers, **_):
                 _join_pos = lambda s: ", ".join(sorted(s[s != ""].unique())) if (s != "").any() else ""
                 ps = pending_ship.groupby("DN_ID").agg(
                     고객명=("customer_name", "first"),
+                    섹터=("sector", "first"),
                     고객PO=("customer_po", _join_pos),
                     품목수=("item_name", "nunique"),
                     총수량=("qty", "sum"),
@@ -1514,6 +1645,7 @@ def pg_today(market, sectors, customers, **_):
                             for r in grp_list:
                                 dn_id = r.DN_ID
                                 cust = getattr(r, "고객명", "")
+                                sec = getattr(r, "섹터", "")
                                 cust_po = getattr(r, "고객PO", "")
                                 n_items = getattr(r, "품목수", 0)
                                 tot_qty = int(getattr(r, "총수량", 0))
@@ -1522,10 +1654,11 @@ def pg_today(market, sectors, customers, **_):
                                 carrier = getattr(r, "운송업체", "")
                                 bl = r.BL if pd.notna(r.BL) else ""
                                 po_info = f" · PO: {cust_po}" if cust_po else ""
+                                sec_tag = f" [{sec}]" if sec else ""
                                 carrier_txt = carrier if carrier else "arranging..."
                                 bl_tag = f" · B/L: {bl}" if bl else ""
                                 header = (
-                                    f"{icon_char} **{dn_id}**  {cust} — "
+                                    f"{icon_char} **{dn_id}**  {cust}{sec_tag} — "
                                     f"품목 {n_items}건 · 수량 {tot_qty:,} · {fmt_krw(tot_amt)}{po_info} · "
                                     f"출고 {fmt_date(getattr(r, '공장출고일', pd.NaT))} (**{days}일**) · "
                                     f"🚛 {carrier_txt}{bl_tag}"

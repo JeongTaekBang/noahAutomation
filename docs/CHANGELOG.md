@@ -20,6 +20,66 @@
 
 ---
 
+## 2026-03-23: 대시보드 테마 전환 토글 추가
+
+### 변경 내용
+- 사이드바 상단에 테마 전환 토글 추가
+- 시스템 테마(dark/light) 자동 감지 → 토글 시 반대 테마로 전환
+  - 시스템 다크 → ☀️ Light Mode 토글 표시
+  - 시스템 라이트 → 🌙 Dark Mode 토글 표시
+- CSS injection으로 배경, 사이드바, 텍스트, 버튼, 콤보박스, 캘린더, expander 등 전체 UI 커버
+- Plotly 차트 `pio.templates.default`를 `"plotly"` / `"plotly_dark"`로 전역 전환
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `dashboard.py` | 테마 감지(`st.context.theme` / `st.get_option` fallback), 토글 UI, Light/Dark CSS, Plotly 템플릿 전환 |
+
+---
+
+## 2026-03-23: PO 확정 지연 — 품목명 컬럼 추가
+
+### 변경 내용
+- `load_po_sent_pending()` SQL에 `[Item name]` 컬럼 추가 (국내/해외 양쪽)
+- PO 확정 지연 expander 내 detail 테이블에 **품목명** 컬럼 표시 (PO_ID 다음 위치)
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `dashboard.py` | `load_po_sent_pending()` SQL에 `item_name` 추가, detail 테이블 컬럼에 `품목명` 포함 |
+
+---
+
+## 2026-03-23: 오늘의 현황 — 전 섹션 Sector 표시 추가
+
+### 배경
+대시보드 "오늘의 현황" 페이지의 카드/expander에서 어떤 섹터의 건인지 바로 파악할 수 없었음.
+
+### 변경 내용
+
+**Sector 정보 표시 — 5개 영역 일괄 적용**
+
+| 영역 | 표시 위치 | 형식 |
+|------|-----------|------|
+| 날짜 카드 — EXW 출고 예정 | 카드 타이틀 | `고객명 · Sector` |
+| 날짜 카드 — 공장 픽업 | 카드 타이틀 | `고객명 · Sector` |
+| 날짜 카드 — 납기 예정 | 카드 타이틀 | `고객명 · Sector` |
+| 날짜 카드 — 출고 실적 | 카드 타이틀 | `고객명 · Sector` |
+| PO 확정 지연 | expander 헤더 | `고객명 [Sector]` |
+| EXW 완료 미출고 | expander 헤더 | `고객명 [Sector]` |
+| 납기 현황 (미완료 건) | expander 헤더 | `고객명 [Sector]` |
+| 해외 선적 Action Items | expander 헤더 | `고객명 [Sector]` |
+
+- Sector가 비어있는 건은 태그 미표시 (빈 문자열 처리)
+- 공장 픽업 카드: SO 메타 조인에 `sector` 컬럼 추가 (기존 `customer_po`만 가져오던 것)
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `dashboard.py` | 8개 섹션 agg에 `섹터` 추가, 타이틀/헤더에 sector 태그 표시 |
+
+---
+
 ## 2026-03-22: 오늘의 현황 — PO 확정 지연 / EXW 미출고 / 납기 현황 개선
 
 ### 배경
