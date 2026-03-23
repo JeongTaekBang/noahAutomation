@@ -20,6 +20,17 @@
 
 ---
 
+## 2026-03-23: FI Total 행 Currency 열 수정
+
+### 변경 내용
+- Final Invoice Total 행의 Currency 표시 열을 H → G로 변경 (아이템 행의 Currency 열과 일치시킴)
+
+### 수정 파일
+- `po_generator/fi_generator.py` — `_update_total_row()` 내 Currency 셀 H→G
+- `docs/TEMPLATE_MAPPINGS.md` — FI Total 행 매핑 H→G
+
+---
+
 ## 2026-03-23: 대시보드 테마 전환 토글 추가
 
 ### 변경 내용

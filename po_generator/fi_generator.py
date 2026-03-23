@@ -301,11 +301,11 @@ def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> No
     # F열: 단위 "EA"
     ws.range(f'F{total_row}').value = "EA"
 
-    # H열: Currency
+    # G열: Currency
     currency = get_value(order_data, 'currency', '')
     if currency:
-        ws.range(f'H{total_row}').value = currency
-        logger.debug(f"Currency 업데이트: H{total_row} = {currency}")
+        ws.range(f'G{total_row}').value = currency
+        logger.debug(f"Currency 업데이트: G{total_row} = {currency}")
 
     # I열: Amount 합계 수식 업데이트
     sum_formula = f"=SUM(I{ITEM_START_ROW}:I{last_item_row})"

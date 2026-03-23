@@ -250,7 +250,7 @@
 |----|------|
 | E | SUM(Qty) |
 | F | "EA" |
-| H | Currency |
+| G | Currency |
 | I | SUM(Amount) |
 
 ---
