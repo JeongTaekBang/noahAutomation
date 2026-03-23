@@ -629,7 +629,7 @@ let
     ),
     DN_해외_Renamed = Table.RenameColumns(DN_해외, {{"Total Sales KRW", "출고금액"}, {"선적일", "출고일"}}),
     DN_Combined = Table.Group(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}, {
-        {"출고금액", each List.Sum([출고금액]), type number},
+        {"출고금액", each List.Sum([출고금액]), Currency.Type},
         {"출고일", each List.Max([출고일]), type nullable date}
     }),
 
@@ -1621,7 +1621,7 @@ let
     // DN 월별 집계 (분할 출고 대응: SO_ID + Line item + 출고월)
     DN_ByMonth = Table.Group(DN_Combined, {"SO_ID", "Line item", "출고월"}, {
         {"Output_qty", each List.Sum([Qty]), type number},
-        {"Output_amount", each List.Sum([출고금액]), type number}
+        {"Output_amount", each List.Sum([출고금액]), Currency.Type}
     }),
 
     // DN 마지막 출고월 (ActivePeriods 범위 결정용)
@@ -2144,7 +2144,7 @@ SQL 이벤트:   실제 일어난 일(Input/Output)만 기록 → 필요할 때 
 
   // After (합산)
   DN_Combined = Table.Group(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}, {
-      {"출고금액", each List.Sum([출고금액]), type number},
+      {"출고금액", each List.Sum([출고금액]), Currency.Type},
       {"출고일", each List.Max([출고일]), type nullable date}
   }),
   ```
@@ -2217,6 +2217,35 @@ SQL 이벤트:   실제 일어난 일(Input/Output)만 기록 → 필요할 때 
   ```
 - **영향 범위**: SO_통합, DN_원가포함, Inventory_Transaction 세 쿼리 모두 수정
 - **배경**: SO는 제품 레벨로 Line item을 관리하지만, PO는 같은 Line item 내에서 사양(밸브 사이즈 등)별로 행을 분리하는 경우가 있음 (1:N 관계)
+
+### DN_해외 Total Sales KRW XLOOKUP 수식 오류 — 분할 출고 시 미출고금액 더블 계산 (2026-03-23 수정)
+- **증상**: SOO-2026-0025처럼 SO 1건에 DN이 2건 이상(분할 출고)일 때, 미출고금액이 음수로 나옴 (더블 계산)
+  ```
+  SO: Line 1, qty=10, Sales KRW = 12,950,601
+  DN: DNO-0034, Line 1, qty=5, Total Sales KRW = 12,950,601  ← SO 전체 금액
+  DN: DNO-0035, Line 1, qty=5, Total Sales KRW = 12,950,601  ← SO 전체 금액 (또)
+  SO_통합 출고금액 합계: 25,901,202 (2배)
+  미출고금액 = 12,950,601 - 25,901,202 = -12,950,601 ❌
+  ```
+- **원인**: DN_해외 테이블의 `Total Sales KRW` 엑셀 수식이 SO의 전체 `Sales amount KRW`를 그대로 반환
+  ```excel
+  =XLOOKUP(B130&H130,SO_해외!A:A&SO_해외!R:R,SO_해외!V:V)
+  ```
+  DN의 Qty와 무관하게 SO의 전체 KRW 금액을 가져오므로, 분할 출고 시 각 DN에 전체 금액이 중복 배정됨
+- **해결**: Qty 비율을 곱하여 비례 배분
+  ```excel
+  =XLOOKUP(B130&H130,SO_해외!A:A&SO_해외!R:R,SO_해외!V:V) * I130 / XLOOKUP(B130&H130,SO_해외!A:A&SO_해외!R:R,SO_해외!S:S)
+  ```
+  - `I130` = DN Qty, `SO_해외!S:S` = SO Item qty
+  - `SO Sales KRW × (DN Qty / SO Qty)` = DN 비례 금액
+  - 수학적 증명: `SO_Qty × UnitPrice × ExRate × (DN_Qty / SO_Qty) = DN_Qty × UnitPrice × ExRate` (SO_Qty 약분)
+  - 전량 1회 출고 시 비율 = 1 → 기존과 동일, 분할 시 정확한 비례 배분
+
+### 출고금액 = Sales KRW인데 "부분 출고"로 표시 (2026-03-23 수정)
+- **증상**: SOO-2026-0020 Line 1처럼 SO qty = DN qty, 출고금액 = Sales KRW (표시상 동일)인데 "부분 출고"로 표시됨
+- **원인**: SO_해외의 `Sales amount KRW`가 `=qty × unit_price × exchange_rate` 수식 결과로 소수점 이하 값을 가짐 (예: 10,840,025.77). 표시 서식은 정수로 보이지만 내부 값이 정수가 아님 → DN XLOOKUP과 비교 시 미세한 차이 발생 → `> 0` 조건 충족
+- **해결**: SO_해외의 `Sales amount KRW` 수식에 `ROUND(..., 0)` 적용하여 정수로 저장
+  - SO 원본이 정수 → DN XLOOKUP도 정수 → Power Query 비교 시 차이 = 0 (정확)
 
 ---
 
