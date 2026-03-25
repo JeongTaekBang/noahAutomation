@@ -371,10 +371,9 @@ def load_dn_data() -> pd.DataFrame:
         df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
 
     df_dn = df_dn[df_dn['DN_ID'].notna()].copy()
-    # DN_ID 중복 제거 (DN_ID는 고유해야 함, SO_ID만 참조용)
-    df_dn = df_dn.drop_duplicates(subset='DN_ID', keep='first')
     so_cols = [
         'SO_ID',
+        'Line item',            # 복합키용
         'Customer name',        # 고객명
         'Customer PO',          # PO No.
         'Item name',            # 품목명
@@ -384,12 +383,18 @@ def load_dn_data() -> pd.DataFrame:
         'Business registration number',
     ]
     so_cols = [c for c in so_cols if c in df_so.columns]
-
-    # SO는 다중 아이템 가능 → drop_duplicates 하지 않음
     df_so_subset = df_so[so_cols].copy()
 
-    # SO_ID로 조인 (DN 1건에 SO 다중 아이템 → 결과도 다중 행)
-    df_merged = df_dn.merge(df_so_subset, on='SO_ID', how='left', suffixes=('', '_SO'))
+    # Line item 존재 시 SO_ID + Line item 복합키로 join (PO 로딩과 동일 패턴)
+    join_keys = ['SO_ID']
+    if 'Line item' in df_so_subset.columns and 'Line item' in df_dn.columns:
+        join_keys = ['SO_ID', 'Line item']
+    else:
+        # Line item 없으면 DN_ID 중복 제거 후 SO_ID만으로 join
+        df_dn = df_dn.drop_duplicates(subset='DN_ID', keep='first')
+        df_so_subset = df_so_subset.drop_duplicates(subset='SO_ID', keep='first')
+
+    df_merged = df_dn.merge(df_so_subset, on=join_keys, how='left', suffixes=('', '_SO'))
     df_merged['_시트구분'] = '국내'
     df_merged['_문서유형'] = 'DN'
 

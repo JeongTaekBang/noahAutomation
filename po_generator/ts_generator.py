@@ -235,8 +235,12 @@ def _fill_ts_data(
         ws.range(f'G{subtotal_row}').formula = f'=SUM(G{item_start_row}:G{last_item_row})'
         ws.range(f'H{subtotal_row}').formula = f'=SUM(H{item_start_row}:H{last_item_row})'
 
-    # PO No. 채우기 (레이블 위치를 찾아서 같은 행에 값 입력)
-    customer_po = get_value(order_data, 'customer_po', '')
+    # PO No. 채우기 (여러 발주번호면 콤마로 구분)
+    if items_df is not None and 'Customer PO' in items_df.columns:
+        po_values = items_df['Customer PO'].dropna().unique()
+        customer_po = ', '.join(str(v) for v in po_values if str(v).strip())
+    else:
+        customer_po = get_value(order_data, 'customer_po', '')
     po_row = find_text_in_column_batch(ws, 'A', 'PO No', LABEL_SEARCH_START, LABEL_SEARCH_END)
     if po_row is None:
         po_row = BASE_PO_ROW + (num_items - 1) if num_items > 1 else BASE_PO_ROW
@@ -274,9 +278,21 @@ def _fill_items_batch(
     data_2d = []
     total_amount = 0
     total_tax = 0
-    date_str = f"{dispatch_date.month}/{dispatch_date.day}"
+    default_date_str = f"{dispatch_date.month}월 {dispatch_date.day}일"
 
     for item_idx, (_, item) in enumerate(items_df.iterrows()):
+        # 아이템별 출고일 (없으면 기본 출고일 사용)
+        item_date = item.get('출고일', None)
+        if item_date is not None and pd.notna(item_date):
+            try:
+                if not isinstance(item_date, (datetime, pd.Timestamp)):
+                    item_date = pd.to_datetime(item_date)
+                date_str = f"{item_date.month}월 {item_date.day}일"
+            except (ValueError, TypeError):
+                date_str = default_date_str
+        else:
+            date_str = default_date_str
+
         # 수량
         raw_qty = get_value(item, 'item_qty', 1)
         try:
