@@ -65,12 +65,27 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 3. **행이 없으면** → INSERT (신규)
 4. **행이 있으면** → 기존 값과 비교 → 변경된 필드가 있을 때만 UPDATE (수정)
 5. **값이 동일하면** → 스킵 (동일)
+6. **DB에만 존재하는 행** → DELETE (삭제/prune) — Excel에서 제거된 행을 DB에서도 정리
 
 ### 변경 감지
 
 - 모든 컬럼을 문자열로 비교 (None, 빈 문자열은 동일 취급)
 - 실제 값이 바뀐 필드만 수정으로 기록
 - 변경 없는 행은 UPDATE 안 함 → DB 부하 최소화
+
+### 삭제 반영 (Prune)
+
+- Upsert 완료 후, DB에만 존재하고 Excel에는 없는 PK를 감지하여 DELETE
+- **시트가 완전히 비어있는 경우에도 동작** — DB 테이블의 전체 행이 prune 대상
+- 삭제된 PK는 `sync_log.csv`에 "삭제" 유형으로 기록
+- `_sync_meta`, `ob_snapshot` 등 비동기화 테이블은 prune 대상 아님
+
+### Dry-run 동작
+
+- `--dry-run`은 실제 DB에 연결하여 upsert/prune을 수행한 뒤 **트랜잭션을 rollback** — DB는 변경되지 않음
+- `isolation_level=None` + 명시적 `BEGIN`으로 DDL(테이블 생성/삭제/컬럼 추가)도 트랜잭션 내에서 실행 → rollback 시 완전 원복
+- 운영 DB 기준의 정확한 insert/update/prune 건수를 시뮬레이션
+- sync_log.csv에는 기록하지 않음
 
 ## 변경 이력 로그 (sync_log.csv)
 
@@ -80,7 +95,7 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 |------|------|------|
 | 동기화시각 | 실행 시각 | 2026-03-03 09:28:58 |
 | 시트 | 소스 시트명 | SO_국내 |
-| 유형 | 신규/수정 | 수정 |
+| 유형 | 신규/수정/삭제 | 수정 |
 | PK | Primary Key 값 | SOD-2026-0001 \| JK2026... \| 1 |
 | 컬럼 | 변경된 컬럼명 | Status |
 | 이전값 | DB 기존 값 | (빈값) |
@@ -88,6 +103,7 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 
 - **신규**: 비어있지 않은 필드마다 1행씩 기록 (이전값은 빈칸, 변경값에 입력된 값 표시)
 - **수정**: 변경된 필드마다 1행씩 기록 → 필터/정렬 가능
+- **삭제**: PK만 기록 (Excel에서 제거되어 DB에서 삭제된 행)
 - UTF-8 BOM 포함 → Excel에서 한글 깨짐 없음
 
 ## DB 조회 방법
@@ -118,7 +134,7 @@ python sync_db.py --info    # 테이블별 행 수, 마지막 동기화 시간
 |------|------|
 | `sync_db.py` | CLI 진입점 |
 | `po_generator/db_schema.py` | 테이블/PK 정의, DDL, 스키마 관리 |
-| `po_generator/db_sync.py` | SyncEngine — upsert 엔진, 변경 감지 |
+| `po_generator/db_sync.py` | SyncEngine — upsert + prune 엔진, 변경 감지 |
 | `po_generator/config.py` | `DB_FILE` 상수 |
 
 ## 에러 처리

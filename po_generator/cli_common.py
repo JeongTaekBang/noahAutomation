@@ -83,4 +83,14 @@ def generate_output_filename(
     today = datetime.now().strftime("%y%m%d")
     customer_name_safe = sanitize_filename(customer_name)
     order_no_safe = sanitize_filename(order_no)
-    return output_dir / f"{prefix}_{order_no_safe}_{customer_name_safe}_{today}.xlsx"
+    base = f"{prefix}_{order_no_safe}_{customer_name_safe}_{today}"
+    candidate = output_dir / f"{base}.xlsx"
+    counter = 1
+    while candidate.exists():
+        if counter > 100:
+            raise FileExistsError(
+                f"출력 파일 충돌 해소 실패 (100회 초과): {base}.xlsx"
+            )
+        candidate = output_dir / f"{base}_{counter}.xlsx"
+        counter += 1
+    return candidate

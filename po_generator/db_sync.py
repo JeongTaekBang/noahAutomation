@@ -46,6 +46,9 @@ class SheetSyncResult:
     inserted_details: list[dict] = field(default_factory=list)
     # 수정 상세: [{pk: tuple, changes: {col: (old, new)}}]
     updated_details: list[dict] = field(default_factory=list)
+    # 삭제(prune): Excel에서 제거된 행
+    pruned: int = 0
+    pruned_pks: list[tuple] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -71,6 +74,10 @@ class SyncSummary:
     @property
     def total_updated(self) -> int:
         return sum(r.updated for r in self.results)
+
+    @property
+    def total_pruned(self) -> int:
+        return sum(r.pruned for r in self.results)
 
     @property
     def total_errors(self) -> int:
@@ -151,11 +158,13 @@ class SyncEngine:
             if not_found:
                 logger.warning("설정에 없는 시트 무시: %s", not_found)
 
-        # DB 연결
-        conn = sqlite3.connect(':memory:' if dry_run else str(self.db_path))
+        # DB 연결 — dry-run도 실제 DB에 연결하여 정확한 diff 산출 후 롤백
+        # isolation_level=None → 수동 트랜잭션 제어 (DDL 암묵적 COMMIT 방지)
+        conn = sqlite3.connect(str(self.db_path), isolation_level=None)
         try:
             conn.execute('PRAGMA journal_mode=WAL')
             conn.execute('PRAGMA synchronous=NORMAL')
+            conn.execute('BEGIN')
 
             for config in configs:
                 if config.sheet_name not in available_sheets:
@@ -171,7 +180,9 @@ class SyncEngine:
                 result = self._sync_sheet(conn, xls, config, dry_run)
                 summary.results.append(result)
 
-            if not dry_run:
+            if dry_run:
+                conn.rollback()
+            else:
                 conn.commit()
         finally:
             conn.close()
@@ -206,7 +217,34 @@ class SyncEngine:
             result.total_rows = len(df)
 
             if result.total_rows == 0:
-                logger.info("%s: 데이터 없음", config.sheet_name)
+                logger.info("%s: 데이터 없음 — prune 확인", config.sheet_name)
+                # 시트가 비었어도 DB 테이블에 잔류 행이 있으면 prune
+                try:
+                    row_count = get_table_row_count(conn, config.table_name)
+                except Exception:
+                    row_count = 0
+                if row_count > 0:
+                    safe_pk_cols = [f'[{c}]' for c in config.pk_columns]
+                    db_pks_cursor = conn.execute(
+                        f'SELECT {", ".join(safe_pk_cols)} FROM [{config.table_name}]'
+                    )
+                    stale_pks = [tuple(row) for row in db_pks_cursor.fetchall()]
+                    if stale_pks:
+                        pk_placeholders = ' AND '.join(
+                            f'[{c}] = ?' for c in config.pk_columns
+                        )
+                        for stale_pk in stale_pks:
+                            conn.execute(
+                                f'DELETE FROM [{config.table_name}] WHERE {pk_placeholders}',
+                                list(stale_pk),
+                            )
+                    result.pruned = len(stale_pks)
+                    result.pruned_pks = stale_pks
+                    if stale_pks:
+                        logger.info(
+                            "%s: %d행 삭제(prune) — 시트 전체 비어있음",
+                            config.sheet_name, result.pruned,
+                        )
                 return result
 
             # 3. _row_seq 생성 (필요한 시트만)
@@ -233,6 +271,7 @@ class SyncEngine:
             safe_cols = [f'[{c.strip()}]' for c in columns]
 
             # 7. Upsert 수행
+            excel_pks: set[tuple] = set()
             for idx, row in df.iterrows():
                 try:
                     # PK 값 추출 (required_column만 필수, 나머지 PK는 빈 문자열 허용)
@@ -250,6 +289,8 @@ class SyncEngine:
                     if skip:
                         result.skipped += 1
                         continue
+
+                    excel_pks.add(tuple(pk_vals))
 
                     # 기존 행 조회 (전체 컬럼)
                     select_cols = ', '.join(safe_cols)
@@ -328,15 +369,34 @@ class SyncEngine:
                     result.error_messages.append(msg)
                     logger.warning("%s - %s", config.sheet_name, msg)
 
-            # 8. 메타 정보 업데이트
-            if not dry_run:
-                row_count = get_table_row_count(conn, config.table_name)
-                update_sync_metadata(conn, config.table_name, now_iso, row_count)
+            # 8. Prune: Excel에서 삭제된 행 제거
+            safe_pk_cols = [f'[{c}]' for c in pk_cols]
+            db_pks_cursor = conn.execute(
+                f'SELECT {", ".join(safe_pk_cols)} FROM [{config.table_name}]'
+            )
+            db_pks = {tuple(row) for row in db_pks_cursor.fetchall()}
+            stale_pks = db_pks - excel_pks
+            if stale_pks:
+                for stale_pk in stale_pks:
+                    conn.execute(
+                        f'DELETE FROM [{config.table_name}] WHERE {pk_placeholders}',
+                        list(stale_pk),
+                    )
+                result.pruned = len(stale_pks)
+                result.pruned_pks = [pk for pk in stale_pks]
+                logger.info(
+                    "%s: %d행 삭제(prune) — Excel에서 제거된 행",
+                    config.sheet_name, result.pruned,
+                )
+
+            # 9. 메타 정보 업데이트 (dry-run 시에도 실행, rollback으로 원복)
+            row_count = get_table_row_count(conn, config.table_name)
+            update_sync_metadata(conn, config.table_name, now_iso, row_count)
 
             logger.info(
-                "%s: %d행 처리 (신규 %d, 수정 %d, 동일 %d, 스킵 %d, 에러 %d)",
+                "%s: %d행 처리 (신규 %d, 수정 %d, 삭제 %d, 동일 %d, 스킵 %d, 에러 %d)",
                 config.sheet_name, result.total_rows,
-                result.inserted, result.updated, result.unchanged,
+                result.inserted, result.updated, result.pruned, result.unchanged,
                 result.skipped, result.errors,
             )
 

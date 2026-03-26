@@ -52,7 +52,7 @@ Generators (excel_generator.py=openpyxl, ts/pi/fi/oc_generator.py=xlwings)
 Shared: config.py (paths, constants, aliases), utils.py (data loading), validators.py
 
 DB layer:
-  sync_db.py → db_sync.py (Excel→SQLite) → db_schema.py (DDL)
+  sync_db.py → db_sync.py (Excel→SQLite, upsert+prune) → db_schema.py (DDL)
   close_period.py → snapshot.py (SnapshotEngine) → db_schema.py (snapshot tables)
   sql/order_book.sql (이벤트 기반), sql/order_book_snapshot.sql (snapshot-based)
 ```
@@ -65,7 +65,10 @@ DB layer:
 - **Dual Library Strategy**: openpyxl for PO (fast, no image needs); xlwings for TS/PI/FI/OC (preserves images, formulas, COM-dependent).
 - **Template Engine** (`template_engine.py`): Clones rows for multi-item orders, auto-adjusts SUM formulas after row insertion.
 - **History as DB**: `po_history/YYYY/M월/YYYYMMDD_주문번호_고객명.xlsx` — one file per transaction enables duplicate detection without a database.
-- **Result Pattern** (`services/result.py`): `DocumentResult` + `GenerationStatus` enum for structured operation outcomes.
+- **Result Pattern** (`services/result.py`): `DocumentResult` + `GenerationStatus` enum for structured operation outcomes. `history_saved` field tracks history persistence separately from generation success.
+- **Output File Safety** (`cli_common.py`): Generated files auto-suffix on collision (`_1`, `_2`, ...) to prevent silent overwrites. Raises `FileExistsError` if 100+ collisions.
+- **DB Sync Prune** (`db_sync.py`): Excel→SQLite sync includes prune step — rows deleted from Excel are also deleted from DB. Works even when sheet is completely empty. `--dry-run` connects to real DB and rollbacks for accurate diff simulation.
+- **Dashboard Error Visibility** (`dashboard.py`): Loader failures collected in `session_state` and displayed as `st.warning()` banner, distinguishing "no data" from "query failure".
 - **Snapshot Engine** (`snapshot.py`): Monthly close → `ob_snapshot` freezes Ending, subsequent retroactive changes auto-detected as Variance. Sequential close enforced.
 
 ### Configuration Split

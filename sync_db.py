@@ -41,17 +41,18 @@ def print_summary(summary: SyncSummary, dry_run: bool = False) -> None:
 
     # 테이블 헤더
     print()
-    print(f"{'시트':<14} {'행수':>6} {'신규':>8} {'수정':>8} {'에러':>6}")
-    print("-" * 56)
+    print(f"{'시트':<14} {'행수':>6} {'신규':>8} {'수정':>8} {'삭제':>8} {'에러':>6}")
+    print("-" * 64)
 
     for r in summary.results:
         err_mark = f"  *{r.errors}" if r.errors > 0 else f"  {r.errors}"
-        print(f"{r.sheet_name:<14} {r.total_rows:>6} {r.inserted:>8} {r.updated:>8} {err_mark:>6}")
+        print(f"{r.sheet_name:<14} {r.total_rows:>6} {r.inserted:>8} {r.updated:>8} {r.pruned:>8} {err_mark:>6}")
 
-    print("-" * 56)
+    print("-" * 64)
     print(
         f"{'합계':<14} {summary.total_rows:>6} "
         f"{summary.total_inserted:>8} {summary.total_updated:>8} "
+        f"{summary.total_pruned:>8} "
         f"{'  *' + str(summary.total_errors) if summary.total_errors > 0 else '  ' + str(summary.total_errors):>6}"
     )
 
@@ -79,14 +80,14 @@ def _format_val(val) -> str:
 
 
 def print_changes(summary: SyncSummary) -> None:
-    """신규/수정된 레코드 상세 출력"""
-    has_changes = any(r.inserted_details or r.updated_details for r in summary.results)
+    """신규/수정/삭제된 레코드 상세 출력"""
+    has_changes = any(r.inserted_details or r.updated_details or r.pruned_pks for r in summary.results)
     if not has_changes:
         print("\n변경 사항 없음")
         return
 
     for r in summary.results:
-        if not r.inserted_details and not r.updated_details:
+        if not r.inserted_details and not r.updated_details and not r.pruned_pks:
             continue
 
         print(f"\n--- {r.sheet_name} ---")
@@ -107,6 +108,13 @@ def print_changes(summary: SyncSummary) -> None:
             if len(r.updated_details) > 20:
                 print(f"    ... 외 {len(r.updated_details) - 20}건")
 
+        if r.pruned_pks:
+            print(f"  [삭제] {len(r.pruned_pks)}건:")
+            for pk in r.pruned_pks[:20]:
+                print(f"    - {_format_pk(pk)}")
+            if len(r.pruned_pks) > 20:
+                print(f"    ... 외 {len(r.pruned_pks) - 20}건")
+
 
 SYNC_LOG_FILE: Path = DATA_DIR / "sync_log.csv"
 CSV_HEADER = "동기화시각,시트,유형,PK,컬럼,이전값,변경값\n"
@@ -122,7 +130,7 @@ def _csv_escape(val) -> str:
 
 def write_sync_log(summary: SyncSummary) -> None:
     """동기화 변경 내역을 CSV 로그 파일에 기록"""
-    has_changes = any(r.inserted_details or r.updated_details for r in summary.results)
+    has_changes = any(r.inserted_details or r.updated_details or r.pruned_pks for r in summary.results)
     if not has_changes:
         return
 
@@ -151,6 +159,11 @@ def write_sync_log(summary: SyncSummary) -> None:
                     new_esc = _csv_escape(new)
                     col_esc = _csv_escape(col)
                     f.write(f"{now},{r.sheet_name},수정,{pk_str},{col_esc},{old_esc},{new_esc}\n")
+
+            # 삭제 (PK만 기록)
+            for pk in r.pruned_pks:
+                pk_str = _csv_escape(_format_pk(pk))
+                f.write(f"{now},{r.sheet_name},삭제,{pk_str},,,\n")
 
     print(f"\n동기화 로그 저장: {SYNC_LOG_FILE.name}")
 

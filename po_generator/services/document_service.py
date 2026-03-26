@@ -242,18 +242,23 @@ class DocumentService:
             )
 
         # 7. 이력 저장
+        history_ok = True
         if not skip_history:
-            history_saved = save_to_history(output_file, order_no, customer_name)
-            if not history_saved:
+            history_ok = save_to_history(output_file, order_no, customer_name)
+            if not history_ok:
                 logger.warning("이력 저장 실패 - 발주서는 정상 생성됨")
 
-        return DocumentResult.success_result(
+        result = DocumentResult.success_result(
             output_file=output_file,
             order_no=order_no,
             customer_name=customer_name,
             item_count=order_data.item_count,
             warnings=validation.warnings,
         )
+        if not history_ok:
+            result.history_saved = False
+            result.warnings.append("이력 저장 실패 — 발주서는 정상 생성되었으나 po_history에 기록되지 않았습니다.")
+        return result
 
     def generate_ts(
         self,

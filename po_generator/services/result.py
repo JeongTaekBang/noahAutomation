@@ -47,6 +47,7 @@ class DocumentResult:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     message: str = ''
+    history_saved: bool = True
 
     @classmethod
     def success_result(

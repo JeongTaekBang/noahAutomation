@@ -525,6 +525,7 @@ class TestCalcCoverage:
             "qty": [10, 5, 20],
             "amount_krw": [1_000_000, 500_000, 2_000_000],
             "delivery_date": pd.to_datetime(["2025-03-01", "2025-03-01", "2025-04-01"]),
+            "po_receipt_date": pd.to_datetime(["2025-02-01", "2025-02-01", None]),
             "status": ["미출고", "미출고", "미출고"],
         })
 
@@ -536,6 +537,9 @@ class TestCalcCoverage:
             "po_qty": [15],
             "po_total_ico": [1_000_000],
             "po_statuses": ["Confirmed"],
+            "po_ids": ["PO-001"],
+            "open_po_ids": [""],
+            "factory_order_date": pd.to_datetime(["2025-02-15"]),
         })
 
     def test_confirmed_po(self, so_for_cov, po_for_cov):

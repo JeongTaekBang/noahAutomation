@@ -255,13 +255,14 @@ $ python create_po.py ND-0001
          ▼
 ┌─────────────────┐      ┌─────────────────────────────┐
 │ 6. 파일 저장   │─────▶│ generated_po/               │
-│                 │      │   PO_ND-0001_고객명.xlsx    │
+│  (충돌 시 _1,  │      │   PO_ND-0001_고객명.xlsx    │
+│   _2 접미사)   │      │   PO_ND-0001_고객명_1.xlsx  │
 └────────┬────────┘      └─────────────────────────────┘
          ▼
 ┌─────────────────┐      ┌─────────────────────────────┐
 │ 7. 이력 저장   │─────▶│ po_history/2026/1월/        │
-│                 │      │   20260118_ND-0001_고객명   │
-│                 │      │   .xlsx (DB 형식)           │
+│  (실패 시      │      │   20260118_ND-0001_고객명   │
+│  result에 반영)│      │   .xlsx (DB 형식)           │
 └─────────────────┘      └─────────────────────────────┘
 ```
 
@@ -532,7 +533,7 @@ python create_oc.py SOO-2026-0001                  # SO_ID 기반 (Dispatch date
 |-------------|------|------|
 | `DocumentService` | services/document_service.py | 문서 생성 오케스트레이터 |
 | `FinderService` | services/finder_service.py | 데이터 조회 (lazy loading) |
-| `DocumentResult` | services/result.py | 생성 결과 구조체 |
+| `DocumentResult` | services/result.py | 생성 결과 구조체 (history_saved 포함) |
 | `load_noah_po_lists()` | utils.py | Excel 데이터 로드 (SO+PO 병합) |
 | `find_order_data()` | utils.py | 주문번호로 데이터 검색 |
 | `get_value()` | utils.py | 컬럼 별칭 지원하는 값 추출 |

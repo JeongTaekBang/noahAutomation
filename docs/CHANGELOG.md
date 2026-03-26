@@ -20,6 +20,47 @@
 
 ---
 
+## 2026-03-26: 운영 신뢰성 P0 개선 (4건)
+
+### DB 동기화 삭제 반영 (prune)
+- Excel에서 지운 행이 `noah_data.db`에 잔류하던 문제 해결
+- sync 시 DB에만 존재하는 PK를 자동 DELETE + 건수 리포트
+- `sync_db.py` 출력 테이블에 "삭제" 컬럼 추가, `--changes`에 삭제 상세 표시
+- `sync_log.csv`에 삭제 내역 기록, `--dry-run`에서도 삭제 예정 건수 확인 가능
+
+### 출력 파일 덮어쓰기 방지
+- 같은 주문을 같은 날 재생성 시 기존 파일 무경고 덮어쓰기되던 문제 해결
+- 파일 존재 시 자동으로 `_1`, `_2`, ... 접미사 부여 (history.py의 기존 패턴과 동일)
+
+### 이력 저장 실패 노출
+- `save_to_history()` 실패 시 `logger.warning`만 찍고 성공 반환하던 문제 해결
+- `DocumentResult.history_saved` 필드 추가 → CLI에서 `[주의]` 경고 표시
+- exit code는 0 유지 (문서 자체는 성공)
+
+### 대시보드 로더 실패 가시화
+- 12개 데이터 로더에서 예외 발생 시 "데이터 없음"과 구분 불가하던 문제 해결
+- `session_state` 기반 에러 수집 → 페이지 상단에 `st.warning()` 배너 표시
+- 예: "일부 데이터 로드 실패 — SO: OperationalError: no such table ..."
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `po_generator/db_sync.py` | prune 로직 + `SheetSyncResult.pruned` 필드 |
+| `sync_db.py` | 출력 테이블/로그에 삭제 건수 반영 |
+| `po_generator/cli_common.py` | 파일 존재 시 접미사 자동 부여 |
+| `po_generator/services/result.py` | `DocumentResult.history_saved` 필드 |
+| `po_generator/services/document_service.py` | history 실패 → result 반영 |
+| `create_po.py` | history 경고 출력 |
+| `dashboard.py` | 로더 에러 수집 + 배너 표시 |
+
+### 후속 보완 (3건)
+- **빈 시트 prune 누락 수정**: `total_rows == 0`에서 early return하여 DB 잔류 행이 삭제되지 않던 문제 → 빈 시트에서도 prune 수행
+- **dry-run 정확도 개선**: `:memory:` DB 대신 실제 DB에 연결 후 rollback 방식으로 변경 → 운영 DB 기준 정확한 diff 시뮬레이션
+- **dry-run 트랜잭션 안전성**: `isolation_level=None` + 명시적 `BEGIN`으로 DDL(DROP/CREATE/ALTER TABLE)도 트랜잭션 내 실행 → rollback 시 완전 원복 보장
+- **파일명 suffix 오버플로우 방어**: counter > 100 시 기존 파일 경로 반환 → `FileExistsError` 발생으로 변경
+
+---
+
 ## 2026-03-25: 거래명세표(TS) 월합 데이터 중복 버그 수정 및 개선
 
 ### 버그 수정

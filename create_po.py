@@ -139,9 +139,8 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False, service: D
     if result.success:
         print(f"  -> 발주서 생성 완료: {result.output_file.name}")
 
-        # 경고 출력 (이미 위에서 출력했으므로 중복 방지)
-        # for warn in result.warnings:
-        #     print(f"  [주의] {warn}")
+        if not result.history_saved:
+            print(f"  [주의] 이력 저장 실패 — po_history에 기록되지 않았습니다.")
 
         return True
     else:
