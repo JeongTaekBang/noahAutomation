@@ -117,6 +117,11 @@ def _add_row_seq(df: pd.DataFrame, group_cols: tuple[str, ...]) -> pd.DataFrame:
     return df
 
 
+def _normalize_pk(pk: tuple) -> tuple:
+    """PK 값을 문자열 튜플로 정규화 — Python set 비교 시 타입 불일치 방지."""
+    return tuple('' if v is None else str(v) for v in pk)
+
+
 class SyncEngine:
     """Excel → SQLite 동기화 엔진"""
 
@@ -228,7 +233,7 @@ class SyncEngine:
                     db_pks_cursor = conn.execute(
                         f'SELECT {", ".join(safe_pk_cols)} FROM [{config.table_name}]'
                     )
-                    stale_pks = [tuple(row) for row in db_pks_cursor.fetchall()]
+                    stale_pks = [_normalize_pk(row) for row in db_pks_cursor.fetchall()]
                     if stale_pks:
                         pk_placeholders = ' AND '.join(
                             f'[{c}] = ?' for c in config.pk_columns
@@ -290,7 +295,7 @@ class SyncEngine:
                         result.skipped += 1
                         continue
 
-                    excel_pks.add(tuple(pk_vals))
+                    excel_pks.add(_normalize_pk(tuple(pk_vals)))
 
                     # 기존 행 조회 (전체 컬럼)
                     select_cols = ', '.join(safe_cols)
@@ -374,7 +379,7 @@ class SyncEngine:
             db_pks_cursor = conn.execute(
                 f'SELECT {", ".join(safe_pk_cols)} FROM [{config.table_name}]'
             )
-            db_pks = {tuple(row) for row in db_pks_cursor.fetchall()}
+            db_pks = {_normalize_pk(row) for row in db_pks_cursor.fetchall()}
             stale_pks = db_pks - excel_pks
             if stale_pks:
                 for stale_pk in stale_pks:
