@@ -1808,91 +1808,76 @@ def pg_today(market, sectors, customers, **_):
         if customers and not ship_df.empty:
             ship_df = ship_df[ship_df["customer_name"].isin(customers)]
         if not ship_df.empty:
-            # 공장 출고 완료 but 선적 미완료 → CI/PL 작성 + 포워더 필요
+            # 공장 출고 완료 but 선적 미완료
             pending_ship = ship_df[ship_df["ship_date"].isna()].copy()
             if not pending_ship.empty:
                 pending_ship["carrier"] = pending_ship["carrier"].fillna("")
-                _join_pos = lambda s: ", ".join(sorted(s[s != ""].unique())) if (s != "").any() else ""
+
+                # DN 단위 집계
                 ps = pending_ship.groupby("DN_ID").agg(
                     고객명=("customer_name", "first"),
                     섹터=("sector", "first"),
-                    고객PO=("customer_po", _join_pos),
                     품목수=("item_name", "nunique"),
                     총수량=("qty", "sum"),
                     총금액=("amount_krw", "sum"),
                     공장출고일=("factory_date", "min"),
                     픽업일=("pickup_date", "min"),
                     선적예정일=("expected_ship_date", "min"),
-                    BL=("bl_no", "first"),
                     운송업체=("carrier", "first"),
-                ).reset_index().sort_values("공장출고일")
+                    SO_ID=("SO_ID", "first"),
+                ).reset_index()
 
-                # 공장출고일 기준 경과일 + 버킷
+                # 경과일 (공장출고일 기준)
                 ps["경과일"] = ps["공장출고일"].apply(
                     lambda d: (_TODAY_DATE - d.date()).days if pd.notna(d) else 0
                 )
-                ps[["bk", "bk_icon", "bk_label"]] = ps["경과일"].apply(
-                    lambda d: pd.Series(_assign_bucket(d))
-                )
 
-                # 포워더 미정 / 선적 대기 탭
-                ps_no_carrier = ps[ps["운송업체"] == ""]
-                ps_has_carrier = ps[ps["운송업체"] != ""]
+                # 파이프라인 단계 분류
+                def _ship_stage(r):
+                    if r["운송업체"] == "":
+                        return "🔴 포워더 미정"
+                    if pd.isna(r["픽업일"]):
+                        return "🟡 픽업 대기"
+                    return "🟠 선적 대기"
+                ps["단계"] = ps.apply(_ship_stage, axis=1)
 
-                tab_has, tab_no = st.tabs([
-                    f"⏳ 선적 대기 ({len(ps_has_carrier)}건)",
-                    f"🔴 포워더 미정 ({len(ps_no_carrier)}건)",
-                ])
-                for tab, df, icon_char in [
-                    (tab_has, ps_has_carrier, "⏳"),
-                    (tab_no, ps_no_carrier, "🔴"),
-                ]:
-                    with tab:
-                        if df.empty:
-                            st.success("해당 건 없음")
-                            continue
-                        df = df.sort_values(["bk", "경과일"], ascending=[False, False])
-                        from itertools import groupby as _igroupby
-                        for bkey, grp in _igroupby(
-                            df.itertuples(),
-                            key=lambda r: (r.bk, r.bk_icon, r.bk_label),
-                        ):
-                            grp_list = list(grp)
-                            _, bk_icon, label = bkey
-                            st.caption(f"{bk_icon} **{label}** ({len(grp_list)}건)")
-                            for r in grp_list:
-                                dn_id = r.DN_ID
-                                cust = getattr(r, "고객명", "")
-                                sec = getattr(r, "섹터", "")
-                                cust_po = getattr(r, "고객PO", "")
-                                n_items = getattr(r, "품목수", 0)
-                                tot_qty = int(getattr(r, "총수량", 0))
-                                tot_amt = getattr(r, "총금액", 0)
-                                days = getattr(r, "경과일", 0)
-                                carrier = getattr(r, "운송업체", "")
-                                bl = r.BL if pd.notna(r.BL) else ""
-                                po_info = f" · PO: {cust_po}" if cust_po else ""
-                                sec_tag = f" [{sec}]" if sec else ""
-                                carrier_txt = carrier if carrier else "arranging..."
-                                bl_tag = f" · B/L: {bl}" if bl else ""
-                                header = (
-                                    f"{icon_char} **{dn_id}**  {cust}{sec_tag} — "
-                                    f"품목 {n_items}건 · 수량 {tot_qty:,} · {fmt_krw(tot_amt)}{po_info} · "
-                                    f"출고 {fmt_date(getattr(r, '공장출고일', pd.NaT))} (**{days}일**) · "
-                                    f"🚛 {carrier_txt}{bl_tag}"
-                                )
-                                with st.expander(header):
-                                    detail = pending_ship[pending_ship["DN_ID"] == dn_id][
-                                        ["SO_ID", "item_name", "qty", "amount_krw",
-                                         "factory_date", "pickup_date", "expected_ship_date", "carrier"]
-                                    ].copy()
-                                    detail.columns = ["SO_ID", "품목명", "수량", "금액", "공장출고", "픽업", "선적예정", "운송업체"]
-                                    detail["금액"] = detail["금액"].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
-                                    detail["수량"] = detail["수량"].apply(lambda v: int(v) if pd.notna(v) else 0)
-                                    for dc in ("공장출고", "픽업", "선적예정"):
-                                        detail[dc] = detail[dc].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
-                                    detail["운송업체"] = detail["운송업체"].fillna("")
-                                    st.dataframe(detail, use_container_width=True, hide_index=True)
+                # ── (1) KPI 카드 ──
+                _stage_order = ["🔴 포워더 미정", "🟡 픽업 대기", "🟠 선적 대기"]
+                kpi_cols = st.columns(3)
+                for i, stage in enumerate(_stage_order):
+                    stage_df = ps[ps["단계"] == stage]
+                    n = len(stage_df)
+                    amt = stage_df["총금액"].sum()
+                    kpi_cols[i].metric(stage, f"{n}건", delta=fmt_krw(amt), delta_color="off")
+
+                # ── (2) 고객별 요약 테이블 ──
+                st.caption("**고객별 현황**")
+                cust_rows = []
+                for cust, cg in ps.groupby("고객명"):
+                    row = {"고객명": cust, "DN건수": len(cg)}
+                    for stage in _stage_order:
+                        label = stage[2:]  # "포워더 미정" etc.
+                        row[label] = int((cg["단계"] == stage).sum())
+                    row["총수량"] = int(cg["총수량"].sum())
+                    row["총금액"] = fmt_krw(cg["총금액"].sum())
+                    row["최대경과일"] = f"{int(cg['경과일'].max())}일"
+                    cust_rows.append(row)
+                cust_tbl = pd.DataFrame(cust_rows).sort_values("DN건수", ascending=False)
+                st.dataframe(cust_tbl, use_container_width=True, hide_index=True)
+
+                # ── (3) DN 상세 테이블 (접기) ──
+                with st.expander(f"📋 DN 상세 ({len(ps)}건)", expanded=False):
+                    detail = ps[["단계", "DN_ID", "고객명", "SO_ID", "품목수",
+                                 "총수량", "총금액", "공장출고일", "픽업일",
+                                 "선적예정일", "운송업체", "경과일"]].copy()
+                    detail = detail.sort_values(["단계", "경과일"], ascending=[True, False])
+                    detail["총금액"] = detail["총금액"].apply(lambda v: fmt_krw(v))
+                    detail["총수량"] = detail["총수량"].apply(lambda v: int(v))
+                    for dc in ("공장출고일", "픽업일", "선적예정일"):
+                        detail[dc] = detail[dc].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
+                    detail["경과일"] = detail["경과일"].apply(lambda v: f"{int(v)}일")
+                    detail["운송업체"] = detail["운송업체"].replace("", "-")
+                    st.dataframe(detail, use_container_width=True, hide_index=True)
             else:
                 st.success("선적 대기 건 없음")
 
