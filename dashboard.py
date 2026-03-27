@@ -907,12 +907,27 @@ def build_calendar_data(so_pending: pd.DataFrame, dn: pd.DataFrame,
                 pk_count=("DN_ID", "nunique"),
             ).reset_index()
 
+    # 해외 선적 예정 집계
+    ship_agg = pd.DataFrame(columns=["day", "ship_count"])
+    if ship_df is not None and not ship_df.empty and "expected_ship_date" in ship_df.columns:
+        sd = ship_df[
+            ship_df["expected_ship_date"].notna()
+            & (ship_df["expected_ship_date"].dt.year == year)
+            & (ship_df["expected_ship_date"].dt.month == month)
+        ].copy()
+        if not sd.empty:
+            sd["day"] = sd["expected_ship_date"].dt.day
+            ship_agg = sd.groupby("day").agg(
+                ship_count=("DN_ID", "nunique"),
+            ).reset_index()
+
     merged = (days
               .merge(so_agg, on="day", how="left")
               .merge(dn_agg, on="day", how="left")
               .merge(exw_agg, on="day", how="left")
-              .merge(pk_agg, on="day", how="left"))
-    for c in ("so_count", "so_amount", "dn_count", "dn_amount", "exw_count", "pk_count"):
+              .merge(pk_agg, on="day", how="left")
+              .merge(ship_agg, on="day", how="left"))
+    for c in ("so_count", "so_amount", "dn_count", "dn_amount", "exw_count", "pk_count", "ship_count"):
         merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0)
     return merged
 
@@ -982,6 +997,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 dn_amt = float(row["dn_amount"].iloc[0]) if not row.empty else 0
                 exw_cnt = int(row["exw_count"].iloc[0]) if not row.empty else 0
                 pk_cnt = int(row["pk_count"].iloc[0]) if not row.empty else 0
+                ship_cnt = int(row["ship_count"].iloc[0]) if not row.empty else 0
 
                 # Z값: 양수=미래/오늘 납기, 음수=과납기
                 from datetime import date as _date_cls
@@ -999,6 +1015,8 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                     lines.append(f"\U0001F69B {pk_cnt}건")   # 🚛 픽업
                 if so_cnt > 0:
                     lines.append(f"\U0001F4E6 {so_cnt}건 {fmt_krw(so_amt)}")
+                if ship_cnt > 0:
+                    lines.append(f"\U0001F6A2 {ship_cnt}건")   # 🚢 해외 선적
                 if dn_cnt > 0:
                     lines.append(f"\U0001F69A {dn_cnt}건 {fmt_krw(dn_amt)}")
 
@@ -1087,13 +1105,19 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
             day_dn = dn[dn["dispatch_date"].dt.date == sel_date]
         else:
             day_dn = pd.DataFrame()
+        if not ship_all.empty and "expected_ship_date" in ship_all.columns:
+            day_ship = ship_all[ship_all["expected_ship_date"].dt.date == sel_date]
+        else:
+            day_ship = pd.DataFrame()
         n_exw = day_exw["SO_ID"].nunique() if not day_exw.empty else 0
         n_pickup = day_pickup["DN_ID"].nunique() if not day_pickup.empty else 0
         n_delivery = day_so["SO_ID"].nunique() if not day_so.empty else 0
         n_dispatch = day_dn["DN_ID"].nunique() if not day_dn.empty else 0
+        n_ship = day_ship["DN_ID"].nunique() if not day_ship.empty else 0
         summary_parts = []
         if n_exw: summary_parts.append(f"EXW {n_exw}")
         if n_pickup: summary_parts.append(f"픽업 {n_pickup}")
+        if n_ship: summary_parts.append(f"선적 {n_ship}")
         if n_delivery: summary_parts.append(f"납기 {n_delivery}")
         if n_dispatch: summary_parts.append(f"출고 {n_dispatch}")
         summary = " · ".join(summary_parts) if summary_parts else "해당 건 없음"
@@ -1175,6 +1199,49 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 _render_cards(items, cols_per_row=2)
             else:
                 st.info("공장 픽업 예정 건 없음")
+
+            # ── (E) 해외 선적 예정 (DN_해외 선적 예정일 기준) ──
+            st.markdown("**🚢 해외 선적 예정** — 해외 DN 선적 예정 현황")
+            if not day_ship.empty:
+                so_meta2 = load_so()[["SO_ID", "customer_po", "sector"]].drop_duplicates(subset=["SO_ID"])
+                day_ship = day_ship.merge(so_meta2, on="SO_ID", how="left")
+                day_ship["customer_po"] = day_ship["customer_po"].fillna("")
+                day_ship["sector"] = day_ship["sector"].fillna("")
+                day_ship["bl_no"] = day_ship["bl_no"].fillna("")
+                day_ship["carrier"] = day_ship["carrier"].fillna("")
+                sh = day_ship.groupby("DN_ID").agg(
+                    고객명=("customer_name", "first"),
+                    섹터=("sector", "first"),
+                    고객PO=("customer_po", "first"),
+                    품목수=("item_name", "nunique"),
+                    총수량=("qty", "sum"),
+                    총금액=("amount_krw", "sum"),
+                    공장출고일=("factory_date", "min"),
+                    픽업일=("pickup_date", "min"),
+                    선적예정일=("expected_ship_date", "min"),
+                    BL=("bl_no", "first"),
+                    운송업체=("carrier", "first"),
+                    SO_ID=("SO_ID", "first"),
+                ).reset_index()
+                items = []
+                for _, r in sh.iterrows():
+                    po_info = f" · PO: {r['고객PO']}" if r["고객PO"] else ""
+                    lines = [
+                        f"SO: {r['SO_ID']} · 품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
+                        f"출고 {fmt_date(r['공장출고일'])} → 픽업 {fmt_date(r['픽업일'])} → 선적예정 {fmt_date(r['선적예정일'])}",
+                    ]
+                    if r["BL"]:
+                        lines.append(f"📄 B/L: {r['BL']}")
+                    if r["운송업체"]:
+                        lines.append(f"🚛 운송 업체: {r['운송업체']}")
+                    sec_tag = f" · {r['섹터']}" if r["섹터"] else ""
+                    items.append({
+                        "title": f"🚢 **{r['DN_ID']}**  {r['고객명']}{sec_tag}",
+                        "lines": lines,
+                    })
+                _render_cards(items, cols_per_row=2)
+            else:
+                st.info("해외 선적 예정 건 없음")
 
             d_a, d_b = st.columns(2)
 
