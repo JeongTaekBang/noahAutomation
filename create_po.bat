@@ -38,6 +38,7 @@ echo   [9] Order Book Close (월 마감)
 echo.
 echo   [분석]
 echo   [D] 대시보드
+echo   [R] PO 매입대사 (Reconciliation)
 echo.
 echo   [기타]
 echo   [H] 발주 이력 조회
@@ -58,6 +59,7 @@ if "%CHOICE%"=="7" goto create_pl
 if "%CHOICE%"=="8" goto sync_db
 if "%CHOICE%"=="9" goto close_period
 if /i "%CHOICE%"=="D" goto dashboard
+if /i "%CHOICE%"=="R" goto reconcile
 
 if /i "%CHOICE%"=="H" goto view_history
 if "%CHOICE%"=="0" goto end
@@ -411,6 +413,31 @@ goto menu
 :cp_status
 echo.
 "%PYTHON_PATH%" "%~dp0close_period.py" --status
+
+echo.
+pause
+goto menu
+
+:reconcile
+echo.
+echo ----------------------------------------
+echo   PO 매입대사 (Reconciliation)
+echo ----------------------------------------
+echo.
+
+:recon_input
+set /p RECON_PERIOD="대사 월 입력 (예: P03): "
+
+if "%RECON_PERIOD%"=="" (
+    echo [오류] 월 코드를 입력하세요.
+    goto recon_input
+)
+
+echo.
+echo 매입대사 실행 중...
+echo.
+
+"%PYTHON_PATH%" "%~dp0reconcile_po.py" %RECON_PERIOD%
 
 echo.
 pause
