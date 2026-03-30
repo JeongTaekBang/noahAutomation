@@ -128,6 +128,8 @@ def load_so() -> pd.DataFrame:
                    [PO receipt date] AS po_receipt_date,
                    COALESCE(Status, '') AS status,
                    COALESCE([Customer PO], '') AS customer_po,
+                   '' AS incoterms,
+                   '' AS shipping_method,
                    '국내' AS market
             FROM so_domestic
             WHERE COALESCE(Status, '') != 'Cancelled'
@@ -144,6 +146,8 @@ def load_so() -> pd.DataFrame:
                    [PO receipt date],
                    COALESCE(Status, ''),
                    COALESCE([Customer PO], ''),
+                   COALESCE(Incoterms, ''),
+                   COALESCE([Shipping method], ''),
                    '해외'
             FROM so_export
             WHERE COALESCE(Status, '') != 'Cancelled'
@@ -1798,11 +1802,13 @@ def pg_today(market, sectors, customers, **_):
         st.subheader("🚢 해외 선적 Action Items")
         ship_df = load_dn_export_shipping()
         if not ship_df.empty:
-            # SO 메타 조인으로 sector, customer_po 추가
-            so_meta = load_so()[["SO_ID", "sector", "customer_po"]].drop_duplicates(subset=["SO_ID"])
+            # SO 메타 조인으로 sector, customer_po, incoterms, shipping_method 추가
+            so_meta = load_so()[["SO_ID", "sector", "customer_po", "incoterms", "shipping_method"]].drop_duplicates(subset=["SO_ID"])
             ship_df = ship_df.merge(so_meta, on="SO_ID", how="left")
             ship_df["sector"] = ship_df["sector"].fillna("")
             ship_df["customer_po"] = ship_df["customer_po"].fillna("")
+            ship_df["incoterms"] = ship_df["incoterms"].fillna("")
+            ship_df["shipping_method"] = ship_df["shipping_method"].fillna("")
         if sectors and not ship_df.empty:
             ship_df = ship_df[ship_df["sector"].isin(sectors)]
         if customers and not ship_df.empty:
@@ -1825,6 +1831,8 @@ def pg_today(market, sectors, customers, **_):
                     선적예정일=("expected_ship_date", "min"),
                     운송업체=("carrier", "first"),
                     SO_ID=("SO_ID", "first"),
+                    Incoterms=("incoterms", "first"),
+                    운송방식=("shipping_method", "first"),
                 ).reset_index()
 
                 # 경과일 (공장출고일 기준)
@@ -1850,26 +1858,44 @@ def pg_today(market, sectors, customers, **_):
                     amt = stage_df["총금액"].sum()
                     kpi_cols[i].metric(stage, f"{n}건", delta=fmt_krw(amt), delta_color="off")
 
-                # ── (2) 고객별 요약 테이블 ──
-                st.caption("**고객별 현황**")
-                cust_rows = []
-                for cust, cg in ps.groupby("고객명"):
-                    row = {"고객명": cust, "DN건수": len(cg)}
-                    for stage in _stage_order:
-                        label = stage[2:]  # "포워더 미정" etc.
-                        row[label] = int((cg["단계"] == stage).sum())
-                    row["총수량"] = int(cg["총수량"].sum())
-                    row["총금액"] = fmt_krw(cg["총금액"].sum())
-                    row["최대경과일"] = f"{int(cg['경과일'].max())}일"
-                    cust_rows.append(row)
-                cust_tbl = pd.DataFrame(cust_rows).sort_values("DN건수", ascending=False)
-                st.dataframe(cust_tbl, use_container_width=True, hide_index=True)
+                # ── (2) 고객별 / 운송방식별 요약 ──
+                tab_cust, tab_ship = st.tabs(["고객별 현황", "운송방식별 현황"])
+
+                with tab_cust:
+                    cust_rows = []
+                    for cust, cg in ps.groupby("고객명"):
+                        row = {"고객명": cust, "DN건수": len(cg)}
+                        for stage in _stage_order:
+                            label = stage[2:]  # "포워더 미정" etc.
+                            row[label] = int((cg["단계"] == stage).sum())
+                        row["총수량"] = int(cg["총수량"].sum())
+                        row["총금액"] = fmt_krw(cg["총금액"].sum())
+                        row["최대경과일"] = f"{int(cg['경과일'].max())}일"
+                        cust_rows.append(row)
+                    cust_tbl = pd.DataFrame(cust_rows).sort_values("DN건수", ascending=False)
+                    st.dataframe(cust_tbl, use_container_width=True, hide_index=True)
+
+                with tab_ship:
+                    ship_method_rows = []
+                    for method, mg in ps.groupby("운송방식"):
+                        label = method if method else "(미지정)"
+                        row = {"운송방식": label, "DN건수": len(mg)}
+                        for stage in _stage_order:
+                            stg_label = stage[2:]
+                            row[stg_label] = int((mg["단계"] == stage).sum())
+                        row["총수량"] = int(mg["총수량"].sum())
+                        row["총금액"] = fmt_krw(mg["총금액"].sum())
+                        row["최대경과일"] = f"{int(mg['경과일'].max())}일"
+                        ship_method_rows.append(row)
+                    ship_tbl = pd.DataFrame(ship_method_rows).sort_values("DN건수", ascending=False)
+                    st.dataframe(ship_tbl, use_container_width=True, hide_index=True)
 
                 # ── (3) DN 상세 테이블 (접기) ──
                 with st.expander(f"📋 DN 상세 ({len(ps)}건)", expanded=False):
-                    detail = ps[["단계", "DN_ID", "고객명", "SO_ID", "품목수",
-                                 "총수량", "총금액", "공장출고일", "픽업일",
-                                 "선적예정일", "운송업체", "경과일"]].copy()
+                    detail = ps[["단계", "DN_ID", "고객명", "SO_ID", "Incoterms",
+                                 "운송방식", "품목수", "총수량", "총금액",
+                                 "공장출고일", "픽업일", "선적예정일",
+                                 "운송업체", "경과일"]].copy()
                     detail = detail.sort_values(["단계", "경과일"], ascending=[True, False])
                     detail["총금액"] = detail["총금액"].apply(lambda v: fmt_krw(v))
                     detail["총수량"] = detail["총수량"].apply(lambda v: int(v))
@@ -1877,6 +1903,8 @@ def pg_today(market, sectors, customers, **_):
                         detail[dc] = detail[dc].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
                     detail["경과일"] = detail["경과일"].apply(lambda v: f"{int(v)}일")
                     detail["운송업체"] = detail["운송업체"].replace("", "-")
+                    detail["Incoterms"] = detail["Incoterms"].replace("", "-")
+                    detail["운송방식"] = detail["운송방식"].replace("", "-")
                     st.dataframe(detail, use_container_width=True, hide_index=True)
             else:
                 st.success("선적 대기 건 없음")

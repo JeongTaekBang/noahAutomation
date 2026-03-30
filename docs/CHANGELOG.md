@@ -20,6 +20,24 @@
 
 ---
 
+## 2026-03-30: 해외선적 Action Items 개선 + DB Sync 출력 순서 변경
+
+### 해외선적 DN 상세에 Incoterms / 운송방식 컬럼 추가
+- `load_so()` SQL에 `Incoterms`, `Shipping method` 컬럼 추가 (so_export JOIN)
+- DN 상세 테이블에 Incoterms, 운송방식 표시 (SO_ID 다음 위치)
+- **운송방식별 현황** 탭 신규 추가 — Air/Sea/Courier 등 방식별 DN건수, 단계별 건수, 총수량, 총금액, 최대경과일
+
+### DB Sync 결과 테이블 출력 순서 변경
+- `sync_db.py --changes` 실행 시 변경 상세 → 로그 저장 → **요약 테이블이 맨 마지막**에 출력되도록 변경
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `dashboard.py` | `load_so()` Incoterms/Shipping method 추가, 해외선적 DN 집계·상세에 컬럼 추가, 운송방식별 탭 추가 |
+| `sync_db.py` | `print_summary()` 호출을 맨 마지막으로 이동 |
+
+---
+
 ## 2026-03-27: 대시보드 캘린더 — 해외 선적 예정 표시
 
 ### 납기 캘린더에 해외 선적 예정 정보 추가

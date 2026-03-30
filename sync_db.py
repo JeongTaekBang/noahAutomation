@@ -280,14 +280,14 @@ def main() -> int:
         print(f"[오류] 동기화 실패: {e}")
         return 1
 
-    print_summary(summary, dry_run=args.dry_run)
-
     if args.changes:
         print_changes(summary)
 
     # dry-run이 아니면 로그 파일에 변경 내역 기록
     if not args.dry_run:
         write_sync_log(summary)
+
+    print_summary(summary, dry_run=args.dry_run)
 
     return 1 if summary.total_errors > 0 else 0
 
