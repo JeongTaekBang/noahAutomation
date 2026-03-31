@@ -1098,7 +1098,8 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
             day_exw = pd.DataFrame()
         ship_all = load_dn_export_shipping()
         if not ship_all.empty:
-            day_pickup = ship_all[ship_all["pickup_date"].dt.date == sel_date]
+            pickup_dns = ship_all.loc[ship_all["pickup_date"].dt.date == sel_date, "DN_ID"].unique()
+            day_pickup = ship_all[ship_all["DN_ID"].isin(pickup_dns)]
         else:
             day_pickup = pd.DataFrame()
         if not so_pending.empty:
@@ -1110,7 +1111,8 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
         else:
             day_dn = pd.DataFrame()
         if not ship_all.empty and "expected_ship_date" in ship_all.columns:
-            day_ship = ship_all[ship_all["expected_ship_date"].dt.date == sel_date]
+            ship_dns = ship_all.loc[ship_all["expected_ship_date"].dt.date == sel_date, "DN_ID"].unique()
+            day_ship = ship_all[ship_all["DN_ID"].isin(ship_dns)]
         else:
             day_ship = pd.DataFrame()
         n_exw = day_exw["SO_ID"].nunique() if not day_exw.empty else 0
@@ -1186,7 +1188,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                     공장출고일=("factory_date", "min"),
                     선적예정일=("expected_ship_date", "min"),
                     운송업체=("carrier", "first"),
-                    SO_ID=("SO_ID", "first"),
+                    SO_ID=("SO_ID", lambda x: " / ".join(x.unique())),
                     Incoterms=("incoterms", "first"),
                     운송방식=("shipping_method", "first"),
                 ).reset_index()
@@ -1236,7 +1238,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                     선적예정일=("expected_ship_date", "min"),
                     BL=("bl_no", "first"),
                     운송업체=("carrier", "first"),
-                    SO_ID=("SO_ID", "first"),
+                    SO_ID=("SO_ID", lambda x: " / ".join(x.unique())),
                 ).reset_index()
                 items = []
                 for _, r in sh.iterrows():

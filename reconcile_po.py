@@ -154,6 +154,71 @@ def resolve_ax_po(delivery: pd.DataFrame, po_mapping: pd.DataFrame) -> pd.DataFr
     return result
 
 
+def export_delivery_ax_po(delivery: pd.DataFrame, output_file: Path,
+                          df_po_export: pd.DataFrame | None = None) -> None:
+    """Delivery 시트 + AX PO 매핑 결과를 별도 파일로 출력 (회계팀 GRN 대사용)
+
+    Args:
+        delivery: resolve_ax_po() 적용된 국내 Delivery DataFrame
+        output_file: 출력 경로
+        df_po_export: PO_해외 Invoiced 데이터 (없으면 국내만 출력)
+    """
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+    from openpyxl.utils import get_column_letter
+
+    def _add_tbl(writer, sheet_name: str, display_name: str) -> None:
+        ws = writer.sheets[sheet_name]
+        if ws.max_row >= 2:
+            ref = f"A1:{get_column_letter(ws.max_column)}{ws.max_row}"
+            tbl = Table(displayName=display_name, ref=ref)
+            tbl.tableStyleInfo = TableStyleInfo(
+                name="TableStyleMedium2", showRowStripes=True)
+            ws.add_table(tbl)
+
+    # --- 국내: Delivery + AX PO ---
+    df = delivery.copy()
+    drop_cols = [c for c in ['PO_ID'] if c in df.columns]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+
+    # 1:N 매핑 → AX PO 콤마로 합치기
+    orig_cols = [c for c in df.columns if c != 'AX PO']
+    df = (df.groupby(orig_cols, sort=False, dropna=False)
+            .agg({'AX PO': lambda x: ', '.join(sorted(set(x.dropna().astype(str))))})
+            .reset_index())
+
+    # AX PO를 RCK ODER 바로 뒤에 배치
+    cols = list(df.columns)
+    if 'AX PO' in cols and 'RCK ODER' in cols:
+        cols.remove('AX PO')
+        idx = cols.index('RCK ODER') + 1
+        cols.insert(idx, 'AX PO')
+        df = df[cols]
+
+    with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='국내_Delivery', index=False)
+        _add_tbl(writer, '국내_Delivery', '국내_Delivery')
+
+        # --- 해외: PO_해외 Invoiced → 같은 구조로 매핑 ---
+        if df_po_export is not None and len(df_po_export) > 0:
+            exp = df_po_export.copy()
+            # PO_ID별 집계: AX PO 콤마, 금액 합산
+            exp_agg = (exp.groupby('PO_ID', sort=False)
+                          .agg(
+                              AX_PO=('AX PO', lambda x: ', '.join(
+                                  sorted(set(x.dropna().astype(str).str.strip()) - {'', 'nan'}))),
+                              SO_ID=('SO_ID', 'first'),
+                              Customer=('Customer name', 'first'),
+                              계산서금액=('Total ICO', 'sum'),
+                          )
+                          .reset_index()
+                          .rename(columns={'PO_ID': 'RCK ODER', 'AX_PO': 'AX PO'}))
+            exp_agg = exp_agg[['RCK ODER', 'AX PO', 'SO_ID', 'Customer', '계산서금액']]
+
+            exp_agg.to_excel(writer, sheet_name='해외_PO', index=False)
+            _add_tbl(writer, '해외_PO', '해외_PO')
+
+
 def _agg_delivery(delivery: pd.DataFrame, name: str) -> pd.DataFrame:
     """출고 리스트를 AX PO별로 집계"""
     agg = (delivery.groupby('AX PO')
@@ -428,10 +493,20 @@ def main() -> int:
     # 3. PO_ID → AX PO 매핑 (전체 PO로)
     po_mapping = build_po_mapping(df_po)
     delivery = resolve_ax_po(delivery, po_mapping)
+
+    # 3-1. Delivery(국내) + PO_해외 → AX PO 매핑 파일 출력 (회계팀 GRN 대사용)
+    invoiced_status = f"Invoiced {period}"
+    df_po_export = df_po_all[
+        (df_po_all['구분'] == '해외') &
+        (df_po_all['Status'] == invoiced_status)
+    ].copy()
+    ax_po_file = RECON_DIR / period / f"AX_PO_매핑_{period}.xlsx"
+    export_delivery_ax_po(delivery, ax_po_file, df_po_export=df_po_export)
+    print(f"AX PO 매핑: {ax_po_file.name}")
+
     delivery = delivery[delivery['AX PO'] != ''].copy()
 
     # 4. PO를 당월 Invoiced만 필터링
-    invoiced_status = f"Invoiced {period}"
     if 'Status' in df_po.columns:
         df_po_period = df_po[df_po['Status'] == invoiced_status].copy()
     else:

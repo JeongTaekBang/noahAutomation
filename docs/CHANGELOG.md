@@ -20,6 +20,23 @@
 
 ---
 
+## 2026-03-31: PO 매입대사 — AX PO 매핑 파일 추가
+
+### AX_PO_매핑_{period}.xlsx 별도 출력 (2시트)
+- `reconcile_po.py`에 `export_delivery_ax_po()` 함수 추가
+- **국내_Delivery 시트**: Delivery 원본 행 유지 + `AX PO` 컬럼 추가 (`RCK ODER` 바로 뒤)
+- **해외_PO 시트**: PO_해외 Invoiced 데이터 → `RCK ODER`(PO_ID), `AX PO`, `SO_ID`, `Customer`, `계산서금액`(Total ICO)
+- 1:N 매핑(ND-xxxx → 복수 P######) 시 콤마로 합쳐서 표시, 행 복제 없음
+- PO_ID별 집계: AX PO 콤마, 금액 합산
+- **목적**: 회계팀이 AX 시스템에서 PO번호 기준 GRN 대사 작업 시 활용 (국내/해외 모두)
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `reconcile_po.py` | `export_delivery_ax_po()` 추가 (국내 Delivery + 해외 PO 2시트), `main()`에서 해외 Invoiced 필터링 후 전달 |
+
+---
+
 ## 2026-03-30: 해외선적 Action Items 개선 + DB Sync 출력 순서 변경
 
 ### 해외선적 DN 상세에 Incoterms / 운송방식 컬럼 추가

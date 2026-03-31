@@ -30,6 +30,10 @@ python close_period.py --undo 2026-01     # Undo last close
 python close_period.py --list             # Snapshot history
 python close_period.py --status           # Current status
 
+# PO 매입대사
+python reconcile_po.py P03                # 3월 대사 (대사결과 + AX_PO_매핑)
+python reconcile_po.py P03 -v             # 상세 로그
+
 # Dashboard
 streamlit run dashboard.py                # Streamlit 대시보드
 
@@ -55,6 +59,10 @@ DB layer:
   sync_db.py → db_sync.py (Excel→SQLite, upsert+prune) → db_schema.py (DDL)
   close_period.py → snapshot.py (SnapshotEngine) → db_schema.py (snapshot tables)
   sql/order_book.sql (이벤트 기반), sql/order_book_snapshot.sql (snapshot-based)
+
+Reconciliation layer:
+  reconcile_po.py → 3-source merge (Delivery + Internal PO + GRN) → 대사결과 + AX_PO_매핑
+  po_reconciliation/{period}/ — input/output files per period
 ```
 
 **Data flow:** CLI → FinderService loads Excel data → validators check fields → generator fills template → output saved to `generated_*/` + history snapshot to `po_history/YYYY/M월/`.
@@ -96,6 +104,7 @@ DB layer:
 | `sql/order_book.sql` | 이벤트 기반 Order Book SQL (Input/Output 이벤트 월만 행 생성, 재귀 CTE 없음) |
 | `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL (마감 고정 + Variance) |
 | `dashboard.py` | Streamlit 대시보드 (8페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book, PO확정지연, EXW미출고, 납기현황(DN qty매칭), 납기캘린더(선적예정 포함), 해외선적(Incoterms/운송방식별), 세금계산서미발행, Order Book 3탭) |
+| `reconcile_po.py` | PO 매입대사 — 공장 출고(Delivery) vs 회계 GRN 금액 비교. 출력: `대사결과_{period}.xlsx` (6시트), `AX_PO_매핑_{period}.xlsx` (Delivery+AX PO) |
 
 ## Business Rules
 
