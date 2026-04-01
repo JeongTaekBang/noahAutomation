@@ -206,7 +206,8 @@ class SyncEngine:
 
         try:
             # 1. DataFrame 로드
-            df = pd.read_excel(xls, sheet_name=config.sheet_name, dtype=str)
+            df = pd.read_excel(xls, sheet_name=config.sheet_name, dtype=str,
+                                 keep_default_na=False, na_values=[''])
             df.columns = [str(c).strip() for c in df.columns]
 
             # 2. 필수 컬럼 NaN인 행 제거 (빈 행 필터링)

@@ -437,7 +437,9 @@ def load_dn_tax_pending() -> pd.DataFrame:
             WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
               AND (TRIM(COALESCE([세금계산서 발행일], '')) = '' OR [세금계산서 발행일] IS NULL)
               AND UPPER(TRIM(COALESCE([세금계산서 발행일], ''))) != 'N/A'
-              AND (TRIM(COALESCE([선수금 세금계산서 발행일], '')) = '' OR [선수금 세금계산서 발행일] IS NULL)
+              AND ([선수금 세금계산서 발행일] IS NULL
+                   OR TRIM(COALESCE([선수금 세금계산서 발행일], '')) = ''
+                   OR UPPER(TRIM(COALESCE([선수금 세금계산서 발행일], ''))) = 'N/A')
               AND CAST(COALESCE([Total Sales], 0) AS REAL) > 0
         """, conn)
     except Exception as e:

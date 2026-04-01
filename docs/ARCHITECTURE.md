@@ -135,6 +135,21 @@ noahAutomation/
 │       └── 1월/
 │           └── 20260118_ND-0001_고객명.xlsx
 │
+├── 📁 po_reconciliation/     # PO 매입대사 (기간별 입력/출력)
+│   └── P03/
+│       ├── 2026리스트_RCK_P03.xlsx   # 입력: 공장 출고 리스트
+│       ├── Noah purchase_GRN_...xlsx  # 입력: 회계 GRN
+│       ├── AX_PO_매핑_P03.xlsx       # 출력: Delivery→AX PO 매핑
+│       └── 대사결과_P03.xlsx          # 출력: 대사 결과 (6시트)
+│
+├── 📁 so_reconciliation/     # SO 매출대사 (기간별 입력/출력)
+│   └── P03/
+│       ├── AX_Sales_P03.xlsx          # 입력: AX ERP 매출
+│       └── 대사결과_SO_P03.xlsx       # 출력: 대사 결과 (3시트)
+│
+├── 📄 reconcile_po.py        # PO 매입대사 CLI (Delivery + PO + GRN 3-way)
+├── 📄 reconcile_so.py        # SO 매출대사 CLI (AX Sales + DN, FX 환율차이 판별)
+│
 ├── 📁 sql/                  # SQL 쿼리 (Order Book, Backlog)
 │
 └── 📁 tests/                # 테스트 코드

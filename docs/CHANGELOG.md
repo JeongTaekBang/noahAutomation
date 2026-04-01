@@ -20,6 +20,42 @@
 
 ---
 
+## 2026-04-01: SO 매출대사 기능 추가 (AX ERP vs NOAH DN)
+
+### 기능 개요
+- AX ERP 매출 금액과 NOAH DN 매출 금액을 AX Project 기준으로 비교하여 차이 확인
+- `so_reconciliation/PXX/AX_Sales_PXX.xlsx` ↔ `NOAH_SO_PO_DN.xlsx` DN 시트 비교
+- bat 메뉴 `[S]` SO 매출대사 옵션 추가
+
+### 매출일 기준 월 필터
+- **국내(DN_국내)**: `출고일` 기준으로 대사 월 필터링
+- **해외(DN_해외)**: `선적일` 기준으로 대사 월 필터링 (출고일 ≠ 선적일, 매출 인식은 선적 시점)
+
+### FX 환율차이 자동 판별
+- DN 등록 시점 환율 vs 대사 월 환율 차이로 인한 불일치 자동 식별
+- FX 시트에서 대사 월 환율 로드 → `외화금액 × 대사월 환율 ≈ AX 금액`이면 `일치(환율차이)` 판정
+- 대사 시트에 `대사월_환율`, `재계산_KRW` 컬럼 포함
+
+### 매칭상태
+| 상태 | 설명 |
+|------|------|
+| 일치 | AX = NOAH DN (차이 < 1원) |
+| 일치(환율차이) | 외화 × 대사월 환율 = AX (등록월 vs 대사월 환율 차이) |
+| 불일치 | AX ≠ NOAH DN (환율차이로도 설명 안됨) |
+| NOAH에 없음 | AX에 있지만 해당 월 DN에 매칭 안됨 |
+
+### 출력 파일
+- `대사결과_SO_{period}.xlsx` — 3시트: 대사(요약), 상세(DN 라인별), 범례
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `reconcile_so.py` | 신규 — SO 매출대사 CLI (AX Sales ↔ NOAH DN 비교, FX 환율차이 판별) |
+| `create_po.bat` | 메뉴에 `[S] SO 매출대사` 추가 + `:reconcile_so` 섹션 |
+| `CLAUDE.md` | Commands, Architecture, Key Files에 reconcile_so.py 추가 |
+
+---
+
 ## 2026-04-01: Order Book Variance 분석 SQL 추가 + 스냅샷 퇴장 행 버그 수정
 
 ### Variance 분석 SQL (`sql/order_book_variance.sql`)
