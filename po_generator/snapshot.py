@@ -263,8 +263,10 @@ class SnapshotEngine:
                         variance_count += 1
 
             # ob_snapshot에 INSERT
+            rolling_keys: set[tuple] = set()
             for r in rows:
                 key = (r['SO_ID'], r['OS name'], r['Expected delivery date'] or '')
+                rolling_keys.add(key)
                 var_qty, var_amt = variance_map.get(key, (0, 0))
 
                 # Variance를 반영한 Ending 계산
@@ -306,6 +308,56 @@ class SnapshotEngine:
                     r['Customer name'], r['Item name'], r['구분'], r['등록Period'],
                     r['AX Period'], r['Model code'], r['Sector'], now_iso,
                 ))
+
+            # 퇴장 행: 전월 스냅샷에 있지만 rolling 결과에 없는 그룹
+            # 소급 변경으로 Ending=0이 되어 HAVING 필터에서 제외된 건
+            # Start=전월Ending, Variance=소급변경분, Ending≈0 으로 기록
+            if last_closed is not None:
+                exited_keys = set(snap_map.keys()) - rolling_keys
+                for key in exited_keys:
+                    snap_qty, snap_amt = snap_map[key]
+                    if abs(snap_qty) < 0.001 and abs(snap_amt) < 0.5:
+                        continue  # 전월 Ending도 0이면 스킵
+
+                    recalc_qty, recalc_amt = recalc_map.get(key, (0, 0))
+                    var_qty = recalc_qty - snap_qty
+                    var_amt = recalc_amt - snap_amt
+                    ending_qty = snap_qty + var_qty  # = recalc_qty (≈0)
+                    ending_amt = snap_amt + var_amt  # = recalc_amt (≈0)
+
+                    # 전월 스냅샷에서 메타데이터 가져오기
+                    meta_row = conn.execute("""
+                        SELECT customer_name, item_name, 구분, 등록Period,
+                               [AX Period], [Model code], Sector
+                        FROM ob_snapshot
+                        WHERE snapshot_period = ? AND SO_ID = ?
+                          AND [OS name] = ? AND [Expected delivery date] = ?
+                    """, (last_closed, key[0], key[1], key[2])).fetchone()
+
+                    conn.execute("""
+                        INSERT OR REPLACE INTO ob_snapshot (
+                            snapshot_period, SO_ID, [OS name], [Expected delivery date],
+                            ending_qty, ending_amount, start_qty, start_amount,
+                            input_qty, input_amount, output_qty, output_amount,
+                            variance_qty, variance_amount,
+                            customer_name, item_name, 구분, 등록Period,
+                            [AX Period], [Model code], Sector, snapshot_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        period, key[0], key[1], key[2],
+                        ending_qty, ending_amt, snap_qty, snap_amt,
+                        0, 0, 0, 0,
+                        var_qty, var_amt,
+                        meta_row['customer_name'] if meta_row else None,
+                        meta_row['item_name'] if meta_row else None,
+                        meta_row['구분'] if meta_row else None,
+                        meta_row['등록Period'] if meta_row else None,
+                        meta_row['AX Period'] if meta_row else None,
+                        meta_row['Model code'] if meta_row else None,
+                        meta_row['Sector'] if meta_row else None,
+                        now_iso,
+                    ))
+                    variance_count += 1
 
             # ob_snapshot_meta에 INSERT
             conn.execute("""

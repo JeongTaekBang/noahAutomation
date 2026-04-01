@@ -20,6 +20,49 @@
 
 ---
 
+## 2026-04-01: Order Book Variance 분석 SQL 추가 + 스냅샷 퇴장 행 버그 수정
+
+### Variance 분석 SQL (`sql/order_book_variance.sql`)
+- 마감 스냅샷 간 소급 변경 내역을 변동이유별로 자동 분류
+- **환율차이**: 해외 건, 수량 불변 금액만 변동 (Sales amount KRW 환율 소급 변경)
+- **판매가변경**: 국내 건, 수량 불변 금액만 변동
+- **수량변경**: SO 수량 소급 수정 또는 라인 추가/삭제
+- **반올림**: KRW 환산 소수점 ±1원 이내
+- 납기변경(EDD 수정)은 그룹키 이동일 뿐 금액/수량 변동이 아니므로 제외
+- `params` CTE의 period 값을 변경하여 DB Browser에서 사용
+
+### 스냅샷 퇴장 행 버그 수정 (`po_generator/snapshot.py`)
+- **문제**: 전월 Ending > 0이었지만 소급 변경으로 사라진 건이 당월 스냅샷에 누락 → Start ≠ 전월 Ending (70.5M 차이 발생)
+- **원인**: rolling SQL의 HAVING 필터가 Ending=0 + 당월 활동 없는 그룹을 제외 → 전월 Ending이 당월 Start에 반영되지 않음
+- **수정**: 전월 스냅샷에 있지만 rolling 결과에 없는 그룹을 "퇴장 행"으로 추가 (Start=전월Ending, Variance=소급변경분, Ending≈0)
+- 수정 후: P03 Start = P02 Ending = 3,174.1M (차이 0), Variance -6.7M 정확히 반영
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `sql/order_book_variance.sql` | 신규 — Variance 변동이유 분석 SQL |
+| `po_generator/snapshot.py` | `take_snapshot()`에 퇴장 행 로직 추가 |
+
+---
+
+## 2026-04-01: Order_Book Power Query — 부분출고 잔고 이월 버그 수정
+
+### 문제
+- 부분출고된 SO가 다음 Period에 아예 나타나지 않음
+- 예: SOO-2026-0025가 P03에서 부분출고(Output=10, Ending=25)됐는데 P04에 행 없음
+- **원인**: Period 확장 시 `endPeriod = if [출고월] <> null then [출고월] else LastPeriod` — 출고 이력이 있으면 마지막 출고월에서 끊어버려 부분출고 건도 완납 건과 동일하게 처리
+
+### 수정
+- `endPeriod`를 항상 `LastPeriod`로 변경 — 모든 SO Line을 현재월까지 확장
+- 롤링 계산 후 `ZeroFiltered` 단계 추가 — Start=Input=Output=Ending 모두 0인 행 제거 (완납 건 정리)
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `docs/POWER_QUERY.md` | M 코드 `WithPeriodList` endPeriod 수정, `ZeroFiltered` 단계 추가, 도식/설명 업데이트 |
+
+---
+
 ## 2026-04-01: 납기 현황 — PO EXW 보충 로직 추가
 
 ### SO exw_noah 누락 시 PO factory_exw로 보충

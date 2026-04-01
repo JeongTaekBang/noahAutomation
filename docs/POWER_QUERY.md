@@ -1272,7 +1272,7 @@ SOD-0001 × 2월: 들어옴 0,     나감 350만 → 남음 0
 | 단계 | 하는 일 | 비유 |
 |------|---------|------|
 | ① 마지막 출고월 붙이기 | "이 주문 언제 끝나?" 끝점 파악 | 달력을 어디까지 펼칠지 |
-| ② Period 확장 | 1줄을 월별로 복제 | 빈 달력 만들기 |
+| ② Period 확장 | 1줄을 등록~현재월까지 복제 | 빈 달력 만들기 |
 | ③ Input 채우기 | 등록월에만 수주 금액 기록 | 입금 기록 |
 | ④ Output 채우기 | DN 출고를 해당 월에 매칭 | 출금 기록 |
 | ⑤ Line item 합치기 | 같은 제품+납기일끼리 합산 | 정리 |
@@ -1417,13 +1417,13 @@ SO_ID = SOD-0001
        ▼                                            │
  ══════════════════                                 │
   ② Period 확장                                      │
-    끝점 = 마지막출고월 or 현재월                        │
+    끝점 = 항상 LastPeriod (현재월)                     │
                                                     │
-    출고 완료 → 마지막출고월에서 끊음                     │
-    미출고    → 현재월까지 (Backlog)                    │
+    모든 건을 현재월까지 확장                            │
+    → 부분출고 잔고 이월 보장                           │
                                                     │
-    * 출고 완료 건이 이후 Period에                      │
-      빈 행으로 남는 것을 방지                          │
+    * 완납 건(Ending=0) 후속 빈 행은                   │
+      ⑥ 이후 ZeroFiltered에서 제거                    │
  ══════════════════                                 │
        │                                            │
        ▼                                            │
@@ -1506,11 +1506,12 @@ DN 시트:
 │ SO_ID     │ Line  │ OS   │ 등록P    │ Period  │  ← 확장된 Period
 ├───────────┼───────┼──────┼──────────┼─────────┤
 │ SOD-0001  │ 1     │ IQ3  │ 2026-01  │ 2026-01 │  ← 등록월~
-│ SOD-0001  │ 1     │ IQ3  │ 2026-01  │ 2026-02 │  ←        ~출고월 (2월까지 활동)
-│ SOD-0001  │ 2     │ IQ3  │ 2026-01  │ 2026-01 │  ← 1월만 (1월 출고완료라 여기서 끊음)
+│ SOD-0001  │ 1     │ IQ3  │ 2026-01  │ 2026-02 │  ←        ~현재월까지
+│ SOD-0001  │ 2     │ IQ3  │ 2026-01  │ 2026-01 │  ← 등록월~
+│ SOD-0001  │ 2     │ IQ3  │ 2026-01  │ 2026-02 │  ←        ~현재월까지
 └───────────┴───────┴──────┴──────────┴─────────┘
-  출고 완료 건 = 마지막 출고월에서 끊음 (이후 빈 행 방지)
-  미출고 건   = 현재월까지 계속 펼침 (Backlog)
+  모든 건 = 항상 LastPeriod(현재월)까지 확장
+  완납 건(Ending=0)의 후속 빈 행은 ⑥ 이후 ZeroFiltered에서 제거
 ```
 
 **③ Input 계산** — 수주 금액을 등록월에만 기록 (복제된 행마다 넣으면 중복 집계됨)
@@ -1642,13 +1643,15 @@ let
     LastPeriod = List.Last(AllPeriods),
 
     // ========== 건별 × Period 확장 ==========
-    // 각 SO Line: 등록 Period ~ 출고월(또는 마지막 Period)까지 행 생성
-    // 출고 완료 건: 출고월까지만 표시
-    // 미출고 건: 마지막 Period까지 표시 (Backlog)
+    // 각 SO Line: 등록 Period ~ 마지막 Period까지 행 생성
+    // 항상 LastPeriod까지 확장하여 부분출고 잔고 이월 보장
+    // 완납 건(Ending=0)의 후속 빈 행은 ZeroFiltered 단계에서 제거
     WithPeriodList = Table.AddColumn(WithDNExpanded, "ActivePeriods", each
         let
             startIdx = List.PositionOf(AllPeriods, [Period]),
-            endPeriod = if [출고월] <> null then [출고월] else LastPeriod,
+            // 항상 LastPeriod까지 확장 (부분출고 건의 잔고 이월 보장)
+            // 완납 건(Ending=0)의 후속 빈 행은 롤링 계산 후 ZeroFiltered에서 제거
+            endPeriod = LastPeriod,
             endIdx = List.PositionOf(AllPeriods, endPeriod),
             s = if startIdx < 0 then 0 else startIdx,
             e = if endIdx < 0 then List.Count(AllPeriods) - 1
@@ -1775,7 +1778,14 @@ let
         {"Value_Variance_amount", Currency.Type},
         {"Value_Ending_amount", Currency.Type}
     }),
-    #"Reordered Columns" = Table.ReorderColumns(Result,{"SO_ID", "AX Project number", "AX Period", "구분", "Period", "등록Period", "Customer name", "Customer PO", "Item name", "OS name", "Sector", "Business registration number", "Industry code", "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty", "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount", "Expected delivery date"}),
+
+    // 완납 건(Ending=0) 후속 빈 행 제거: Start=Input=Output=Ending 모두 0이면 제거
+    ZeroFiltered = Table.SelectRows(Result, each
+        not ([Value_Start_qty] = 0 and [Value_Input_qty] = 0 and [Value_Output_qty] = 0 and [Value_Ending_qty] = 0
+         and [Value_Start_amount] = 0 and [Value_Input_amount] = 0 and [Value_Output_amount] = 0 and [Value_Ending_amount] = 0)
+    ),
+
+    #"Reordered Columns" = Table.ReorderColumns(ZeroFiltered,{"SO_ID", "AX Project number", "AX Period", "구분", "Period", "등록Period", "Customer name", "Customer PO", "Item name", "OS name", "Sector", "Business registration number", "Industry code", "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty", "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount", "Expected delivery date"}),
     #"Removed Columns" = Table.RemoveColumns(#"Reordered Columns",{"Item name"}),
     #"Reordered Columns1" = Table.ReorderColumns(#"Removed Columns",{"SO_ID", "AX Project number", "AX Period", "구분", "Period", "등록Period", "Business registration number", "Customer name", "Customer PO", "Sector", "Industry code", "OS name", "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty", "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount", "Expected delivery date"}),
     #"Removed Columns1" = Table.RemoveColumns(#"Reordered Columns1",{"Value_Variance_qty", "Value_Variance_amount"})
