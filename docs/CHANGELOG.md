@@ -20,6 +20,20 @@
 
 ---
 
+## 2026-04-01: 납기 현황 — PO EXW 보충 로직 추가
+
+### SO exw_noah 누락 시 PO factory_exw로 보충
+- SO 라인과 PO 라인이 1:1 대응하지 않는 케이스 대응 (예: SO 2라인 → PO 1라인 합본 발주)
+- `load_po_detail()`에 `MIN(NULLIF(p.[공장 EXW date], ''))` 추가 — SO_ID 단위로 PO의 공장 EXW 집계
+- 납기 현황 섹션 Step 2a: SO의 `exw_noah`가 NaT인 라인에 PO의 `factory_exw`를 보충
+
+### 수정 파일
+| 파일 | 변경 내용 |
+|------|----------|
+| `dashboard.py` | `load_po_detail()` SQL에 `factory_exw` 컬럼 추가, 납기 현황 Step 2a PO EXW 보충 로직 |
+
+---
+
 ## 2026-03-31: PO 매입대사 — AX PO 매핑 파일 추가
 
 ### AX_PO_매핑_{period}.xlsx 별도 출력 (2시트)

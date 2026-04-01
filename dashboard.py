@@ -283,6 +283,7 @@ def load_po_detail() -> pd.DataFrame:
                     WHERE o.SO_ID = p.SO_ID AND COALESCE(o.Status, '') = 'Open'
                    ) AS open_po_ids,
                    MIN(p.[공장 발주 날짜]) AS factory_order_date,
+                   MIN(NULLIF(p.[공장 EXW date], '')) AS factory_exw,
                    '국내' AS market
             FROM po_domestic p
             WHERE COALESCE(p.Status, '') != 'Cancelled'
@@ -298,6 +299,7 @@ def load_po_detail() -> pd.DataFrame:
                     WHERE o.SO_ID = p.SO_ID AND COALESCE(o.Status, '') = 'Open'
                    ) AS open_po_ids,
                    MIN(p.[공장 발주 날짜]) AS factory_order_date,
+                   MIN(NULLIF(p.[공장 EXW date], '')) AS factory_exw,
                    '해외' AS market
             FROM po_export p
             WHERE COALESCE(p.Status, '') != 'Cancelled'
@@ -315,6 +317,7 @@ def load_po_detail() -> pd.DataFrame:
     df["po_ids"] = df["po_ids"].fillna("")
     df["open_po_ids"] = df["open_po_ids"].fillna("")
     df["factory_order_date"] = pd.to_datetime(df["factory_order_date"], errors="coerce")
+    df["factory_exw"] = pd.to_datetime(df["factory_exw"], errors="coerce")
     return df
 
 
@@ -1713,6 +1716,16 @@ def pg_today(market, sectors, customers, **_):
         due_check["dn_amount"] = due_check["dn_amount"].fillna(0)
         due_check["remaining_qty"] = due_check["qty"] - due_check["dn_qty"]
         due_check["remaining_amount"] = due_check["amount_krw"] - due_check["dn_amount"]
+
+        # Step 2a: SO exw_noah 누락 시 PO factory_exw로 보충
+        # (PO 라인이 SO 라인과 1:1 대응 안 되는 경우 SO_ID 단위로 매칭)
+        if not po_detail.empty and "factory_exw" in po_detail.columns:
+            _po_exw = po_detail[["SO_ID", "factory_exw"]].dropna(subset=["factory_exw"])
+            if not _po_exw.empty:
+                due_check = due_check.merge(_po_exw, on="SO_ID", how="left")
+                _mask = due_check["exw_noah"].isna() & due_check["factory_exw"].notna()
+                due_check.loc[_mask, "exw_noah"] = due_check.loc[_mask, "factory_exw"]
+                due_check.drop(columns=["factory_exw"], inplace=True)
         so_ids_with_remaining = set(due_check.loc[due_check["remaining_qty"] > 0, "SO_ID"])
 
         # 납기 경과 라인 중 잔여 있는 SO만 (미래 납기 라인 제외)
