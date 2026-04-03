@@ -20,6 +20,21 @@
 
 ---
 
+## 2026-04-03: Industry Code 대사 기능 추가
+
+- Orderbook의 빈 Industry code를 NOAH_SO_PO_DN.xlsx PO→SO 매핑으로 자동 채움
+- 매핑 체인: 발주번호 → PO시트 NOAH O.C No. → SO_ID → SO시트 Industry code
+- 새 파일(`ind_code_결과_{period}.xlsx`)로 출력, 원본 미수정
+- 추가 컬럼: NOAH Sector (SO시트 Sector), 매핑상태 (매칭/SO에 Industry code 없음/PO에 발주번호 없음)
+- BAT 메뉴 [I] 항목 추가
+
+### 수정 파일
+- `reconcile_ind.py` — Industry Code 대사 CLI (신규)
+- `create_po.bat` — 메뉴에 [I] Industry Code 대사 추가
+- `CLAUDE.md` — Commands, Architecture, Key Files 업데이트
+
+---
+
 ## 2026-04-03: Final Invoice 발주번호(RCK PO) 단위 자동 분리 생성
 
 - DN_ID 내에 복수 RCK PO가 포함된 경우, 발주번호별로 FI를 자동 분리 생성
