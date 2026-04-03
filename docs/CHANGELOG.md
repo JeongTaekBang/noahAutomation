@@ -20,6 +20,18 @@
 
 ---
 
+## 2026-04-03: Final Invoice 발주번호(RCK PO) 단위 자동 분리 생성
+
+- DN_ID 내에 복수 RCK PO가 포함된 경우, 발주번호별로 FI를 자동 분리 생성
+- 단일 RCK PO인 경우 기존 동작 유지 (하위 호환)
+- 출력 파일명에 RCK PO 포함: `FI_{DN_ID}_{RCK_PO}_{고객명}_{날짜}.xlsx`
+
+### 수정 파일
+- `create_fi.py` — RCK PO 그룹 감지 + 발주번호별 루프 생성
+- `po_generator/services/document_service.py` — `generate_fi()`에 `rck_po` 필터 파라미터 추가
+
+---
+
 ## 2026-04-03: 대시보드 해외 선적 예정 카드에 Incoterms/운송방식 표시
 
 - 오늘의 현황 → 해외 선적 예정 카드에 Incoterms, Shipping method 정보 추가

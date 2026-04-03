@@ -20,7 +20,7 @@ python create_po.py ND-0001              # Single PO
 python create_po.py ND-0001 --force      # Skip validation errors
 python create_ts.py DND-2026-0001 --merge  # Merged transaction statement
 python create_pi.py NO-0001              # Proforma invoice
-python create_fi.py ND-0001              # Final invoice
+python create_fi.py DNO-2026-0001        # Final invoice (복수 RCK PO 시 발주번호별 자동 분리)
 python create_oc.py SOO-2026-0001        # Order confirmation
 
 # DB sync & snapshot

@@ -232,6 +232,13 @@
 | A14 | Customer Address 3 | 청구처 주소 3행 | Customer_해외.Bill to 3 |
 | G12 | Delivery Address | 배송 주소 | DN_해외.Delivery Address |
 
+### 발주번호(RCK PO) 자동 분리
+
+DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지하여 발주번호별로 별도 FI를 생성합니다.
+- 단일 RCK PO → 기존 동작 (1개 FI)
+- 복수 RCK PO → PO별 FI 생성, 파일명에 PO 포함 (`FI_{DN_ID}_{RCK_PO}_{고객명}_{날짜}.xlsx`)
+- 각 FI의 Customer PO (C7), PO Date (C8) 등 헤더는 해당 PO 그룹의 데이터로 채워짐
+
 ### 동적 필드 (Item List - Row 17~)
 
 헤더 행은 Row 16, 데이터는 Row 17부터.

@@ -486,16 +486,18 @@ class DocumentService:
             item_count=order_data.item_count,
         )
 
-    def generate_fi(self, dn_id: str) -> DocumentResult:
+    def generate_fi(self, dn_id: str, rck_po: str | None = None) -> DocumentResult:
         """Final Invoice 생성 (대금 청구용)
 
         Args:
             dn_id: DN_ID (예: DNO-2026-0001)
+            rck_po: RCK PO 번호 (지정 시 해당 발주 아이템만 포함)
 
         Returns:
             DocumentResult
         """
-        logger.info(f"FI 생성 시작: {dn_id}")
+        label = f"{dn_id} / {rck_po}" if rck_po else dn_id
+        logger.info(f"FI 생성 시작: {label}")
 
         # 템플릿 확인
         if not FI_TEMPLATE_FILE.exists():
@@ -509,12 +511,31 @@ class DocumentService:
         if order_data is None:
             return DocumentResult.not_found_result(dn_id)
 
+        # RCK PO 필터링
+        if rck_po is not None:
+            items_df = (
+                order_data.items_df
+                if order_data.items_df is not None
+                else pd.DataFrame([order_data.first_item])
+            )
+            rck_po_col = resolve_column(items_df.columns, 'rck_po')
+            if rck_po_col:
+                filtered = items_df[items_df[rck_po_col] == rck_po]
+                if filtered.empty:
+                    return DocumentResult.not_found_result(
+                        f"{dn_id} (RCK PO: {rck_po})"
+                    )
+                order_data = OrderData.from_result(filtered)
+            else:
+                logger.warning("RCK PO 컬럼을 찾을 수 없음 — 전체 아이템으로 생성")
+
         # 출력 디렉토리 생성
         FI_OUTPUT_DIR.mkdir(exist_ok=True)
 
-        # 파일명 생성
+        # 파일명 생성 (PO 지정 시 PO번호 포함)
         customer_name = order_data.get_value('customer_name', 'Unknown')
-        output_file = generate_output_filename("FI", dn_id, customer_name, FI_OUTPUT_DIR)
+        order_label = f"{dn_id}_{rck_po}" if rck_po else dn_id
+        output_file = generate_output_filename("FI", order_label, customer_name, FI_OUTPUT_DIR)
 
         if not validate_output_path(output_file, FI_OUTPUT_DIR):
             return DocumentResult.file_error_result(

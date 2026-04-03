@@ -26,6 +26,7 @@ from po_generator.config import (
 from po_generator.utils import (
     load_dn_export_data,
     get_value,
+    resolve_column,
 )
 from po_generator.logging_config import setup_logging
 from po_generator.services import DocumentService, GenerationStatus
@@ -60,10 +61,34 @@ def print_available_ids(df_dn: pd.DataFrame, limit: int = 15) -> None:
     print("=" * 60)
 
 
+def _print_item_info(order_data, label: str = '') -> None:
+    """아이템 정보 출력 헬퍼"""
+    if order_data.is_multi_item:
+        print(f"  {label}[다중 아이템] {order_data.item_count}개 아이템 발견")
+        for idx, (_, item) in enumerate(order_data.items_df.iterrows()):
+            item_name = get_value(item, 'item_name', '')
+            if not item_name:
+                item_name = item.get('Item', 'N/A') if 'Item' in item.index else 'N/A'
+            item_qty = get_value(item, 'item_qty', '')
+            if not item_qty:
+                item_qty = item.get('Qty', 'N/A') if 'Qty' in item.index else 'N/A'
+            unit_price = get_value(item, 'unit_price', 0)
+            try:
+                print(f"    {idx + 1}. {item_name} x {item_qty} @ {float(unit_price):,.2f}")
+            except (ValueError, TypeError):
+                print(f"    {idx + 1}. {item_name} x {item_qty}")
+    else:
+        item_name = order_data.get_value('item_name', '')
+        if not item_name:
+            item_name = order_data.first_item.get('Item', 'N/A') if 'Item' in order_data.first_item.index else 'N/A'
+        print(f"  {label}품목: {item_name}")
+
+
 def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
     """Final Invoice 생성
 
     DocumentService를 사용하여 Final Invoice를 생성합니다.
+    RCK PO가 복수개이면 발주번호별로 자동 분리 생성합니다.
 
     Args:
         dn_id: DN_ID
@@ -94,40 +119,53 @@ def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
     if payment_terms:
         print(f"  Payment Terms: {payment_terms}")
 
-    if order_data.is_multi_item:
-        print(f"  [다중 아이템] {order_data.item_count}개 아이템 발견")
-        for idx, (_, item) in enumerate(order_data.items_df.iterrows()):
-            item_name = get_value(item, 'item_name', '')
-            if not item_name:
-                item_name = item.get('Item', 'N/A') if 'Item' in item.index else 'N/A'
-            item_qty = get_value(item, 'item_qty', '')
-            if not item_qty:
-                item_qty = item.get('Qty', 'N/A') if 'Qty' in item.index else 'N/A'
-            unit_price = get_value(item, 'unit_price', 0)
-            try:
-                print(f"    {idx + 1}. {item_name} x {item_qty} @ {float(unit_price):,.2f}")
-            except (ValueError, TypeError):
-                print(f"    {idx + 1}. {item_name} x {item_qty}")
-    else:
-        item_name = order_data.get_value('item_name', '')
-        if not item_name:
-            item_name = order_data.first_item.get('Item', 'N/A') if 'Item' in order_data.first_item.index else 'N/A'
-        print(f"  품목: {item_name}")
+    _print_item_info(order_data)
 
-    # 3. 문서 생성 (서비스 사용)
-    result = service.generate_fi(dn_id)
+    # 3. RCK PO 그룹 감지
+    items_df = (
+        order_data.items_df
+        if order_data.items_df is not None
+        else pd.DataFrame([order_data.first_item])
+    )
+    rck_po_col = resolve_column(items_df.columns, 'rck_po')
 
-    # 4. 결과 처리
-    if result.success:
-        print(f"  -> Final Invoice 생성 완료: {result.output_file.name}")
-        return True
+    if rck_po_col:
+        rck_pos = items_df[rck_po_col].dropna().unique().tolist()
     else:
-        if result.status == GenerationStatus.FILE_ERROR:
-            print(f"  [오류] {result.errors[0] if result.errors else result.message}")
+        rck_pos = []
+
+    # 4. 단일 PO (또는 PO 컬럼 없음) → 기존 방식
+    if len(rck_pos) <= 1:
+        result = service.generate_fi(dn_id)
+        if result.success:
+            print(f"  -> Final Invoice 생성 완료: {result.output_file.name}")
+            return True
         else:
-            print(f"  [오류] {result.message}")
-        logger.error(f"Final Invoice 생성 실패: {result.message}")
-        return False
+            if result.status == GenerationStatus.FILE_ERROR:
+                print(f"  [오류] {result.errors[0] if result.errors else result.message}")
+            else:
+                print(f"  [오류] {result.message}")
+            logger.error(f"Final Invoice 생성 실패: {result.message}")
+            return False
+
+    # 5. 복수 PO → 발주번호별 분리 생성
+    print(f"\n  [발주번호 분리] {len(rck_pos)}개 RCK PO 발견 → 발주번호별 FI 생성")
+    for po in sorted(rck_pos):
+        po_items = items_df[items_df[rck_po_col] == po]
+        print(f"    {po}: {len(po_items)}개 아이템")
+
+    all_success = True
+    for po in sorted(rck_pos):
+        print(f"\n  --- {po} ---")
+        result = service.generate_fi(dn_id, rck_po=po)
+        if result.success:
+            print(f"  -> FI 생성 완료 ({po}): {result.output_file.name}")
+        else:
+            print(f"  [오류] FI 생성 실패 ({po}): {result.message}")
+            logger.error(f"Final Invoice 생성 실패 ({po}): {result.message}")
+            all_success = False
+
+    return all_success
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
