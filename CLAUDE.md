@@ -38,8 +38,9 @@ python reconcile_po.py P03 -v             # 상세 로그
 python reconcile_so.py P03                # 3월 매출대사 (AX vs NOAH DN)
 python reconcile_so.py P03 -v             # 상세 로그
 
-# Industry Code 대사
-python reconcile_ind.py P03               # Orderbook 빈 Industry code 채우기
+# Industry Code 대사 + Sector 검증
+python reconcile_ind.py P03               # Industry code 채움 + Sector 검증
+python reconcile_ind.py --sector-only     # Sector 검증만 (월 입력 불필요)
 python reconcile_ind.py P03 -v            # 상세 로그
 
 # Dashboard
@@ -71,7 +72,7 @@ DB layer:
 Reconciliation layer:
   reconcile_po.py → 3-source merge (Delivery + Internal PO + GRN) → 대사결과 + AX_PO_매핑
   reconcile_so.py → 2-source merge (AX Sales + NOAH DN) → 대사결과_SO (매출일 필터: 국내=출고일, 해외=선적일)
-  reconcile_ind.py → Orderbook 발주번호 → PO NOAH O.C No. → SO_ID → Industry code 채우기
+  reconcile_ind.py → Industry code 채움 (PO→SO 매핑) + SO Sector 검증 (마스터 Category 교차)
   po_reconciliation/{period}/ — PO input/output files per period
   so_reconciliation/{period}/ — SO input/output files per period
   ind_code_reconciliation/{period}/ — Industry code input/output files per period
@@ -120,7 +121,7 @@ Reconciliation layer:
 | `dashboard.py` | Streamlit 대시보드 (8페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book, PO확정지연, EXW미출고, 납기현황(DN qty매칭+PO EXW보충), 납기캘린더(선적예정 포함), 해외선적(Incoterms/운송방식별), 세금계산서미발행, Order Book 3탭) |
 | `reconcile_po.py` | PO 매입대사 — 공장 출고(Delivery) vs 회계 GRN 금액 비교. 출력: `대사결과_{period}.xlsx` (6시트), `AX_PO_매핑_{period}.xlsx` (Delivery+AX PO) |
 | `reconcile_so.py` | SO 매출대사 — AX ERP 매출 vs NOAH DN 매출 비교 (국내=출고일, 해외=선적일 기준 월 필터 + FX 환율차이 자동 판별). 출력: `대사결과_SO_{period}.xlsx` (3시트: 대사/상세/범례) |
-| `reconcile_ind.py` | Industry Code 대사 — Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 + Sector/매핑상태 컬럼 추가. 출력: `ind_code_결과_{period}.xlsx` (2시트: 결과/범례) |
+| `reconcile_ind.py` | Industry Code 대사 — (1) Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 → `ind_code_결과_{period}.xlsx`, (2) SO Sector vs 마스터 Category 교차 검증 → `sector_검증.xlsx`. `--sector-only`로 검증만 실행 가능 |
 
 ## Business Rules
 

@@ -20,17 +20,26 @@
 
 ---
 
-## 2026-04-03: Industry Code 대사 기능 추가
+## 2026-04-03: Industry Code 대사 + SO Sector 검증 기능 추가
 
+### Industry Code 채움 (월별)
 - Orderbook의 빈 Industry code를 NOAH_SO_PO_DN.xlsx PO→SO 매핑으로 자동 채움
 - 매핑 체인: 발주번호 → PO시트 NOAH O.C No. → SO_ID → SO시트 Industry code
 - 새 파일(`ind_code_결과_{period}.xlsx`)로 출력, 원본 미수정
 - 추가 컬럼: NOAH Sector (SO시트 Sector), 매핑상태 (매칭/SO에 Industry code 없음/PO에 발주번호 없음)
-- BAT 메뉴 [I] 항목 추가
+
+### SO Sector 검증 (전체, period 무관)
+- SO시트(국내+해외) Sector가 Industry code 마스터(Orderbook)의 Category와 일치하는지 교차 검증
+- 마스터 매핑: Oil & Gas → OG, Water & Power → WAPO, Chemical, Process & Industrial → CPI
+- 불일치 건 상세(SO_ID, 현재Sector, 기대Sector, Customer)와 교차표 요약 출력
+- 별도 파일(`sector_검증.xlsx`) 생성, `--sector-only` 옵션으로 단독 실행 가능
+
+### BAT 메뉴
+- [I] 서브메뉴 분기: [1] 전체(채움+검증, 월 입력), [2] Sector 검증만(월 입력 불필요)
 
 ### 수정 파일
-- `reconcile_ind.py` — Industry Code 대사 CLI (신규)
-- `create_po.bat` — 메뉴에 [I] Industry Code 대사 추가
+- `reconcile_ind.py` — Industry Code 대사 + Sector 검증 CLI (신규)
+- `create_po.bat` — 메뉴에 [I] Industry Code 대사 서브메뉴 추가
 - `CLAUDE.md` — Commands, Architecture, Key Files 업데이트
 
 ---

@@ -478,13 +478,28 @@ echo ----------------------------------------
 echo   Industry Code 대사
 echo ----------------------------------------
 echo.
+echo   [1] Industry Code 채움 + Sector 검증 (전체)
+echo   [2] Sector 검증만
+echo   [0] 메뉴로 돌아가기
+echo.
 
-:recon_ind_input
+set /p IND_MODE="선택: "
+
+if "%IND_MODE%"=="1" goto ind_full
+if "%IND_MODE%"=="2" goto ind_sector
+if "%IND_MODE%"=="0" goto menu
+echo [오류] 올바른 번호를 입력하세요.
+pause
+goto reconcile_ind
+
+:ind_full
+echo.
+:ind_full_input
 set /p RECON_IND_PERIOD="대사 월 입력 (예: P03): "
 
 if "%RECON_IND_PERIOD%"=="" (
     echo [오류] 월 코드를 입력하세요.
-    goto recon_ind_input
+    goto ind_full_input
 )
 
 echo.
@@ -492,6 +507,17 @@ echo Industry Code 대사 실행 중...
 echo.
 
 "%PYTHON_PATH%" "%~dp0reconcile_ind.py" %RECON_IND_PERIOD%
+
+echo.
+pause
+goto menu
+
+:ind_sector
+echo.
+echo Sector 검증 실행 중...
+echo.
+
+"%PYTHON_PATH%" "%~dp0reconcile_ind.py" --sector-only
 
 echo.
 pause
