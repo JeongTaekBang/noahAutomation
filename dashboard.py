@@ -1225,10 +1225,12 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
             # ── (E) 해외 선적 예정 (DN_해외 선적 예정일 기준) ──
             st.markdown("**🚢 해외 선적 예정** — 해외 DN 선적 예정 현황")
             if not day_ship.empty:
-                so_meta2 = load_so()[["SO_ID", "customer_po", "sector"]].drop_duplicates(subset=["SO_ID"])
+                so_meta2 = load_so()[["SO_ID", "customer_po", "sector", "incoterms", "shipping_method"]].drop_duplicates(subset=["SO_ID"])
                 day_ship = day_ship.merge(so_meta2, on="SO_ID", how="left")
                 day_ship["customer_po"] = day_ship["customer_po"].fillna("")
                 day_ship["sector"] = day_ship["sector"].fillna("")
+                day_ship["incoterms"] = day_ship["incoterms"].fillna("")
+                day_ship["shipping_method"] = day_ship["shipping_method"].fillna("")
                 day_ship["bl_no"] = day_ship["bl_no"].fillna("")
                 day_ship["carrier"] = day_ship["carrier"].fillna("")
                 sh = day_ship.groupby("DN_ID").agg(
@@ -1244,6 +1246,8 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                     BL=("bl_no", "first"),
                     운송업체=("carrier", "first"),
                     SO_ID=("SO_ID", lambda x: " / ".join(x.unique())),
+                    Incoterms=("incoterms", "first"),
+                    운송방식=("shipping_method", "first"),
                 ).reset_index()
                 items = []
                 for _, r in sh.iterrows():
@@ -1252,6 +1256,13 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                         f"SO: {r['SO_ID']} · 품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
                         f"출고 {fmt_date(r['공장출고일'])} → 픽업 {fmt_date(r['픽업일'])} → 선적예정 {fmt_date(r['선적예정일'])}",
                     ]
+                    terms_parts = []
+                    if r["Incoterms"]:
+                        terms_parts.append(r["Incoterms"])
+                    if r["운송방식"]:
+                        terms_parts.append(r["운송방식"])
+                    if terms_parts:
+                        lines.append(f"📦 {' · '.join(terms_parts)}")
                     if r["BL"]:
                         lines.append(f"📄 B/L: {r['BL']}")
                     if r["운송업체"]:
