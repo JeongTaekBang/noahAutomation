@@ -187,6 +187,12 @@ class SyncEngine:
 
             if dry_run:
                 conn.rollback()
+            elif summary.total_errors > 0:
+                conn.rollback()
+                logger.error(
+                    "동기화 중단: %d건 에러 발생 → ROLLBACK (데이터 수정 후 재시도 필요)",
+                    summary.total_errors,
+                )
             else:
                 conn.commit()
         finally:
@@ -294,6 +300,17 @@ class SyncEngine:
 
                     if skip:
                         result.skipped += 1
+                        continue
+
+                    # _row_seq 제외 원본 PK가 전부 빈값 → 빈 행으로 간주
+                    real_pk_vals = [
+                        v for v, c in zip(pk_vals, pk_cols) if c != '_row_seq'
+                    ]
+                    if real_pk_vals and all(v == '' for v in real_pk_vals):
+                        result.skipped += 1
+                        logger.debug(
+                            "%s - 행 %d: PK 전부 빈값 → 스킵", config.sheet_name, idx,
+                        )
                         continue
 
                     excel_pks.add(_normalize_pk(tuple(pk_vals)))

@@ -92,6 +92,18 @@ def load_ax_sales(file_path: Path) -> pd.DataFrame:
     # NOAH_SO 컬럼은 무시 (자동 계산)
     df = df[['Project', 'Customer', 'AX']].copy()
 
+    # Project 중복 검출 및 집계 (NOAH 측 aggregate_noah_dn과 동일 패턴)
+    dup_mask = df.duplicated(subset=['Project'], keep=False)
+    if dup_mask.any():
+        dup_counts = df[dup_mask].groupby('Project').size()
+        logger.warning(
+            "AX Sales 중복 Project %d건 — 합산 처리: %s",
+            len(dup_counts), dict(dup_counts),
+        )
+        df = df.groupby('Project', as_index=False).agg({
+            'AX': 'sum', 'Customer': 'first',
+        })
+
     logger.debug("AX Sales 로드: %d건 (%s)", len(df), file_path.name)
     return df
 
@@ -160,12 +172,16 @@ def load_fx_rates() -> pd.DataFrame:
 
 
 def period_code_to_col(period_code: str, fx_cols: list[str]) -> str | None:
-    """P03 → FX 시트의 매칭 컬럼명 (예: '2026-03') 반환"""
+    """P03 → FX 시트의 매칭 컬럼명 (예: '2026-03') 반환 — 다년 시 최신 연도"""
     month = period_code.replace('P', '').zfill(2)  # P03 → '03'
-    for col in fx_cols:
-        if str(col).endswith(f'-{month}'):
-            return col
-    return None
+    matches = [col for col in fx_cols if str(col).endswith(f'-{month}')]
+    if not matches:
+        return None
+    if len(matches) > 1:
+        logger.warning(
+            "FX 시트에 %s월 컬럼 %d개 — 최신 사용: %s", month, len(matches), matches,
+        )
+    return max(matches, key=str)  # YYYY-MM 포맷은 사전순 = 연도순
 
 
 def aggregate_noah_dn(df_dn: pd.DataFrame) -> pd.DataFrame:

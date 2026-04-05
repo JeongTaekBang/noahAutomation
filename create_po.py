@@ -88,6 +88,7 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False, service: D
             if response != 'Y':
                 print("  -> 발주 취소됨")
                 return False
+            force = True  # 사용자가 중복 확인 승인
 
     # 2. 데이터 검색 및 정보 출력
     order_data = service.finder.find_po(order_no)
@@ -129,11 +130,12 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False, service: D
             if response != 'Y':
                 print("  -> 발주 취소됨")
                 return False
+            force = True  # 사용자가 검증오류 승인
         else:
             print("  -> --force 옵션으로 오류 무시하고 진행")
 
-    # 5. 문서 생성 (서비스 사용, 중복 체크/검증은 이미 완료)
-    result = service.generate_po(order_no, force=True, skip_history=False)
+    # 5. 문서 생성 (force: --force 또는 사용자 상호작용 승인 시 True)
+    result = service.generate_po(order_no, force=force, skip_history=False)
 
     # 6. 결과 처리
     if result.success:

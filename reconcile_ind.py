@@ -90,8 +90,8 @@ def get_ob_sheet_name(period_code: str) -> str:
     return f"{period_code.upper()}_start"
 
 
-def build_mapping() -> dict[str, tuple[str, object, str | None]]:
-    """발주번호 → (SO_ID, Industry code, Sector) 매핑 딕셔너리 생성"""
+def build_mapping() -> tuple[dict[str, tuple[str, object, str | None]], set[str]]:
+    """발주번호 → (SO_ID, Industry code, Sector) 매핑 딕셔너리 + 중복 O.C No. 집합"""
     # PO: NOAH O.C No. → SO_ID
     po_dom = pd.read_excel(
         NOAH_SO_PO_DN_FILE, sheet_name=PO_DOMESTIC_SHEET,
@@ -105,6 +105,17 @@ def build_mapping() -> dict[str, tuple[str, object, str | None]]:
     po_map = po_map.dropna(subset=[PO_OC_COL, PO_SO_ID_COL])
     po_map[PO_OC_COL] = po_map[PO_OC_COL].astype(str).str.strip()
     po_map[PO_SO_ID_COL] = po_map[PO_SO_ID_COL].astype(str).str.strip()
+    # PO 중복 경고: 같은 NOAH O.C No.가 다른 SO_ID에 매핑된 경우
+    po_dup_mask = po_map.duplicated(subset=[PO_OC_COL], keep=False)
+    if po_dup_mask.any():
+        po_dups = (po_map[po_dup_mask]
+                   .groupby(PO_OC_COL)[PO_SO_ID_COL]
+                   .apply(list)
+                   .to_dict())
+        logger.warning(
+            "PO 중복 NOAH O.C No. %d건 (첫 번째만 사용): %s",
+            len(po_dups), po_dups,
+        )
     po_map = po_map.drop_duplicates(subset=[PO_OC_COL])
 
     # SO: SO_ID → (Industry code, Sector)
@@ -119,6 +130,17 @@ def build_mapping() -> dict[str, tuple[str, object, str | None]]:
     so_map = pd.concat([so_dom, so_exp], ignore_index=True)
     so_map = so_map.dropna(subset=[PO_SO_ID_COL])
     so_map[PO_SO_ID_COL] = so_map[PO_SO_ID_COL].astype(str).str.strip()
+    # SO 중복 경고: 같은 SO_ID에 다른 Industry code/Sector 값
+    so_dup_mask = so_map.duplicated(subset=[PO_SO_ID_COL], keep=False)
+    if so_dup_mask.any():
+        so_dups = (so_map[so_dup_mask]
+                   .groupby(PO_SO_ID_COL)[[SO_IND_COL, SO_SECTOR_COL]]
+                   .apply(lambda g: g.values.tolist())
+                   .to_dict())
+        logger.warning(
+            "SO 중복 SO_ID %d건 (첫 번째만 사용): %s",
+            len(so_dups), so_dups,
+        )
     so_map = so_map.drop_duplicates(subset=[PO_SO_ID_COL])
 
     # Join & build dict
@@ -134,13 +156,17 @@ def build_mapping() -> dict[str, tuple[str, object, str | None]]:
         sector = row[SO_SECTOR_COL] if pd.notna(row[SO_SECTOR_COL]) else None
         result[oc] = (so_id, ind, sector)
 
-    return result
+    dup_oc_set = set(po_dups.keys()) if po_dup_mask.any() else set()
+    return result, dup_oc_set
 
 
 def fill_industry_code(
     ob: pd.DataFrame, mapping: dict, ind_col: str,
-) -> tuple[pd.DataFrame, int, int, int, int]:
+    dup_oc_set: set[str] | None = None,
+) -> tuple[pd.DataFrame, int, int, int, int, int]:
     """Orderbook에 Industry code, Sector, 매핑상태 채우기"""
+    if dup_oc_set is None:
+        dup_oc_set = set()
     result = ob.copy()
     result['NOAH Sector'] = None
     result['매핑상태'] = None
@@ -150,6 +176,7 @@ def fill_industry_code(
     filled = 0
     so_missing = 0
     po_missing = 0
+    dup_review = 0
 
     for idx in result[null_mask].index:
         order_no = result.at[idx, '발주번호']
@@ -157,7 +184,11 @@ def fill_industry_code(
             continue
         order_no = str(order_no).strip()
 
-        if order_no in mapping:
+        if order_no in dup_oc_set:
+            # 중복 O.C No. → 값 채우지 않고 검토 대상으로 분리
+            result.at[idx, '매핑상태'] = '중복검토'
+            dup_review += 1
+        elif order_no in mapping:
             so_id, ind_code, sector = mapping[order_no]
             if ind_code is not None:
                 result.at[idx, ind_col] = ind_code
@@ -172,7 +203,7 @@ def fill_industry_code(
             result.at[idx, '매핑상태'] = 'PO에 발주번호 없음'
             po_missing += 1
 
-    return result, total_null, filled, so_missing, po_missing
+    return result, total_null, filled, so_missing, po_missing, dup_review
 
 
 # ──────────────────────────────────────────────
@@ -277,6 +308,7 @@ def write_ind_code_output(result: pd.DataFrame, output_file: Path) -> None:
     """Industry code 채움 결과 Excel 출력"""
     legend = pd.DataFrame([
         ['매칭', '발주번호 → PO → SO 체인으로 Industry code 찾아 채움'],
+        ['중복검토', '같은 NOAH O.C No.가 복수 SO에 매핑 — 자동 채움 보류, 수동 확인 필요'],
         ['SO에 Industry code 없음', 'PO에서 SO_ID 찾았으나 SO시트에 Industry code 비어있음'],
         ['PO에 발주번호 없음', 'NOAH_SO_PO_DN PO시트에 해당 NOAH O.C No. 없음'],
     ], columns=['매칭상태', '설명'])
@@ -319,6 +351,7 @@ def write_sector_output(
 
 def print_ind_summary(
     total_null: int, filled: int, so_missing: int, po_missing: int,
+    dup_review: int = 0,
 ) -> None:
     """Industry code 채움 콘솔 요약"""
     print()
@@ -326,6 +359,8 @@ def print_ind_summary(
     print("=" * 60)
     print(f"  빈 Industry code: {total_null}행")
     print(f"    매칭 (채움):             {filled}")
+    if dup_review > 0:
+        print(f"    중복검토 (미채움):        {dup_review}")
     if so_missing > 0:
         print(f"    SO에 Industry code 없음: {so_missing}")
     if po_missing > 0:
@@ -431,7 +466,7 @@ def main() -> int:
     sector_file = RECON_DIR / "sector_검증.xlsx"
     write_sector_output(mismatches, sector_summary, sector_file)
 
-    total_null = filled = so_missing = po_missing = 0
+    total_null = filled = so_missing = po_missing = dup_review = 0
 
     # ── Industry code 채움 (--sector-only가 아닐 때) ──
     if not args.sector_only:
@@ -455,7 +490,7 @@ def main() -> int:
         total_null = int(ob[ind_col].isna().sum())
 
         try:
-            mapping = build_mapping()
+            mapping, dup_oc_set = build_mapping()
         except Exception as e:
             print(f"[오류] 매핑 데이터 로드 실패: {e}")
             return 1
@@ -464,8 +499,8 @@ def main() -> int:
         print(f"매핑 건수: {len(mapping)}건 (PO→SO)")
 
         if total_null > 0:
-            result, total_null, filled, so_missing, po_missing = fill_industry_code(
-                ob, mapping, ind_col,
+            result, total_null, filled, so_missing, po_missing, dup_review = fill_industry_code(
+                ob, mapping, ind_col, dup_oc_set=dup_oc_set,
             )
         else:
             result = ob.copy()
@@ -480,7 +515,7 @@ def main() -> int:
 
     # 콘솔 요약
     if not args.sector_only:
-        print_ind_summary(total_null, filled, so_missing, po_missing)
+        print_ind_summary(total_null, filled, so_missing, po_missing, dup_review)
     print_sector_summary(mismatches, sector_summary)
 
     return 0

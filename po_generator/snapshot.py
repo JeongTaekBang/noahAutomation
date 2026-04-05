@@ -79,14 +79,25 @@ events_line_item AS (
         0 AS Value_Output_qty, 0 AS Value_Output_amount
     FROM so_combined s
     UNION ALL
-    SELECT s.SO_ID, s.[Customer name], s.[Customer PO], s.[Item name],
-        s.[OS name], s.[Line item], s.[Item qty], s.[Sales amount KRW],
-        s.Period AS 등록Period, s.[AX Period], s.[Model code],
-        s.Sector, s.[Business registration number], s.[Industry code],
-        s.[Expected delivery date], s.구분,
+    SELECT dm.SO_ID,
+        COALESCE(s.[Customer name], 'UNKNOWN') AS [Customer name],
+        COALESCE(s.[Customer PO], '')           AS [Customer PO],
+        COALESCE(s.[Item name], '')             AS [Item name],
+        COALESCE(s.[OS name], 'UNKNOWN')        AS [OS name],
+        dm.[Line item],
+        COALESCE(s.[Item qty], 0)               AS [Item qty],
+        COALESCE(s.[Sales amount KRW], 0)       AS [Sales amount KRW],
+        COALESCE(s.Period, '')  AS 등록Period,
+        COALESCE(s.[AX Period], '')             AS [AX Period],
+        COALESCE(s.[Model code], '')            AS [Model code],
+        COALESCE(s.Sector, '')                  AS Sector,
+        COALESCE(s.[Business registration number], '') AS [Business registration number],
+        COALESCE(s.[Industry code], '')         AS [Industry code],
+        COALESCE(s.[Expected delivery date], '') AS [Expected delivery date],
+        COALESCE(s.구분, '')                    AS 구분,
         dm.출고월, 0, 0, dm.Output_qty, dm.Output_amount
     FROM dn_by_month dm
-    INNER JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
+    LEFT JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
 ),
 os_grouped AS (
     SELECT SO_ID, [OS name], [Expected delivery date], event_period AS Period,

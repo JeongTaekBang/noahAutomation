@@ -106,19 +106,30 @@ events_line_item AS (
 
     UNION ALL
 
-    -- Output: DN 출고 이벤트 (SO JOIN으로 메타데이터 확보)
+    -- Output: DN 출고 이벤트 (LEFT JOIN — 취소/누락 SO의 DN도 보존)
     SELECT
-        s.SO_ID, s.[Customer name], s.[Customer PO], s.[Item name],
-        s.[OS name], s.[Line item], s.[Item qty], s.[Sales amount KRW],
-        s.Period AS 등록Period, s.[AX Period], s.[Model code],
-        s.Sector, s.[Business registration number], s.[Industry code],
-        s.[Expected delivery date], s.구분,
+        dm.SO_ID,
+        COALESCE(s.[Customer name], 'UNKNOWN') AS [Customer name],
+        COALESCE(s.[Customer PO], '')           AS [Customer PO],
+        COALESCE(s.[Item name], '')             AS [Item name],
+        COALESCE(s.[OS name], 'UNKNOWN')        AS [OS name],
+        dm.[Line item],
+        COALESCE(s.[Item qty], 0)               AS [Item qty],
+        COALESCE(s.[Sales amount KRW], 0)       AS [Sales amount KRW],
+        COALESCE(s.Period, '')  AS 등록Period,
+        COALESCE(s.[AX Period], '')             AS [AX Period],
+        COALESCE(s.[Model code], '')            AS [Model code],
+        COALESCE(s.Sector, '')                  AS Sector,
+        COALESCE(s.[Business registration number], '') AS [Business registration number],
+        COALESCE(s.[Industry code], '')         AS [Industry code],
+        COALESCE(s.[Expected delivery date], '') AS [Expected delivery date],
+        COALESCE(s.구분, '')                    AS 구분,
         dm.출고월 AS event_period,
         0, 0,
         dm.Output_qty,
         dm.Output_amount
     FROM dn_by_month dm
-    INNER JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
+    LEFT JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
 ),
 
 -- ─── 5. OS name 그룹화 (같은 제품+납기일 합산) ───

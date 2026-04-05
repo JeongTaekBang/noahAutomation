@@ -51,7 +51,7 @@ SYNC_SHEETS: list[SheetConfig] = [
         sheet_name=PO_DOMESTIC_SHEET,
         table_name='po_domestic',
         pk_columns=('PO_ID', 'Line item', '_row_seq'),
-        required_column='SO_ID',
+        required_column='PO_ID',
         needs_row_seq=True,
         row_seq_group=('PO_ID', 'Line item'),
     ),
@@ -59,7 +59,7 @@ SYNC_SHEETS: list[SheetConfig] = [
         sheet_name=PO_EXPORT_SHEET,
         table_name='po_export',
         pk_columns=('PO_ID', 'Line item', '_row_seq'),
-        required_column='SO_ID',
+        required_column='PO_ID',
         needs_row_seq=True,
         row_seq_group=('PO_ID', 'Line item'),
     ),
@@ -114,7 +114,11 @@ def migrate_pk_if_changed(conn: sqlite3.Connection, config: 'SheetConfig') -> bo
         "%s: PK 변경 감지 (%s → %s), 테이블 재생성",
         config.table_name, existing_pk, config.pk_columns,
     )
-    conn.execute(f'DROP TABLE [{config.table_name}]')
+    # 기존 테이블 백업 후 삭제 (스냅샷 등 파생 데이터 복구 가능)
+    backup = f"{config.table_name}_bak"
+    conn.execute(f'DROP TABLE IF EXISTS [{backup}]')
+    conn.execute(f'ALTER TABLE [{config.table_name}] RENAME TO [{backup}]')
+    logger.info("%s → %s 백업 완료", config.table_name, backup)
     return True
 
 

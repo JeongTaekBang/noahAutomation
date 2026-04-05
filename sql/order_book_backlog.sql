@@ -58,14 +58,23 @@ events_line_item AS (
         0 AS Value_Output_qty, 0 AS Value_Output_amount
     FROM so_combined s
     UNION ALL
-    SELECT s.SO_ID, s.[Customer name], s.[Customer PO], s.[Item name],
-        s.[OS name], s.[Line item],
-        s.Period, s.[AX Period], s.[Model code],
-        s.Sector, s.[Business registration number], s.[Industry code],
-        s.[Expected delivery date], s.구분,
+    SELECT dm.SO_ID,
+        COALESCE(s.[Customer name], 'UNKNOWN') AS [Customer name],
+        COALESCE(s.[Customer PO], '')           AS [Customer PO],
+        COALESCE(s.[Item name], '')             AS [Item name],
+        COALESCE(s.[OS name], 'UNKNOWN')        AS [OS name],
+        dm.[Line item],
+        COALESCE(s.Period, '')                  AS Period,
+        COALESCE(s.[AX Period], '')             AS [AX Period],
+        COALESCE(s.[Model code], '')            AS [Model code],
+        COALESCE(s.Sector, '')                  AS Sector,
+        COALESCE(s.[Business registration number], '') AS [Business registration number],
+        COALESCE(s.[Industry code], '')         AS [Industry code],
+        COALESCE(s.[Expected delivery date], '') AS [Expected delivery date],
+        COALESCE(s.구분, '')                    AS 구분,
         0, 0, dm.Output_qty, dm.Output_amount
     FROM dn_by_month dm
-    INNER JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
+    LEFT JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
 ),
 -- ─── Backlog: 전체 이벤트 합산, Ending > 0 ───
 backlog AS (

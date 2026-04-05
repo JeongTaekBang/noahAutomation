@@ -501,11 +501,17 @@ def load_backlog() -> pd.DataFrame:
                    0 AS out_qty, 0 AS out_amt
             FROM so_combined
             UNION ALL
-            SELECT s.SO_ID, s.customer_name, s.os_name, s.line_item,
-                   s.model_code, s.sector, s.delivery_date, s.market,
+            SELECT d.SO_ID,
+                   COALESCE(s.customer_name, 'UNKNOWN') AS customer_name,
+                   COALESCE(s.os_name, 'UNKNOWN')       AS os_name,
+                   d.line_item,
+                   COALESCE(s.model_code, '')            AS model_code,
+                   COALESCE(s.sector, '')                AS sector,
+                   COALESCE(s.delivery_date, '')         AS delivery_date,
+                   COALESCE(s.market, '')                AS market,
                    0, 0, d.out_qty, d.out_amt
             FROM dn_combined d
-            INNER JOIN so_combined s
+            LEFT JOIN so_combined s
               ON d.SO_ID = s.SO_ID AND d.line_item = s.line_item
         )
         SELECT SO_ID, os_name, delivery_date,
