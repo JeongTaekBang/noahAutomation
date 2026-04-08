@@ -20,6 +20,22 @@
 
 ---
 
+## 2026-04-08: Final Invoice 발주번호(Customer PO) 기준 생성 기능 추가
+
+- 발주번호(Customer PO)를 입력하면 복수 DN에 걸친 동일 발주번호 아이템을 통합하여 FI 생성
+- 기존 DN_ID 기준 생성과 병행 가능 (하위 호환)
+- CLI: `python create_fi.py --po 26KPO00144` (여러 건: `--po PO1 PO2`)
+- `--po` 인자 없이 실행 시 사용 가능한 발주번호 목록 표시 (관련 DN, 고객명 포함)
+- BAT 메뉴: [4] Final Invoice → 서브메뉴 분기 [1] DN_ID 기준 / [2] 발주번호 기준
+
+### 수정 파일
+- `create_fi.py` — `--po` CLI 인자, `generate_fi_by_po()`, `print_available_customer_pos()` 추가
+- `po_generator/services/finder_service.py` — `find_dn_export_by_customer_po()` 추가
+- `po_generator/services/document_service.py` — `generate_fi_by_customer_po()` 추가
+- `create_po.bat` — FI 메뉴 서브메뉴 분기 (DN_ID / 발주번호)
+
+---
+
 ## 2026-04-03: Industry Code 대사 + SO Sector 검증 기능 추가
 
 ### Industry Code 채움 (월별)

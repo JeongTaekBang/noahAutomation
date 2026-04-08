@@ -7,8 +7,9 @@ DN_ID를 입력하면 NOAH_SO_PO_DN.xlsx의 DN_해외 시트에서 해당 데이
 자동으로 Final Invoice를 생성합니다.
 
 사용법:
-    python create_fi.py DNO-2026-0001              # 단일 생성
+    python create_fi.py DNO-2026-0001              # DN_ID로 단일 생성
     python create_fi.py DNO-2026-0001 DNO-2026-0002 # 여러 건 동시 생성
+    python create_fi.py --po 26KPO00144            # 발주번호 기준 생성 (복수 DN 통합)
 """
 
 from __future__ import annotations
@@ -82,6 +83,96 @@ def _print_item_info(order_data, label: str = '') -> None:
         if not item_name:
             item_name = order_data.first_item.get('Item', 'N/A') if 'Item' in order_data.first_item.index else 'N/A'
         print(f"  {label}품목: {item_name}")
+
+
+def print_available_customer_pos(df_dn: pd.DataFrame, limit: int = 20) -> None:
+    """사용 가능한 Customer PO(발주번호) 목록 출력
+
+    Args:
+        df_dn: DN 해외 데이터
+        limit: 출력 제한 수
+    """
+    cpo_col = resolve_column(df_dn.columns, 'customer_po')
+    if not cpo_col:
+        print("  [오류] Customer PO 컬럼을 찾을 수 없습니다.")
+        return
+
+    print("\n" + "=" * 60)
+    print("사용 가능한 발주번호 목록 (DN_해외)")
+    print("=" * 60)
+
+    cpos = df_dn[cpo_col].dropna().unique().tolist()
+    cpos = sorted(str(p) for p in cpos)
+    print(f"\n[Final Invoice] 발주번호 ({len(cpos)}건)")
+    print("-" * 55)
+    for po in cpos[:limit]:
+        # 해당 PO의 DN 목록과 고객명
+        po_rows = df_dn[df_dn[cpo_col].astype(str) == po]
+        dn_ids = po_rows['DN_ID'].dropna().unique().tolist()
+        customer = po_rows['Customer name'].iloc[0] if len(po_rows) > 0 else ''
+        customer_short = str(customer)[:20] if customer else ''
+        dn_list = ', '.join(str(d) for d in dn_ids[:3])
+        if len(dn_ids) > 3:
+            dn_list += f' 외 {len(dn_ids) - 3}건'
+        print(f"  {po:<20} {customer_short:<22} DN: {dn_list}")
+    if len(cpos) > limit:
+        print(f"  ... 외 {len(cpos) - limit}건")
+
+    print("\n" + "=" * 60)
+    print("위 발주번호 중 하나를 입력하여 Final Invoice를 생성하세요.")
+    print("  예: python create_fi.py --po 26KPO00144")
+    print("=" * 60)
+
+
+def generate_fi_by_po(customer_po: str) -> bool:
+    """발주번호(Customer PO) 기준 Final Invoice 생성
+
+    복수 DN에 걸친 동일 발주번호 아이템을 통합하여 FI를 생성합니다.
+
+    Args:
+        customer_po: 고객 발주번호
+
+    Returns:
+        성공 여부
+    """
+    print(f"\n{'=' * 60}")
+    print(f"Final Invoice 생성 (발주번호): {customer_po}")
+    print('=' * 60)
+
+    service = DocumentService()
+
+    # 1. Customer PO로 데이터 검색
+    order_data = service.finder.find_dn_export_by_customer_po(customer_po)
+    if order_data is None:
+        print(f"  [오류] 발주번호 '{customer_po}'를 찾을 수 없습니다.")
+        return False
+
+    # 2. 매칭된 DN 정보 출력
+    items_df = (
+        order_data.items_df
+        if order_data.items_df is not None
+        else pd.DataFrame([order_data.first_item])
+    )
+    dn_ids = items_df['DN_ID'].dropna().unique().tolist() if 'DN_ID' in items_df.columns else []
+    print(f"  고객: {order_data.get_value('customer_name', 'N/A')}")
+    if dn_ids:
+        print(f"  관련 DN: {', '.join(str(d) for d in dn_ids)} ({len(dn_ids)}건)")
+    print(f"  아이템: {order_data.item_count}개")
+
+    _print_item_info(order_data, label='')
+
+    # 3. FI 생성
+    result = service.generate_fi_by_customer_po(customer_po)
+    if result.success:
+        print(f"  -> Final Invoice 생성 완료: {result.output_file.name}")
+        return True
+    else:
+        if result.status == GenerationStatus.FILE_ERROR:
+            print(f"  [오류] {result.errors[0] if result.errors else result.message}")
+        else:
+            print(f"  [오류] {result.message}")
+        logger.error(f"Final Invoice 생성 실패 (발주번호: {customer_po}): {result.message}")
+        return False
 
 
 def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
@@ -180,12 +271,19 @@ Final Invoice 생성기 (대금 청구용)
 
 NOAH_SO_PO_DN.xlsx의 DN_해외 시트에서 데이터를 읽어
 Final Invoice를 자동 생성합니다.
+
+두 가지 모드를 지원합니다:
+  1. DN_ID 기준: DN 단위로 FI 생성 (기본)
+  2. 발주번호 기준: Customer PO로 복수 DN 통합 FI 생성 (--po)
 """
 
     epilog = """
 사용 예시:
-  python create_fi.py DNO-2026-0001              # FI 1건 생성
-  python create_fi.py DNO-2026-0001 DNO-2026-0002 # 여러 건 동시 생성
+  python create_fi.py DNO-2026-0001              # DN_ID로 FI 생성
+  python create_fi.py DNO-2026-0001 DNO-2026-0002 # 여러 DN 동시 생성
+  python create_fi.py --po 26KPO00144            # 발주번호 기준 FI 생성
+  python create_fi.py --po 26KPO00144 26KPO00145 # 여러 발주번호 동시 생성
+  python create_fi.py --po                       # 사용 가능한 발주번호 목록 표시
 
 인자 없이 실행하면 사용 가능한 DN_ID 목록을 표시합니다.
 """
@@ -202,6 +300,13 @@ Final Invoice를 자동 생성합니다.
         nargs='*',
         metavar='DN_ID',
         help='DN_ID (예: DNO-2026-0001)',
+    )
+
+    parser.add_argument(
+        '--po',
+        nargs='*',
+        metavar='CUSTOMER_PO',
+        help='발주번호(Customer PO) 기준 FI 생성 (복수 DN 통합). 인자 없이 --po만 입력 시 목록 표시.',
     )
 
     parser.add_argument(
@@ -233,7 +338,28 @@ def main() -> int:
         print(f"[오류] {e}")
         return 1
 
-    # 인자 없으면 도움말 + 사용 가능한 ID 출력
+    # --po 모드: RCK PO 기준 생성
+    if args.po is not None:
+        if not args.po:
+            # --po만 입력 (인자 없음) → 발주번호 목록 표시
+            print_available_customer_pos(df_dn)
+            return 0
+
+        print(f"DN 해외: {len(df_dn)}건 로드 완료")
+
+        success_count = 0
+        for rck_po in args.po:
+            if generate_fi_by_po(rck_po):
+                success_count += 1
+
+        print(f"\n{'=' * 60}")
+        print(f"완료: {success_count}/{len(args.po)}건 Final Invoice 생성 (RCK PO 기준)")
+        print(f"출력 폴더: {FI_OUTPUT_DIR}")
+        print('=' * 60)
+
+        return 0 if success_count == len(args.po) else 1
+
+    # DN_ID 모드 (기본)
     if not args.dn_ids:
         parser.print_help()
         print_available_ids(df_dn)

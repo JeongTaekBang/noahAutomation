@@ -221,15 +221,31 @@ echo ----------------------------------------
 echo   Final Invoice 생성 (대금 청구)
 echo ----------------------------------------
 echo.
+echo   [1] DN_ID 기준 생성
+echo   [2] 발주번호 기준 생성 (복수 DN 통합)
+echo   [0] 메뉴로 돌아가기
+echo.
+
+set /p FI_MODE="선택: "
+
+if "%FI_MODE%"=="1" goto fi_by_dn
+if "%FI_MODE%"=="2" goto fi_by_po
+if "%FI_MODE%"=="0" goto menu
+echo [오류] 올바른 번호를 입력하세요.
+pause
+goto create_fi
+
+:fi_by_dn
+echo.
 echo   DN_ID 입력 (예: DNO-2026-0001)
 echo.
 
-:fi_input
+:fi_dn_input
 set /p FI_DN_ID="DN_ID 입력: "
 
 if "%FI_DN_ID%"=="" (
     echo [오류] DN_ID를 입력하세요.
-    goto fi_input
+    goto fi_dn_input
 )
 
 echo.
@@ -240,8 +256,35 @@ echo.
 
 echo.
 echo ----------------------------------------
-set /p FI_CONTINUE="다른 Final Invoice를 생성하시겠습니까? (Y/N): "
-if /i "%FI_CONTINUE%"=="Y" goto fi_input
+set /p FI_DN_CONT="다른 Final Invoice를 생성하시겠습니까? (Y/N): "
+if /i "%FI_DN_CONT%"=="Y" goto fi_dn_input
+goto menu
+
+:fi_by_po
+echo.
+echo   발주번호 입력 (예: 26KPO00144)
+echo   (빈 입력 시 사용 가능한 PO 목록 표시)
+echo.
+
+:fi_po_input
+set /p FI_RCK_PO="RCK PO 입력: "
+
+if "%FI_RCK_PO%"=="" (
+    "%PYTHON_PATH%" "%~dp0create_fi.py" --po
+    echo.
+    goto fi_po_input
+)
+
+echo.
+echo Final Invoice 생성 중 (RCK PO: %FI_RCK_PO%)...
+echo.
+
+"%PYTHON_PATH%" "%~dp0create_fi.py" --po %FI_RCK_PO%
+
+echo.
+echo ----------------------------------------
+set /p FI_PO_CONT="다른 발주번호로 생성하시겠습니까? (Y/N): "
+if /i "%FI_PO_CONT%"=="Y" goto fi_po_input
 goto menu
 
 :create_oc

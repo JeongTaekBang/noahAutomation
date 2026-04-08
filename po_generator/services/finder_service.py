@@ -233,6 +233,31 @@ class FinderService:
             return None
         return OrderData.from_result(result)
 
+    def find_dn_export_by_customer_po(self, customer_po: str) -> OrderData | None:
+        """Customer PO(발주번호)로 DN 해외 데이터 검색 (복수 DN 통합)
+
+        여러 DN에 걸쳐 동일 Customer PO를 가진 아이템을 모두 찾아 반환합니다.
+
+        Args:
+            customer_po: 고객 발주번호 (예: 26KPO00144)
+
+        Returns:
+            OrderData 또는 None
+        """
+        from po_generator.utils import resolve_column
+
+        df = self.load_dn_export_data()
+        cpo_col = resolve_column(df.columns, 'customer_po')
+        if cpo_col is None:
+            logger.warning("Customer PO 컬럼을 찾을 수 없습니다.")
+            return None
+
+        matched = df[df[cpo_col].astype(str) == customer_po]
+        if matched.empty:
+            return None
+
+        return OrderData.from_result(matched)
+
     def get_available_dn_export_ids(self, limit: int = 20) -> list[tuple[str, str]]:
         """사용 가능한 DN_ID (해외) 목록 반환
 

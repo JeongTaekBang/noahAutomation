@@ -577,6 +577,78 @@ class DocumentService:
             item_count=order_data.item_count,
         )
 
+    def generate_fi_by_customer_po(self, customer_po: str) -> DocumentResult:
+        """Customer PO(발주번호) 기준 Final Invoice 생성
+
+        복수 DN에 걸친 동일 Customer PO 아이템을 통합하여 FI를 생성합니다.
+
+        Args:
+            customer_po: 고객 발주번호 (예: 26KPO00144)
+
+        Returns:
+            DocumentResult
+        """
+        logger.info(f"FI 생성 시작 (Customer PO): {customer_po}")
+
+        # 템플릿 확인
+        if not FI_TEMPLATE_FILE.exists():
+            return DocumentResult.file_error_result(
+                order_no=customer_po,
+                error_message=f"템플릿 파일 없음: {FI_TEMPLATE_FILE}",
+            )
+
+        # Customer PO로 데이터 검색 (복수 DN 통합)
+        order_data = self._finder.find_dn_export_by_customer_po(customer_po)
+        if order_data is None:
+            return DocumentResult.not_found_result(customer_po)
+
+        # 출력 디렉토리 생성
+        FI_OUTPUT_DIR.mkdir(exist_ok=True)
+
+        # 파일명 생성 (Customer PO 기준)
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        output_file = generate_output_filename("FI", customer_po, customer_name, FI_OUTPUT_DIR)
+
+        if not validate_output_path(output_file, FI_OUTPUT_DIR):
+            return DocumentResult.file_error_result(
+                order_no=customer_po,
+                error_message="출력 경로 검증 실패",
+            )
+
+        # 문서 생성
+        try:
+            create_fi_xlwings(
+                template_path=FI_TEMPLATE_FILE,
+                output_path=output_file,
+                order_data=order_data.first_item,
+                items_df=order_data.items_df,
+            )
+            logger.info(f"FI 생성 완료 (Customer PO): {output_file}")
+
+        except FileNotFoundError as e:
+            return DocumentResult.file_error_result(
+                order_no=customer_po,
+                error_message=str(e),
+            )
+        except PermissionError:
+            return DocumentResult.file_error_result(
+                order_no=customer_po,
+                error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
+            )
+        except Exception as e:
+            logger.exception("FI 생성 중 오류 발생 (Customer PO)")
+            return DocumentResult.file_error_result(
+                order_no=customer_po,
+                error_message=str(e),
+            )
+
+        return DocumentResult.success_result(
+            output_file=output_file,
+            order_no=customer_po,
+            customer_name=customer_name,
+            item_count=order_data.item_count,
+        )
+
     def generate_pl(self, dn_id: str) -> DocumentResult:
         """Packing List 생성
 
