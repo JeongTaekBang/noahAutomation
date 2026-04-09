@@ -585,10 +585,10 @@ class TestCalcCoverage:
         assert row["coverage_status"] == "부분 발주"
 
     def test_no_po(self, so_for_cov, po_for_cov):
-        """PO 없는 SO → 미발주"""
+        """PO 없는 SO → PO 미등록"""
         result = calc_coverage(so_for_cov, po_for_cov)
         row = result[result["SO_ID"] == "ND-002"].iloc[0]
-        assert row["coverage_status"] == "미발주"
+        assert row["coverage_status"] == "PO 미등록"
         assert row["po_qty"] == 0
 
     def test_cancelled_po_excluded(self, so_for_cov):
@@ -600,7 +600,7 @@ class TestCalcCoverage:
         })
         result = calc_coverage(so_for_cov, po, po_all_status=po_all)
         assert "ND-001" not in result["SO_ID"].values
-        # ND-002는 PO 자체가 없으므로 미발주로 남음
+        # ND-002는 PO 자체가 없으므로 PO 미등록으로 남음
         assert "ND-002" in result["SO_ID"].values
 
     def test_empty_so(self):
@@ -609,9 +609,9 @@ class TestCalcCoverage:
         assert result.empty
 
     def test_empty_po(self, so_for_cov):
-        """빈 PO → 모두 미발주"""
+        """빈 PO → 모두 PO 미등록"""
         result = calc_coverage(so_for_cov, pd.DataFrame())
-        assert (result["coverage_status"] == "미발주").all()
+        assert (result["coverage_status"] == "PO 미등록").all()
 
     def test_multi_line_so_merged(self, so_for_cov, po_for_cov):
         """SO 다중 라인이 SO_ID 단위로 합산됨"""

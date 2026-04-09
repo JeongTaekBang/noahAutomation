@@ -1527,7 +1527,7 @@ def pg_today(market, sectors, customers, **_):
     so_active = so[so["status"] != "출고 완료"] if not so.empty else pd.DataFrame()
     cov = calc_coverage(so_active, po_detail, po_all_status=po_all_status)
     if not cov.empty:
-        unordered = cov[cov["coverage_status"].isin(["미발주", "부분 발주"])].copy()
+        unordered = cov[cov["coverage_status"].isin(["PO 미등록", "미발주", "부분 발주"])].copy()
     else:
         unordered = pd.DataFrame()
 
@@ -1538,9 +1538,12 @@ def pg_today(market, sectors, customers, **_):
         )
 
     if not unordered.empty:
+        n_unreg = len(unordered[unordered["coverage_status"] == "PO 미등록"])
         n_unord = len(unordered[unordered["coverage_status"] == "미발주"])
         n_part = len(unordered[unordered["coverage_status"] == "부분 발주"])
         parts = []
+        if n_unreg:
+            parts.append(f"🔴 PO미등록 {n_unreg}건")
         if n_unord:
             parts.append(f"미발주 {n_unord}건")
         if n_part:
@@ -1584,7 +1587,7 @@ def pg_today(market, sectors, customers, **_):
                         po_ids_val = getattr(r, "open_po_ids", "")
                         po_tag = f" · PO: {po_ids_val}" if po_ids_val else ""
                         ico_tag = f" · ICO {fmt_krw(ico)}" if ico else ""
-                        cov_tag = "부분발주" if cov_st == "부분 발주" else "미발주"
+                        cov_tag = "PO미등록" if cov_st == "PO 미등록" else ("부분발주" if cov_st == "부분 발주" else "미발주")
                         dlv_info = f" · 납기 {fmt_date(dlv_dt)}" if pd.notna(dlv_dt) else ""
                         rcv_info = f"수주일 {fmt_date(rcv_dt)} (**{days}일**)" if days >= 0 else "수주일 미입력"
                         header = (
@@ -3212,7 +3215,8 @@ def calc_coverage(so: pd.DataFrame, po: pd.DataFrame,
     커버리지 판정: PO 존재 여부 + PO Status 기반 (수량 비교 아님).
     PO line_item은 SO와 1:1 대응하지 않으므로 (본체+부속 합산 발주 등) 수량 비교 불가.
 
-    - 미발주: 해당 SO에 PO가 없음
+    - PO 미등록: SO시트에만 있고 PO시트에 아예 없음 (데이터 입력 누락 리스크)
+    - 미발주: PO Open 상태만 (PO 생성은 됐으나 공장 발주 전)
     - 발주 진행중: PO 존재, Open/Sent 포함
     - 발주 확정: PO 존재, 모두 Confirmed/Invoiced
     - 발주취소: 모든 PO가 Cancelled (po_all_status로 판별, 결과에서 제외)
@@ -3274,11 +3278,12 @@ def calc_coverage(so: pd.DataFrame, po: pd.DataFrame,
         merged["factory_order_date"] = pd.NaT
     # 커버리지 판정: PO 존재 + Status 기반
     def _coverage_status(row):
+        # PO 미등록 = SO시트에만 있고 PO시트에 아예 없음 (데이터 입력 누락)
         # Open = PO 생성만 됨, 공장 발주 전 → 미발주
         # Sent = 공장에 발주함 → 발주 진행중
         # Confirmed/Invoiced = 공장 확인/출고 → 발주 확정
         if not row["po_statuses"]:
-            return "미발주"
+            return "PO 미등록"
         statuses = {s.strip() for s in row["po_statuses"].split(",") if s.strip()}
         has_open = "Open" in statuses
         has_ordered = any(
@@ -3351,47 +3356,53 @@ def pg_po_coverage(market, sectors, customers, year, month):
         return
 
     # ── KPI 카드 ──
+    unreg = merged[merged["coverage_status"] == "PO 미등록"]
     unordered = merged[merged["coverage_status"] == "미발주"]
     partial = merged[merged["coverage_status"] == "부분 발주"]
     in_progress = merged[merged["coverage_status"] == "발주 진행중"]
     confirmed = merged[merged["coverage_status"] == "발주 확정"]
     total_lines = len(merged)
-    # 미발주 + 부분발주 = 발주 필요 건
-    need_order = pd.concat([unordered, partial])
+    # PO미등록 + 미발주 + 부분발주 = 발주 필요 건
+    need_order = pd.concat([unreg, unordered, partial])
     need_order_amt = need_order["amount_krw"].sum()
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
+        with st.container(border=True):
+            st.markdown("**:red[PO 미등록]**")
+            st.markdown(f"### {len(unreg)}건")
+            st.caption("SO만 있고 PO 없음")
+    with c2:
         with st.container(border=True):
             st.markdown("**미발주**")
             st.markdown(f"### {len(unordered)}건")
-            st.caption("PO 없음 / Open")
-    with c2:
+            st.caption("PO Open (발주 전)")
+    with c3:
         with st.container(border=True):
             st.markdown("**부분 발주**")
             st.markdown(f"### {len(partial)}건")
             st.caption("일부 Open + 일부 발주")
-    with c3:
+    with c4:
         with st.container(border=True):
             st.markdown("**발주 진행중**")
             st.markdown(f"### {len(in_progress)}건")
             st.caption("Sent — 공장 확인 대기")
-    with c4:
+    with c5:
         with st.container(border=True):
             st.markdown("**발주 확정**")
             st.markdown(f"### {len(confirmed)}건")
             st.caption("Confirmed/Invoiced")
-    with c5:
+    with c6:
         with st.container(border=True):
             st.markdown("**발주 필요 금액**")
             st.markdown(f"### {fmt_krw(need_order_amt)}")
-            st.caption(f"미발주+부분 {len(need_order)}건")
+            st.caption(f"미등록+미발주+부분 {len(need_order)}건")
 
     # ── 커버리지 요약 Stacked Bar ──
     st.subheader("커버리지 요약")
     status_counts = merged["coverage_status"].value_counts()
-    status_order = ["미발주", "부분 발주", "발주 진행중", "발주 확정"]
-    status_colors = {"미발주": C_DANGER, "부분 발주": "#e65100", "발주 진행중": "#ff9800", "발주 확정": C_ENDING}
+    status_order = ["PO 미등록", "미발주", "부분 발주", "발주 진행중", "발주 확정"]
+    status_colors = {"PO 미등록": "#b71c1c", "미발주": C_DANGER, "부분 발주": "#e65100", "발주 진행중": "#ff9800", "발주 확정": C_ENDING}
     fig_stack = go.Figure()
     for s in status_order:
         cnt = status_counts.get(s, 0)
@@ -3409,9 +3420,31 @@ def pg_po_coverage(market, sectors, customers, year, month):
     )
     st.plotly_chart(fig_stack, use_container_width=True)
 
+    # ── PO 미등록 상세 테이블 ──
+    st.subheader("🔴 PO 미등록 상세")
+    st.caption("SO시트에만 있고 PO시트에 아예 없음 — 데이터 입력 누락 확인 필요")
+    if not unreg.empty:
+        tab_d, tab_e = st.tabs(["국내", "해외"])
+        for tab, mkt in [(tab_d, "국내"), (tab_e, "해외")]:
+            with tab:
+                sub = unreg[unreg["market"] == mkt]
+                if not sub.empty:
+                    tbl = sub[["SO_ID", "customer_name", "os_name", "qty", "amount_krw", "po_receipt_date", "delivery_date"]].copy()
+                    tbl.columns = ["SO_ID", "고객명", "품목", "수량", "매출금액", "수주일", "납기일"]
+                    tbl = tbl.sort_values("수주일")
+                    tbl["수주일"] = tbl["수주일"].apply(fmt_date)
+                    tbl["납기일"] = tbl["납기일"].apply(fmt_date)
+                    tbl["수량"] = tbl["수량"].apply(fmt_qty)
+                    tbl["매출금액"] = tbl["매출금액"].apply(fmt_num)
+                    st.dataframe(tbl, use_container_width=True, hide_index=True)
+                else:
+                    st.success(f"{mkt} PO 미등록 건 없음")
+    else:
+        st.success("PO 미등록 건 없음")
+
     # ── 미발주 상세 테이블 ──
     st.subheader("미발주 상세")
-    st.caption("PO 없음 또는 Open 상태 (공장 발주 전)")
+    st.caption("PO Open 상태 (PO 생성은 됐으나 공장 발주 전)")
     if not unordered.empty:
         tab_d, tab_e = st.tabs(["국내", "해외"])
         for tab, mkt in [(tab_d, "국내"), (tab_e, "해외")]:
