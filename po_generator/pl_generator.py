@@ -66,10 +66,11 @@ CELL_PO_DATE = 'I16'
 # 아이템 시작 행 (Row 19 = Electric Actuator 카테고리 라벨)
 ITEM_START_ROW = 20
 
-# 아이템 열 (PL 고유: 단가/금액 대신 Weight/CBM)
+# 아이템 열 (E=Customer PO, F=Qty, G=Net Weight, H=Gross Weight, I=CBM)
 COL_ITEM_NAME = 'A'
-COL_QTY = 'E'
-COL_NET_WEIGHT = 'F'    # Net Weight (KG/PC)
+COL_CUSTOMER_PO = 'E'
+COL_QTY = 'F'
+COL_NET_WEIGHT = 'G'    # Net Weight (KG/PC)
 COL_GROSS_WEIGHT = 'H'  # Gross Weight (Kg)
 COL_CBM = 'I'           # Measurement (CBM)
 
@@ -101,7 +102,7 @@ def create_pl_xlwings(
             ws = wb.sheets[0]
 
             # 1. 헤더 정보 채우기 (Shipping Mark 포함 — 행 조정 전에 고정 위치에 쓰기)
-            _fill_header(ws, order_data)
+            _fill_header(ws, order_data, items_df)
 
             # 2. 아이템 데이터 채우기
             _fill_items(ws, order_data, items_df)
@@ -116,7 +117,20 @@ def create_pl_xlwings(
     logger.info(f"Packing List 저장 완료: {output_path}")
 
 
-def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
+def _collect_customer_pos(order_data: pd.Series, items_df: pd.DataFrame | None) -> str:
+    """아이템 전체에서 고유 Customer PO를 순서대로 콤마 결합"""
+    source = items_df if items_df is not None else pd.DataFrame([order_data])
+    seen: list[str] = []
+    for _, item in source.iterrows():
+        po = _to_text(get_value(item, 'customer_po', ''))
+        if po and po not in seen:
+            seen.append(po)
+    if not seen:
+        return _to_text(get_value(order_data, 'customer_po', ''))
+    return ", ".join(seen)
+
+
+def _fill_header(ws: xw.Sheet, order_data: pd.Series, items_df: pd.DataFrame | None = None) -> None:
     """헤더 정보 채우기
 
     PL은 Invoice No = dn_id, Date = dispatch_date (없으면 today)
@@ -147,8 +161,8 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
     ws.range(CELL_FROM).value = "INCHEON, KOREA"
     ws.range(CELL_DESTINATION).value = bill_to_3
 
-    # Customer PO
-    customer_po = get_value(order_data, 'customer_po', '')
+    # Customer PO (복수 PO는 콤마 결합)
+    customer_po = _collect_customer_pos(order_data, items_df)
     po_date = get_value(order_data, 'po_receipt_date', '')
     ws.range(CELL_PO_NO).value = customer_po
     if po_date and pd.notna(po_date):
@@ -243,16 +257,16 @@ def _fill_items(
 def _update_total_row(ws: xw.Sheet, num_items: int) -> None:
     """Total 행의 수식 업데이트
 
-    PL Total: E=SUM qty, G="KGS", H=SUM gross weight, I=SUM CBM
+    PL Total: F=SUM qty, G=SUM net weight, H=SUM gross weight, I=SUM CBM
     """
     total_row = ITEM_START_ROW + num_items
     last_item_row = total_row - 1
 
-    # E열: Qty 합계
-    ws.range(f'E{total_row}').formula = f"=SUM(E{ITEM_START_ROW}:E{last_item_row})"
+    # F열: Qty 합계
+    ws.range(f'F{total_row}').formula = f"=SUM(F{ITEM_START_ROW}:F{last_item_row})"
 
-    # G열: 단위 라벨
-    ws.range(f'G{total_row}').value = "KGS"
+    # G열: Net Weight 합계
+    ws.range(f'G{total_row}').formula = f"=SUM(G{ITEM_START_ROW}:G{last_item_row})"
 
     # H열: Gross Weight 합계
     ws.range(f'H{total_row}').formula = f"=SUM(H{ITEM_START_ROW}:H{last_item_row})"
@@ -269,12 +283,13 @@ def _fill_items_batch(
 ) -> None:
     """아이템 데이터 배치 쓰기 (성능 최적화)
 
-    PL은 열이 불연속적이므로(A, E, F, H, I) 열별로 배치 쓰기 수행
+    PL은 열이 불연속적이므로(A, E, F, G, H, I) 열별로 배치 쓰기 수행
     """
     num_items = len(items_df)
     end_row = ITEM_START_ROW + num_items - 1
 
     names = []
+    customer_pos = []
     qtys = []
     net_weights = []
     gross_weights = []
@@ -294,6 +309,10 @@ def _fill_items_batch(
         else:
             full_name = str(item_name) if item_name else ''
         names.append(full_name)
+
+        # Customer PO (행별)
+        row_customer_po = get_value(item, 'customer_po', '')
+        customer_pos.append(_to_text(row_customer_po))
 
         # 수량
         raw_qty = get_value(item, 'item_qty', '')
@@ -330,8 +349,9 @@ def _fill_items_batch(
             cbm = ''
         cbms.append(cbm)
 
-    # 열별 배치 쓰기 (5회 COM 호출)
+    # 열별 배치 쓰기 (6회 COM 호출)
     ws.range(f'{COL_ITEM_NAME}{ITEM_START_ROW}:{COL_ITEM_NAME}{end_row}').value = [[n] for n in names]
+    ws.range(f'{COL_CUSTOMER_PO}{ITEM_START_ROW}:{COL_CUSTOMER_PO}{end_row}').value = [[p] for p in customer_pos]
     ws.range(f'{COL_QTY}{ITEM_START_ROW}:{COL_QTY}{end_row}').value = [[q] for q in qtys]
     ws.range(f'{COL_NET_WEIGHT}{ITEM_START_ROW}:{COL_NET_WEIGHT}{end_row}').value = [[n] for n in net_weights]
     ws.range(f'{COL_GROSS_WEIGHT}{ITEM_START_ROW}:{COL_GROSS_WEIGHT}{end_row}').value = [[g] for g in gross_weights]

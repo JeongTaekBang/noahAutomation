@@ -67,9 +67,10 @@ CELL_CUSTOMER_PAGE2 = 'A53'
 # CI 고유: 아이템 시작 행 (Row 19 = Electric Actuator 카테고리 라벨)
 ITEM_START_ROW = 20
 
-# 아이템 열 (PI와 동일 + H열 currency 추가)
+# 아이템 열 (E=Customer PO, F=Qty, G=Unit Price, H=Currency, I=Amount)
 COL_ITEM_NAME = 'A'
-COL_QTY = 'E'
+COL_CUSTOMER_PO = 'E'
+COL_QTY = 'F'
 COL_UNIT_PRICE = 'G'
 COL_CURRENCY = 'H'
 COL_AMOUNT = 'I'
@@ -103,7 +104,7 @@ def create_ci_xlwings(
             ws = wb.sheets[0]
 
             # 1. 헤더 정보 채우기
-            _fill_header(ws, order_data)
+            _fill_header(ws, order_data, items_df)
 
             # 2. 아이템 데이터 채우기
             _fill_items(ws, order_data, items_df)
@@ -118,7 +119,20 @@ def create_ci_xlwings(
     logger.info(f"Commercial Invoice 저장 완료: {output_path}")
 
 
-def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
+def _collect_customer_pos(order_data: pd.Series, items_df: pd.DataFrame | None) -> str:
+    """아이템 전체에서 고유 Customer PO를 순서대로 콤마 결합"""
+    source = items_df if items_df is not None else pd.DataFrame([order_data])
+    seen: list[str] = []
+    for _, item in source.iterrows():
+        po = _to_text(get_value(item, 'customer_po', ''))
+        if po and po not in seen:
+            seen.append(po)
+    if not seen:
+        return _to_text(get_value(order_data, 'customer_po', ''))
+    return ", ".join(seen)
+
+
+def _fill_header(ws: xw.Sheet, order_data: pd.Series, items_df: pd.DataFrame | None = None) -> None:
     """헤더 정보 채우기
 
     CI는 Invoice No = dn_id, Invoice Date = dispatch_date (없으면 today)
@@ -149,8 +163,8 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
     ws.range(CELL_FROM).value = "INCHEON, KOREA"
     ws.range(CELL_DESTINATION).value = bill_to_3
 
-    # Customer PO
-    customer_po = get_value(order_data, 'customer_po', '')
+    # Customer PO (복수 PO는 콤마 결합)
+    customer_po = _collect_customer_pos(order_data, items_df)
     po_date = get_value(order_data, 'po_receipt_date', '')
     ws.range(CELL_PO_NO).value = customer_po
     if po_date and pd.notna(po_date):
@@ -256,17 +270,17 @@ def _fill_items(
 def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> None:
     """Total 행의 수식과 Currency 업데이트
 
-    CI Total: E=SUM qty, F="EA", H=currency, I=SUM amount
+    CI Total: F=SUM qty, G="EA", H=currency, I=SUM amount
     """
     total_row = ITEM_START_ROW + num_items
     last_item_row = total_row - 1
 
-    # E열: Qty 합계
-    qty_formula = f"=SUM(E{ITEM_START_ROW}:E{last_item_row})"
-    ws.range(f'E{total_row}').formula = qty_formula
+    # F열: Qty 합계
+    qty_formula = f"=SUM(F{ITEM_START_ROW}:F{last_item_row})"
+    ws.range(f'F{total_row}').formula = qty_formula
 
-    # F열: 단위
-    ws.range(f'F{total_row}').value = "EA"
+    # G열: 단위
+    ws.range(f'G{total_row}').value = "EA"
 
     # H열: Currency
     currency = get_value(order_data, 'currency', '')
@@ -286,12 +300,13 @@ def _fill_items_batch(
 ) -> None:
     """아이템 데이터 배치 쓰기 (성능 최적화)
 
-    CI는 열이 불연속적이므로(A, E, G, H, I) 열별로 배치 쓰기 수행
+    CI는 열이 불연속적이므로(A, E, F, G, H, I) 열별로 배치 쓰기 수행
     """
     num_items = len(items_df)
     end_row = ITEM_START_ROW + num_items - 1
 
     names = []
+    customer_pos = []
     qtys = []
     prices = []
     currencies = []
@@ -311,6 +326,10 @@ def _fill_items_batch(
         else:
             full_name = str(item_name) if item_name else ''
         names.append(full_name)
+
+        # Customer PO (행별)
+        row_customer_po = get_value(item, 'customer_po', '')
+        customer_pos.append(_to_text(row_customer_po))
 
         # 수량
         raw_qty = get_value(item, 'item_qty', '')
@@ -341,8 +360,9 @@ def _fill_items_batch(
         # 금액
         amounts.append(qty * unit_price)
 
-    # 열별 배치 쓰기 (5회 COM 호출)
+    # 열별 배치 쓰기 (6회 COM 호출)
     ws.range(f'{COL_ITEM_NAME}{ITEM_START_ROW}:{COL_ITEM_NAME}{end_row}').value = [[n] for n in names]
+    ws.range(f'{COL_CUSTOMER_PO}{ITEM_START_ROW}:{COL_CUSTOMER_PO}{end_row}').value = [[p] for p in customer_pos]
     ws.range(f'{COL_QTY}{ITEM_START_ROW}:{COL_QTY}{end_row}').value = [[q] for q in qtys]
     ws.range(f'{COL_UNIT_PRICE}{ITEM_START_ROW}:{COL_UNIT_PRICE}{end_row}').value = [[p] for p in prices]
     ws.range(f'{COL_CURRENCY}{ITEM_START_ROW}:{COL_CURRENCY}{end_row}').value = [[c] for c in currencies]

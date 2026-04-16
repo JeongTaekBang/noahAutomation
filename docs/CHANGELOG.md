@@ -20,6 +20,29 @@
 
 ---
 
+## 2026-04-16: CI/PL 템플릿 Customer PO 열 추가 (E열)
+
+Commercial Invoice, Packing List 템플릿이 아이템 행별 Customer PO를 표시하도록 변경됨.
+E20부터 행별 Customer PO를 기록하고, 기존 열은 모두 1칸씩 오른쪽으로 이동.
+복수 PO가 섞인 통합 인보이스(`create_fi --po` 등)에서 PO 식별이 가능해짐.
+
+### CI (Commercial Invoice)
+- E열 = Customer PO (신규), F열 = Qty (E→F), G/H/I = Unit Price/Currency/Amount (유지)
+- Total 행: F=SUM qty, G="EA" (한 칸 이동), H/I 유지
+- G16 (PO No), C34 (Shipping Mark PO): 복수 PO는 `, ` 로 결합하여 전체 출력
+
+### PL (Packing List)
+- E열 = Customer PO (신규), F열 = Qty (E→F), G열 = Net Weight (F→G), H/I = Gross Weight/CBM (유지)
+- Total 행: F=SUM qty, G=SUM net weight (구 `"KGS"` 라벨 제거), H/I 유지
+- G16 (PO No), C36 (Shipping Mark PO): 복수 PO는 `, ` 로 결합하여 전체 출력
+
+### 수정 파일
+- `templates/commercial_invoice.xlsx`, `templates/packing_list.xlsx` — 레이아웃 변경
+- `po_generator/ci_generator.py` — 열 상수 재정의, `_collect_customer_pos()` 헬퍼, `_fill_items_batch`/`_update_total_row` 수정
+- `po_generator/pl_generator.py` — 동일 패턴 적용
+
+---
+
 ## 2026-04-09: 대시보드 PO 미등록 감지 기능 추가
 
 SO시트에만 있고 PO시트에 SO_ID가 아예 없는 건을 "PO 미등록"으로 분리 표시.
