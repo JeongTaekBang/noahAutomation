@@ -20,6 +20,52 @@
 
 ---
 
+## 2026-04-21: 동기화 로그 DB 이관 + 대시보드 조회 페이지 + 라인 번호 UI
+
+`sync_log.csv` (9.14 MB까지 증가해 Excel 열기 곤란)를 SQLite `_sync_log` 테이블로 이관.
+대시보드에 변경 이력 조회 페이지 추가 + 오늘의 현황 expand 테이블에 Line 번호 표시.
+
+### `_sync_log` 테이블 신설 + CSV → DB 전환
+
+- `po_generator/db_schema.py` — `ensure_sync_log_table()` 추가
+  - 스키마: `id / sync_time / sheet_name / change_type / pk / column_name / old_value / new_value`
+  - 인덱스 2개: `sync_time`, `(sheet_name, sync_time)` — 기간/시트 조회 가속
+  - 빈 문자열은 NULL로 저장 (SQL 쿼리 일관성)
+- `sync_db.py` — 기존 `write_sync_log()` (CSV) 제거 → `write_sync_log_to_db()` 신규
+  - `executemany` 배치 INSERT, sync 트랜잭션과 분리된 별도 커넥션
+  - 로그 기록 실패가 이미 commit된 sync 결과를 훼손하지 않도록 설계
+- `migrate_sync_log.py` 신규 — 기존 CSV → `_sync_log` 1회성 마이그레이션 스크립트
+  - `--dry-run` 파싱 테스트 / `--delete` 성공 후 CSV 자동 삭제
+  - 실행 결과: **115,141행** 이관 완료 (2026-03-13 ~ 2026-04-21)
+
+### 대시보드 "동기화 로그" 페이지 (9번째 페이지)
+
+- `dashboard.py` — `pg_sync_log()` + `load_sync_log(days)` + `resolve_related_ids(input_id)`
+- 기능:
+  - 조회 기간 선택 (7일/30일/90일/전체)
+  - KPI 4개: 총 건수 / 신규 / 수정 / 삭제
+  - 동기화 세션별 요약 테이블 + 시트별 변경 추이 차트 (plotly stacked bar)
+  - 필터 2행: (시트, 변경유형) + (주문 통합 검색, PK 원본 검색, 컬럼명)
+  - 필터 결과 CSV 다운로드
+- **주문 통합 검색** (핵심 UX): PK 구조가 시트마다 달라 (`SO_ID|…`, `PO_ID|…|seq`, `DN_ID|SO_ID|…`) 한 번호로는 일부 시트만 매칭됨. 예) `ND-0429` 입력 시 PO만 22행 → SO 27행 누락. 해결:
+  - po_domestic/po_export로 SO_ID ↔ PO_ID 매핑, dn_domestic/dn_export로 SO_ID ↔ DN_ID 매핑을 따라 2-pass로 연관 ID 전개
+  - 사용자가 SO/PO/DN 어느 번호를 입력해도 3개 시트의 연관 이력을 모두 표시
+  - 검증: `ND-0429` → 2개 ID (SO+PO) → 49행 반환 (이전 22행)
+
+### 오늘의 현황 expand 테이블에 Line 번호 추가
+
+- `dashboard.py` — PO 확정 지연, 미발주 현황 expand에 `Line` 컬럼 추가
+  - `load_po_sent_pending()` SQL에 `CAST([Line item] AS INTEGER) AS line_item` 추가
+  - 미발주 현황 expand에서 기존에 `drop(columns=["line_item"])`로 지우던 부분 → 유지
+  - EXW 완료 미출고, 납기 현황 expand는 이미 `Line` 컬럼 있어 그대로
+
+### 문서
+
+- `docs/DB_SYNC_GUIDE.md` — CSV 관련 기술을 `_sync_log` 테이블 기반으로 전면 교체, SQL 조회 예제 + 대시보드 링크 + 마이그레이션 방법 추가
+- `CLAUDE.md` — 대시보드 8→9페이지, `migrate_sync_log.py` 항목 추가, `db_schema.py` 설명에 `_sync_log` 명시
+
+---
+
 ## 2026-04-16: CI/PL 템플릿 Customer PO 열 추가 (E열)
 
 Commercial Invoice, Packing List 템플릿이 아이템 행별 Customer PO를 표시하도록 변경됨.

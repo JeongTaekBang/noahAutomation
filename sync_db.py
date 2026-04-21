@@ -25,8 +25,11 @@ from pathlib import Path
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
-from po_generator.config import NOAH_SO_PO_DN_FILE, DB_FILE, DATA_DIR
-from po_generator.db_schema import SYNC_SHEETS, get_sync_metadata, get_table_row_count
+from po_generator.config import NOAH_SO_PO_DN_FILE, DB_FILE
+from po_generator.db_schema import (
+    SYNC_SHEETS, get_sync_metadata, get_table_row_count,
+    ensure_sync_log_table,
+)
 from po_generator.db_sync import SyncEngine, SyncSummary
 from po_generator.logging_config import setup_logging
 
@@ -116,56 +119,58 @@ def print_changes(summary: SyncSummary) -> None:
                 print(f"    ... 외 {len(r.pruned_pks) - 20}건")
 
 
-SYNC_LOG_FILE: Path = DATA_DIR / "sync_log.csv"
-CSV_HEADER = "동기화시각,시트,유형,PK,컬럼,이전값,변경값\n"
+def _to_text(val) -> str | None:
+    """로그 값 → DB 저장용 TEXT. None/빈 문자열은 NULL로 저장."""
+    if val is None:
+        return None
+    s = str(val)
+    return s if s else None
 
 
-def _csv_escape(val) -> str:
-    """CSV 셀 값 이스케이프 (쉼표, 줄바꿈, 따옴표 처리)"""
-    s = str(val) if val is not None else ''
-    if ',' in s or '"' in s or '\n' in s:
-        return '"' + s.replace('"', '""') + '"'
-    return s
+def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
+    """동기화 변경 내역을 _sync_log 테이블에 기록.
 
-
-def write_sync_log(summary: SyncSummary) -> None:
-    """동기화 변경 내역을 CSV 로그 파일에 기록"""
+    sync 트랜잭션과 분리된 별도 트랜잭션으로 기록 — 로그 기록 실패가
+    이미 commit된 sync 결과를 해치지 않도록.
+    """
     has_changes = any(r.inserted_details or r.updated_details or r.pruned_pks for r in summary.results)
     if not has_changes:
         return
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    is_new_file = not SYNC_LOG_FILE.exists() or SYNC_LOG_FILE.stat().st_size == 0
+    rows: list[tuple] = []
+    for r in summary.results:
+        for detail in r.inserted_details:
+            pk_str = _format_pk(detail['pk'])
+            for col, val in detail['values'].items():
+                rows.append((now, r.sheet_name, '신규', pk_str, col, None, _to_text(val)))
 
-    with open(SYNC_LOG_FILE, "a", encoding="utf-8-sig") as f:
-        # BOM + 헤더 (새 파일일 때만)
-        if is_new_file:
-            f.write(CSV_HEADER)
+        for detail in r.updated_details:
+            pk_str = _format_pk(detail['pk'])
+            for col, (old, new) in detail['changes'].items():
+                rows.append((now, r.sheet_name, '수정', pk_str, col,
+                             _to_text(old), _to_text(new)))
 
-        for r in summary.results:
-            # 신규 (필드별 1행 — 비어있지 않은 값만)
-            for detail in r.inserted_details:
-                pk_str = _csv_escape(_format_pk(detail['pk']))
-                for col, val in detail['values'].items():
-                    col_esc = _csv_escape(col)
-                    val_esc = _csv_escape(val)
-                    f.write(f"{now},{r.sheet_name},신규,{pk_str},{col_esc},,{val_esc}\n")
+        for pk in r.pruned_pks:
+            rows.append((now, r.sheet_name, '삭제', _format_pk(pk), None, None, None))
 
-            # 수정 (필드별 1행)
-            for detail in r.updated_details:
-                pk_str = _csv_escape(_format_pk(detail['pk']))
-                for col, (old, new) in detail['changes'].items():
-                    old_esc = _csv_escape(old)
-                    new_esc = _csv_escape(new)
-                    col_esc = _csv_escape(col)
-                    f.write(f"{now},{r.sheet_name},수정,{pk_str},{col_esc},{old_esc},{new_esc}\n")
+    if not rows:
+        return
 
-            # 삭제 (PK만 기록)
-            for pk in r.pruned_pks:
-                pk_str = _csv_escape(_format_pk(pk))
-                f.write(f"{now},{r.sheet_name},삭제,{pk_str},,,\n")
+    conn = sqlite3.connect(str(db_path))
+    try:
+        ensure_sync_log_table(conn)
+        conn.executemany(
+            "INSERT INTO _sync_log "
+            "(sync_time, sheet_name, change_type, pk, column_name, old_value, new_value) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
-    print(f"\n동기화 로그 저장: {SYNC_LOG_FILE.name}")
+    print(f"\n동기화 로그 저장: _sync_log 테이블 ({len(rows):,}행)")
 
 
 def show_info() -> int:
@@ -283,9 +288,9 @@ def main() -> int:
     if args.changes:
         print_changes(summary)
 
-    # dry-run이 아니면 로그 파일에 변경 내역 기록
+    # dry-run이 아니면 _sync_log 테이블에 변경 내역 기록
     if not args.dry_run:
-        write_sync_log(summary)
+        write_sync_log_to_db(summary)
 
     print_summary(summary, dry_run=args.dry_run)
 

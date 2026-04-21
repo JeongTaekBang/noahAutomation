@@ -116,11 +116,12 @@ Reconciliation layer:
 | `docs/CHANGELOG.md` | 버전별 변경 이력 |
 | `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
 | `po_generator/snapshot.py` | SnapshotEngine — 월별 마감, Variance 추적 |
-| `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`) |
+| `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`), `_sync_log` 이력 테이블 |
+| `migrate_sync_log.py` | `sync_log.csv` → `_sync_log` 테이블 1회성 마이그레이션 스크립트 |
 | `sql/order_book.sql` | 이벤트 기반 Order Book SQL (Input/Output 이벤트 월만 행 생성, 재귀 CTE 없음) |
 | `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL (마감 고정 + Variance) |
 | `sql/order_book_variance.sql` | Variance 변동이유 분석 SQL (환율차이/판매가변경/수량변경/반올림 자동 분류, 납기변경 제외) |
-| `dashboard.py` | Streamlit 대시보드 (8페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book, PO미등록감지, PO확정지연, EXW미출고, 납기현황(DN qty매칭+PO EXW보충), 납기캘린더(선적예정 포함), 해외선적(Incoterms/운송방식별), 세금계산서미발행, Order Book 3탭) |
+| `dashboard.py` | Streamlit 대시보드 (9페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book/동기화로그, PO미등록감지, PO확정지연, EXW미출고, 납기현황(DN qty매칭+PO EXW보충), 납기캘린더(선적예정 포함), 해외선적(Incoterms/운송방식별), 세금계산서미발행, Order Book 3탭, `_sync_log` 변경이력 조회) |
 | `reconcile_po.py` | PO 매입대사 — 공장 출고(Delivery) vs 회계 GRN 금액 비교. 출력: `대사결과_{period}.xlsx` (6시트), `AX_PO_매핑_{period}.xlsx` (Delivery+AX PO) |
 | `reconcile_so.py` | SO 매출대사 — AX ERP 매출 vs NOAH DN 매출 비교 (국내=출고일, 해외=선적일 기준 월 필터 + FX 환율차이 자동 판별). 출력: `대사결과_SO_{period}.xlsx` (3시트: 대사/상세/범례) |
 | `reconcile_ind.py` | Industry Code 대사 — (1) Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 → `ind_code_결과_{period}.xlsx`, (2) SO Sector vs 마스터 Category 교차 검증 → `sector_검증.xlsx`. `--sector-only`로 검증만 실행 가능 |

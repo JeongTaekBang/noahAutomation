@@ -217,6 +217,28 @@ def create_snapshot_tables(conn: sqlite3.Connection) -> None:
     logger.debug("스냅샷 테이블 생성/확인 완료")
 
 
+def ensure_sync_log_table(conn: sqlite3.Connection) -> None:
+    """_sync_log 테이블 및 인덱스 생성 (idempotent).
+
+    Excel → SQLite 동기화 시 발생한 신규/수정/삭제 이력을 누적 저장합니다.
+    기존 sync_log.csv를 대체 — 파일 크기 증가 문제 해소 + 대시보드 조회 용이.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _sync_log (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            sync_time    TEXT NOT NULL,
+            sheet_name   TEXT NOT NULL,
+            change_type  TEXT NOT NULL,
+            pk           TEXT NOT NULL,
+            column_name  TEXT,
+            old_value    TEXT,
+            new_value    TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_time  ON _sync_log (sync_time)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_sheet ON _sync_log (sheet_name, sync_time)")
+
+
 def get_sync_metadata(conn: sqlite3.Connection) -> dict[str, dict]:
     """_sync_meta 테이블에서 동기화 메타정보 조회"""
     try:

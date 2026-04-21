@@ -27,8 +27,9 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 
 | 파일 | 위치 | 설명 |
 |------|------|------|
-| `noah_data.db` | DATA_DIR (Excel과 같은 폴더) | SQLite DB |
-| `sync_log.csv` | DATA_DIR (Excel과 같은 폴더) | 변경 이력 로그 |
+| `noah_data.db` | DATA_DIR (Excel과 같은 폴더) | SQLite DB (변경 이력 포함) |
+
+> 과거에는 별도 `sync_log.csv` 파일에 변경 이력을 기록했으나, 파일이 커지면서 Excel 열기가 어려워져 `noah_data.db` 내 `_sync_log` 테이블로 일원화됨 (2026-04). 기존 CSV는 `migrate_sync_log.py`로 DB에 이관.
 
 ## 테이블 구조
 
@@ -56,6 +57,21 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 | `last_sync` | 마지막 동기화 시각 (ISO) |
 | `row_count` | 동기화 후 행 수 |
 
+### 변경 이력 테이블 `_sync_log`
+
+동기화 시 발생한 신규/수정/삭제 이력을 누적 저장. 인덱스: `sync_time`, `(sheet_name, sync_time)`.
+
+| 컬럼 | 설명 |
+|------|------|
+| `id` | AUTOINCREMENT PK |
+| `sync_time` | 실행 시각 (`YYYY-MM-DD HH:MM:SS`) |
+| `sheet_name` | 소스 시트명 |
+| `change_type` | `신규` / `수정` / `삭제` |
+| `pk` | PK 값 (다중키는 `\|`로 구분) |
+| `column_name` | 변경된 컬럼명 (삭제 시 NULL) |
+| `old_value` | 기존 값 (신규/삭제 시 NULL) |
+| `new_value` | 새 값 (삭제 시 NULL) |
+
 ## 동기화 동작
 
 ### Upsert 방식
@@ -77,34 +93,49 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 
 - Upsert 완료 후, DB에만 존재하고 Excel에는 없는 PK를 감지하여 DELETE
 - **시트가 완전히 비어있는 경우에도 동작** — DB 테이블의 전체 행이 prune 대상
-- 삭제된 PK는 `sync_log.csv`에 "삭제" 유형으로 기록
-- `_sync_meta`, `ob_snapshot` 등 비동기화 테이블은 prune 대상 아님
+- 삭제된 PK는 `_sync_log` 테이블에 "삭제" 유형으로 기록
+- `_sync_meta`, `_sync_log`, `ob_snapshot` 등 시스템/메타 테이블은 prune 대상 아님
 
 ### Dry-run 동작
 
 - `--dry-run`은 실제 DB에 연결하여 upsert/prune을 수행한 뒤 **트랜잭션을 rollback** — DB는 변경되지 않음
 - `isolation_level=None` + 명시적 `BEGIN`으로 DDL(테이블 생성/삭제/컬럼 추가)도 트랜잭션 내에서 실행 → rollback 시 완전 원복
 - 운영 DB 기준의 정확한 insert/update/prune 건수를 시뮬레이션
-- sync_log.csv에는 기록하지 않음
+- `_sync_log` 테이블에도 기록하지 않음
 
-## 변경 이력 로그 (sync_log.csv)
+## 변경 이력 로그 (`_sync_log` 테이블)
 
-동기화할 때마다 변경 내역이 CSV로 자동 기록됨. Excel에서 바로 열어서 확인 가능.
+동기화할 때마다 변경 내역이 `noah_data.db`의 `_sync_log` 테이블에 자동 누적됨. Streamlit 대시보드의 **동기화 로그** 페이지에서 필터·검색·CSV 내보내기 가능.
 
-| 컬럼 | 설명 | 예시 |
-|------|------|------|
-| 동기화시각 | 실행 시각 | 2026-03-03 09:28:58 |
-| 시트 | 소스 시트명 | SO_국내 |
-| 유형 | 신규/수정/삭제 | 수정 |
-| PK | Primary Key 값 | SOD-2026-0001 \| JK2026... \| 1 |
-| 컬럼 | 변경된 컬럼명 | Status |
-| 이전값 | DB 기존 값 | (빈값) |
-| 변경값 | Excel 새 값 | Cancelled |
+**기록 규칙:**
+- **신규**: 비어있지 않은 필드마다 1행씩 기록 (`old_value` = NULL)
+- **수정**: 변경된 필드마다 1행씩 기록 (`old_value` / `new_value` 모두 채움)
+- **삭제**: PK만 기록 (`column_name` / `old_value` / `new_value` 모두 NULL)
 
-- **신규**: 비어있지 않은 필드마다 1행씩 기록 (이전값은 빈칸, 변경값에 입력된 값 표시)
-- **수정**: 변경된 필드마다 1행씩 기록 → 필터/정렬 가능
-- **삭제**: PK만 기록 (Excel에서 제거되어 DB에서 삭제된 행)
-- UTF-8 BOM 포함 → Excel에서 한글 깨짐 없음
+**조회 방법:**
+
+1. **대시보드** — `streamlit run dashboard.py` → 사이드바 "동기화 로그" 페이지
+2. **SQL 직접 조회**:
+   ```sql
+   -- 최근 7일 수정 이력
+   SELECT sync_time, sheet_name, pk, column_name, old_value, new_value
+   FROM _sync_log
+   WHERE sync_time >= date('now', '-7 days')
+     AND change_type = '수정'
+   ORDER BY sync_time DESC;
+
+   -- 특정 PK 변경 이력 추적
+   SELECT * FROM _sync_log
+   WHERE pk LIKE 'SOD-2026-0001%'
+   ORDER BY id;
+   ```
+
+**CSV에서 DB로 마이그레이션** (1회성, 이미 완료):
+```bash
+python migrate_sync_log.py              # 기존 sync_log.csv → _sync_log
+python migrate_sync_log.py --dry-run    # 파싱 테스트만
+python migrate_sync_log.py --delete     # 성공 시 CSV 파일 삭제
+```
 
 ## DB 조회 방법
 
@@ -156,7 +187,7 @@ Excel에 새 컬럼이 추가되면 `ensure_columns_exist()`가 자동으로 ALT
 ### 현재 가치
 
 - **데이터 유실 방지**: Excel에서 실수로 행 삭제/덮어쓰기 시 복구 불가 → DB에 백업되어 있으면 복원 가능
-- **변경 추적**: sync_log.csv에 "언제, 어떤 행의 어떤 필드가 무엇에서 무엇으로 바뀌었는지" 자동 기록
+- **변경 추적**: `_sync_log` 테이블에 "언제, 어떤 행의 어떤 필드가 무엇에서 무엇으로 바뀌었는지" 자동 기록 → 대시보드에서 바로 조회
 - **내부통제 증거**: ERP 통합 전까지 "인터컴퍼니 거래 데이터를 별도로 관리/검증하고 있다"는 증빙
 - **데이터 정합성**: 동일 데이터를 두 곳(Excel, DB)에 보관 → 불일치 시 문제 감지 가능
 
@@ -205,5 +236,5 @@ SQLite (noah_data.db)       →  분석/리포트/검증 도구
 |------|-------------|
 | PO ↔ DN 금액 정합성 | PO 발행건 중 DN 미매칭 또는 금액 불일치 검출 |
 | PMT 입금 대사 | 입금액 vs PO 총액 차이 검증 |
-| 변경 이력 | sync_log.csv로 데이터 변경 추적 |
+| 변경 이력 | `_sync_log` 테이블로 데이터 변경 추적 (대시보드 조회) |
 | ERP 마이그레이션 | 데이터 클렌징/매핑 기초 자료 |

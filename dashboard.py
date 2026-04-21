@@ -331,6 +331,7 @@ def load_po_sent_pending() -> pd.DataFrame:
         df = pd.read_sql_query("""
             SELECT SO_ID,
                    PO_ID,
+                   CAST([Line item] AS INTEGER) AS line_item,
                    COALESCE([Item name], '') AS item_name,
                    COALESCE([공장 발주 날짜], '') AS order_date,
                    COALESCE([공장 EXW date], '') AS factory_exw,
@@ -343,6 +344,7 @@ def load_po_sent_pending() -> pd.DataFrame:
             UNION ALL
             SELECT SO_ID,
                    PO_ID,
+                   CAST([Line item] AS INTEGER) AS line_item,
                    COALESCE([Item name], '') AS item_name,
                    COALESCE([공장 발주 날짜], '') AS order_date,
                    COALESCE([공장 EXW date], '') AS factory_exw,
@@ -590,6 +592,93 @@ def load_snapshot_meta() -> pd.DataFrame:
         conn.close()
 
 
+@st.cache_data(ttl=300)
+def resolve_related_ids(input_id: str) -> list[str]:
+    """입력 ID(SO/PO/DN 중 하나)와 연관된 모든 ID 집합 반환.
+
+    po_domestic/po_export로 SO_ID ↔ PO_ID 매핑, dn_domestic/dn_export로
+    SO_ID ↔ DN_ID 매핑을 따라가며 관련 ID를 확장. 2-pass로 수렴.
+    """
+    input_id = input_id.strip()
+    if not input_id:
+        return []
+    conn = _conn()
+    if not conn:
+        return [input_id]
+    try:
+        ids: set[str] = {input_id}
+        for _ in range(2):
+            before = len(ids)
+            placeholders = ",".join("?" for _ in ids)
+            params = tuple(ids)
+
+            for table in ("po_domestic", "po_export"):
+                try:
+                    for so, po in conn.execute(
+                        f"SELECT SO_ID, PO_ID FROM {table} "
+                        f"WHERE SO_ID IN ({placeholders}) OR PO_ID IN ({placeholders})",
+                        params + params,
+                    ).fetchall():
+                        if so: ids.add(so)
+                        if po: ids.add(po)
+                except sqlite3.OperationalError:
+                    pass
+
+            for table in ("dn_domestic", "dn_export"):
+                try:
+                    for dn_id, so_id in conn.execute(
+                        f"SELECT DN_ID, SO_ID FROM {table} "
+                        f"WHERE DN_ID IN ({placeholders}) OR SO_ID IN ({placeholders})",
+                        params + params,
+                    ).fetchall():
+                        if dn_id: ids.add(dn_id)
+                        if so_id: ids.add(so_id)
+                except sqlite3.OperationalError:
+                    pass
+
+            if len(ids) == before:
+                break
+    except Exception as e:
+        logger.warning("주문 통합 검색 실패: %s", e)
+        _record_load_error("Order ID Resolver", e)
+        return [input_id]
+    finally:
+        conn.close()
+    # 빈 값 제거 + 정렬 (UI 표시 일관성)
+    return sorted(i for i in ids if i)
+
+
+@st.cache_data(ttl=60)
+def load_sync_log(days: int = 30) -> pd.DataFrame:
+    """_sync_log 테이블 로드. days=0이면 전체."""
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        if days > 0:
+            cutoff = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
+            df = pd.read_sql_query(
+                "SELECT sync_time, sheet_name, change_type, pk, "
+                "       column_name, old_value, new_value "
+                "FROM _sync_log WHERE sync_time >= ? ORDER BY id DESC",
+                conn, params=(cutoff,),
+            )
+        else:
+            df = pd.read_sql_query(
+                "SELECT sync_time, sheet_name, change_type, pk, "
+                "       column_name, old_value, new_value "
+                "FROM _sync_log ORDER BY id DESC",
+                conn,
+            )
+    except Exception as e:
+        logger.warning("동기화 로그 로드 실패: %s", e)
+        _record_load_error("Sync Log", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    return df
+
+
 # ═══════════════════════════════════════════════════════════════
 # 헬퍼
 # ═══════════════════════════════════════════════════════════════
@@ -807,7 +896,7 @@ def main():
     page = st.sidebar.radio("페이지", [
         "오늘의 현황", "수주/출고 현황", "제품 분석",
         "섹터 분석", "고객 분석", "발주 커버리지",
-        "수익성 분석", "Order Book",
+        "수익성 분석", "Order Book", "동기화 로그",
     ])
     st.sidebar.divider()
     market = st.sidebar.radio("시장 구분", ["전체", "국내", "해외"], horizontal=True)
@@ -852,6 +941,7 @@ def main():
         "발주 커버리지": pg_po_coverage,
         "수익성 분석": pg_margin,
         "Order Book": pg_orderbook,
+        "동기화 로그": pg_sync_log,
     }[page](**kw)
 
 
@@ -1192,7 +1282,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 pk = day_pickup.groupby("DN_ID").agg(
                     고객명=("customer_name", "first"),
                     섹터=("sector", "first"),
-                    고객PO=("customer_po", "first"),
+                    고객PO=("customer_po", lambda x: " / ".join(sorted(set(v for v in x if v)))),
                     품목수=("item_name", "nunique"),
                     총수량=("qty", "sum"),
                     총금액=("amount_krw", "sum"),
@@ -1242,7 +1332,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 sh = day_ship.groupby("DN_ID").agg(
                     고객명=("customer_name", "first"),
                     섹터=("sector", "first"),
-                    고객PO=("customer_po", "first"),
+                    고객PO=("customer_po", lambda x: " / ".join(sorted(set(v for v in x if v)))),
                     품목수=("item_name", "nunique"),
                     총수량=("qty", "sum"),
                     총금액=("amount_krw", "sum"),
@@ -1331,7 +1421,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                     agg_dict = dict(
                         총수량=("qty", "sum"),
                         총금액=("amount_krw", "sum"),
-                        고객PO=("customer_po", "first"),
+                        고객PO=("customer_po", lambda x: " / ".join(sorted(set(v for v in x if v)))),
                     )
                     if "customer_name" in day_dn.columns:
                         agg_dict["고객명"] = ("customer_name", "first")
@@ -1507,12 +1597,13 @@ def pg_today(market, sectors, customers, **_):
                             with st.expander(header):
                                 detail = po_sent[
                                     (po_sent["SO_ID"] == so_id) & (po_sent["PO_ID"] == po_id)
-                                ][["SO_ID", "PO_ID", "item_name", "po_qty", "po_total_ico", "order_date", "factory_exw", "noah_oc"]].copy()
-                                detail.columns = ["SO_ID", "PO_ID", "품목명", "수량", "ICO 금액", "발주일", "공장 EXW", "OC No."]
+                                ][["SO_ID", "PO_ID", "line_item", "item_name", "po_qty", "po_total_ico", "order_date", "factory_exw", "noah_oc"]].copy()
+                                detail.columns = ["SO_ID", "PO_ID", "Line", "품목명", "수량", "ICO 금액", "발주일", "공장 EXW", "OC No."]
                                 detail["ICO 금액"] = detail["ICO 금액"].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
                                 detail["수량"] = detail["수량"].apply(lambda v: int(v) if pd.notna(v) else 0)
                                 detail["발주일"] = detail["발주일"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
                                 detail["공장 EXW"] = detail["공장 EXW"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
+                                detail = detail.sort_values("Line").reset_index(drop=True)
                                 st.dataframe(detail, use_container_width=True, hide_index=True)
         else:
             st.success("PO 확정 지연 건 없음")
@@ -1599,11 +1690,11 @@ def pg_today(market, sectors, customers, **_):
                             detail = so_active[so_active["SO_ID"] == so_id][
                                 ["SO_ID", "line_item", "item_name", "os_name", "qty", "amount_krw", "po_receipt_date", "delivery_date", "status"]
                             ].drop_duplicates(subset=["SO_ID", "line_item"]).copy()
-                            detail = detail.drop(columns=["line_item"])
-                            detail.columns = ["SO_ID", "품목명", "OS name", "수량", "매출금액", "수주일", "납기일", "Status"]
+                            detail.columns = ["SO_ID", "Line", "품목명", "OS name", "수량", "매출금액", "수주일", "납기일", "Status"]
                             detail["PO_ID"] = po_ids_val
                             detail["공장발주일"] = ""
-                            detail = detail[["SO_ID", "PO_ID", "품목명", "OS name", "수량", "매출금액", "수주일", "공장발주일", "납기일", "Status"]]
+                            detail = detail[["SO_ID", "Line", "PO_ID", "품목명", "OS name", "수량", "매출금액", "수주일", "공장발주일", "납기일", "Status"]]
+                            detail = detail.sort_values("Line").reset_index(drop=True)
                             detail["수량"] = detail["수량"].apply(fmt_qty)
                             detail["매출금액"] = detail["매출금액"].apply(fmt_num)
                             detail["수주일"] = detail["수주일"].apply(fmt_date)
@@ -4317,6 +4408,132 @@ def pg_orderbook(market, sectors, customers, **_):
                                 st.dataframe(disp, use_container_width=True, hide_index=True)
                 else:
                     st.info("해외 물류 리드타임 데이터 없음")
+
+
+# ═══════════════════════════════════════════════════════════════
+# Page: 동기화 로그
+# ═══════════════════════════════════════════════════════════════
+def pg_sync_log(**_):
+    st.title("🔄 동기화 로그")
+    st.caption("Excel → SQLite 동기화 시 발생한 신규/수정/삭제 이력 (_sync_log 테이블)")
+
+    range_col, _pad = st.columns([1, 3])
+    with range_col:
+        range_opt = st.selectbox("조회 기간", ["7일", "30일", "90일", "전체"], index=1)
+    days_map = {"7일": 7, "30일": 30, "90일": 90, "전체": 0}
+    log_df = load_sync_log(days=days_map[range_opt])
+
+    if log_df.empty:
+        st.info("해당 기간에 동기화 변경 이력이 없습니다.")
+        return
+
+    # ── KPI ──
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("총 변경 건수", f"{len(log_df):,}")
+    c2.metric("신규", f"{(log_df['change_type'] == '신규').sum():,}")
+    c3.metric("수정", f"{(log_df['change_type'] == '수정').sum():,}")
+    c4.metric("삭제", f"{(log_df['change_type'] == '삭제').sum():,}")
+
+    # ── 필터 (2행) ──
+    r1c1, r1c2 = st.columns(2)
+    with r1c1:
+        sheet_sel = st.multiselect("시트", sorted(log_df["sheet_name"].unique()))
+    with r1c2:
+        type_sel = st.multiselect("변경 유형", ["신규", "수정", "삭제"])
+
+    r2c1, r2c2, r2c3 = st.columns([2, 2, 1])
+    with r2c1:
+        order_query = st.text_input(
+            "🔍 주문 통합 검색",
+            placeholder="SO/PO/DN 번호 중 하나 (예: ND-0429, SOD-2026-0427, DND-2026-0001)",
+            help="입력한 번호와 연관된 SO↔PO↔DN 이력을 함께 표시. PK 구조가 시트마다 달라서 한 번호로는 일부만 나오는 문제 해소.",
+        )
+    with r2c2:
+        pk_query = st.text_input(
+            "PK 원본 검색",
+            placeholder="예: ND-0429",
+            help="PK 컬럼 부분 일치 (확장 없음, 대소문자 무시)",
+        )
+    with r2c3:
+        col_query = st.text_input(
+            "컬럼명",
+            placeholder="예: Status",
+            help="변경된 컬럼명 부분 일치",
+        )
+
+    filtered = log_df
+    if sheet_sel:
+        filtered = filtered[filtered["sheet_name"].isin(sheet_sel)]
+    if type_sel:
+        filtered = filtered[filtered["change_type"].isin(type_sel)]
+
+    if order_query.strip():
+        related = resolve_related_ids(order_query)
+        if related:
+            st.caption(f"연관 ID {len(related)}개: `{'`, `'.join(related)}`")
+            mask = filtered["pk"].apply(
+                lambda pk: any(rid in pk for rid in related)
+            )
+            filtered = filtered[mask]
+        else:
+            st.warning(f"'{order_query}'에 연관된 ID를 찾을 수 없습니다.")
+            filtered = filtered.iloc[0:0]
+
+    if pk_query.strip():
+        filtered = filtered[filtered["pk"].str.contains(pk_query.strip(), case=False, na=False)]
+    if col_query.strip():
+        filtered = filtered[
+            filtered["column_name"].fillna("").str.contains(col_query.strip(), case=False, na=False)
+        ]
+
+    if filtered.empty:
+        st.warning("필터 조건에 해당하는 이력이 없습니다.")
+        return
+
+    # ── 동기화 세션 요약 (sync_time 단위) ──
+    st.subheader("동기화 세션별 요약")
+    session_g = filtered.groupby("sync_time").agg(
+        변경건수=("pk", "count"),
+        시트수=("sheet_name", "nunique"),
+        영향PK수=("pk", "nunique"),
+        신규=("change_type", lambda s: (s == "신규").sum()),
+        수정=("change_type", lambda s: (s == "수정").sum()),
+        삭제=("change_type", lambda s: (s == "삭제").sum()),
+    ).reset_index().sort_values("sync_time", ascending=False)
+    session_g.columns = ["동기화시각", "변경 건수", "시트 수", "영향 PK 수", "신규", "수정", "삭제"]
+    st.dataframe(session_g.head(50), use_container_width=True, hide_index=True)
+
+    # ── 시트별 변경 추이 차트 ──
+    st.subheader("시트별 변경 추이")
+    trend = filtered.copy()
+    trend["date"] = pd.to_datetime(trend["sync_time"]).dt.date
+    trend_g = trend.groupby(["date", "sheet_name"]).size().reset_index(name="건수")
+    if not trend_g.empty:
+        fig = px.bar(
+            trend_g, x="date", y="건수", color="sheet_name",
+            labels={"date": "날짜", "건수": "변경 건수", "sheet_name": "시트"},
+        )
+        fig.update_layout(height=360, margin=dict(t=30, b=30))
+        st.plotly_chart(fig, use_container_width=True)
+
+    # ── 상세 테이블 ──
+    st.subheader(f"상세 ({len(filtered):,}건)")
+    max_rows = st.slider("표시 행 수", 100, 5000, 500, step=100)
+    detail = filtered.head(max_rows).copy()
+    detail.columns = ["동기화시각", "시트", "유형", "PK", "컬럼", "이전값", "변경값"]
+    for c in ("이전값", "변경값"):
+        detail[c] = detail[c].fillna("")
+    detail["컬럼"] = detail["컬럼"].fillna("")
+    st.dataframe(detail, use_container_width=True, hide_index=True)
+
+    # ── CSV 다운로드 ──
+    csv_bytes = filtered.to_csv(index=False).encode("utf-8-sig")
+    st.download_button(
+        "필터 결과 CSV 다운로드",
+        data=csv_bytes,
+        file_name=f"sync_log_{_TODAY.strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+    )
 
 
 if __name__ == "__main__":
