@@ -17,6 +17,7 @@ SQLite DB에 업로드하여 데이터를 안전하게 백업합니다.
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 import warnings
@@ -28,7 +29,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 from po_generator.config import NOAH_SO_PO_DN_FILE, DB_FILE
 from po_generator.db_schema import (
     SYNC_SHEETS, get_sync_metadata, get_table_row_count,
-    ensure_sync_log_table,
+    ensure_sync_log_tables, create_sync_run, finalize_sync_run,
 )
 from po_generator.db_sync import SyncEngine, SyncSummary
 from po_generator.logging_config import setup_logging
@@ -120,15 +121,25 @@ def print_changes(summary: SyncSummary) -> None:
 
 
 def _to_text(val) -> str | None:
-    """로그 값 → DB 저장용 TEXT. None/빈 문자열은 NULL로 저장."""
+    """로그 값 → JSON-호환 텍스트. None/빈 문자열은 None으로 통일."""
     if val is None:
         return None
     s = str(val)
     return s if s else None
 
 
+def _jdump(obj) -> str:
+    """JSON 직렬화 — 한글 비-escape, 키 순서 유지."""
+    return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
+
+
 def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
-    """동기화 변경 내역을 _sync_log 테이블에 기록.
+    """동기화 변경 내역을 _sync_log v2 스키마에 기록.
+
+    record(레코드)당 1행으로 압축 저장:
+    - 신규: changes_json = {col: value, ...}, row_snapshot_json = NULL
+    - 수정: changes_json = {col: {old, new}, ...}, row_snapshot_json = NULL
+    - 삭제: changes_json = NULL, row_snapshot_json = {col: value, ...}
 
     sync 트랜잭션과 분리된 별도 트랜잭션으로 기록 — 로그 기록 실패가
     이미 commit된 sync 결과를 해치지 않도록.
@@ -137,40 +148,62 @@ def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
     if not has_changes:
         return
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     rows: list[tuple] = []
+    # placeholder sync_id — INSERT 시점에 채움
     for r in summary.results:
+        # 신규
         for detail in r.inserted_details:
-            pk_str = _format_pk(detail['pk'])
-            for col, val in detail['values'].items():
-                rows.append((now, r.sheet_name, '신규', pk_str, col, None, _to_text(val)))
+            pk_tuple = tuple(detail['pk'])
+            pk_json = _jdump(list(pk_tuple))
+            pk_disp = _format_pk(pk_tuple)
+            changes = {col: _to_text(val) for col, val in detail['values'].items()
+                       if _to_text(val) is not None}
+            rows.append((r.sheet_name, '신규', pk_json, pk_disp,
+                         _jdump(changes) if changes else None, None))
 
+        # 수정
         for detail in r.updated_details:
-            pk_str = _format_pk(detail['pk'])
-            for col, (old, new) in detail['changes'].items():
-                rows.append((now, r.sheet_name, '수정', pk_str, col,
-                             _to_text(old), _to_text(new)))
+            pk_tuple = tuple(detail['pk'])
+            pk_json = _jdump(list(pk_tuple))
+            pk_disp = _format_pk(pk_tuple)
+            changes = {col: {'old': _to_text(old), 'new': _to_text(new)}
+                       for col, (old, new) in detail['changes'].items()}
+            rows.append((r.sheet_name, '수정', pk_json, pk_disp,
+                         _jdump(changes) if changes else None, None))
 
+        # 삭제 (스냅샷 매핑)
+        snap_map = {tuple(s['pk']): s.get('snapshot', {}) for s in r.pruned_snapshots}
         for pk in r.pruned_pks:
-            rows.append((now, r.sheet_name, '삭제', _format_pk(pk), None, None, None))
+            pk_tuple = tuple(pk)
+            pk_json = _jdump(list(pk_tuple))
+            pk_disp = _format_pk(pk_tuple)
+            snap = snap_map.get(pk_tuple, {})
+            snap_clean = {k: _to_text(v) for k, v in snap.items() if _to_text(v) is not None}
+            rows.append((r.sheet_name, '삭제', pk_json, pk_disp,
+                         None, _jdump(snap_clean) if snap_clean else None))
 
     if not rows:
         return
 
     conn = sqlite3.connect(str(db_path))
     try:
-        ensure_sync_log_table(conn)
+        ensure_sync_log_tables(conn)
+        sync_id = create_sync_run(conn, dry_run=False)
+        # sync_id를 각 행 앞에 prepend
+        rows_with_id = [(sync_id, *r) for r in rows]
         conn.executemany(
             "INSERT INTO _sync_log "
-            "(sync_time, sheet_name, change_type, pk, column_name, old_value, new_value) "
+            "(sync_id, sheet_name, change_type, pk_json, pk_display, "
+            " changes_json, row_snapshot_json) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rows,
+            rows_with_id,
         )
+        finalize_sync_run(conn, sync_id, len(rows))
         conn.commit()
     finally:
         conn.close()
 
-    print(f"\n동기화 로그 저장: _sync_log 테이블 ({len(rows):,}행)")
+    print(f"\n동기화 로그 저장: _sync_log {len(rows):,}행 (sync_id={sync_id})")
 
 
 def show_info() -> int:

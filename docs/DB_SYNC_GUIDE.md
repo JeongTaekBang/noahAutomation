@@ -57,20 +57,58 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 | `last_sync` | 마지막 동기화 시각 (ISO) |
 | `row_count` | 동기화 후 행 수 |
 
-### 변경 이력 테이블 `_sync_log`
+### 동기화 세션 메타 `_sync_runs`
 
-동기화 시 발생한 신규/수정/삭제 이력을 누적 저장. 인덱스: `sync_time`, `(sheet_name, sync_time)`.
+한 번의 sync 호출 = 1개 `_sync_runs` row + N개 `_sync_log` row.
+
+| 컬럼 | 설명 |
+|------|------|
+| `sync_id` | AUTOINCREMENT PK — 모든 `_sync_log` 행의 FK |
+| `started_at` | 세션 시작 (`YYYY-MM-DD HH:MM:SS`) |
+| `ended_at` | 세션 종료 (변경 0건이면 NULL 가능) |
+| `actor` | 실행 사용자 (`USERNAME` env, fallback `os.getlogin()`) |
+| `host` | 실행 호스트 (`socket.gethostname()`) |
+| `dry_run` | 0=실제 commit, 1=dry-run (현재 dry-run은 _sync_log 안 씀) |
+| `total_changes` | 이번 세션 record 수 |
+| `note` | `migrated from v1` 등 주석 |
+
+### 변경 이력 테이블 `_sync_log` (v2)
+
+동기화 시 발생한 신규/수정/삭제 이력을 **record 단위**로 누적 저장. 인덱스: `sync_id`, `(sheet_name, sync_id)`, `pk_display`.
 
 | 컬럼 | 설명 |
 |------|------|
 | `id` | AUTOINCREMENT PK |
-| `sync_time` | 실행 시각 (`YYYY-MM-DD HH:MM:SS`) |
+| `sync_id` | `_sync_runs.sync_id` FK |
 | `sheet_name` | 소스 시트명 |
 | `change_type` | `신규` / `수정` / `삭제` |
-| `pk` | PK 값 (다중키는 `\|`로 구분) |
-| `column_name` | 변경된 컬럼명 (삭제 시 NULL) |
-| `old_value` | 기존 값 (신규/삭제 시 NULL) |
-| `new_value` | 새 값 (삭제 시 NULL) |
+| `pk_json` | PK JSON 배열, 예 `["SOD-2026-0001","1"]` (구조 보존, JSON 함수로 추출 가능) |
+| `pk_display` | PK 표시 문자열, 예 `"SOD-2026-0001 | 1"` (검색·UI 호환) |
+| `changes_json` | 신규/수정 정보 (JSON). 삭제 시 NULL. |
+| `row_snapshot_json` | 삭제 직전 전체 row JSON. 신규/수정 시 NULL. |
+
+`changes_json` 구조:
+
+| change_type | 형태 | 예시 |
+|---|---|---|
+| 신규 | `{col: value, ...}` | `{"SO_ID":"SOD-2026-0001","Status":"Open"}` |
+| 수정 | `{col: {old, new}, ...}` | `{"Status":{"old":"Open","new":"Closed"}}` |
+| 삭제 | NULL | (사용 안 함, snapshot에 보관) |
+
+`row_snapshot_json` 구조 (삭제 시):
+```json
+{"SO_ID":"SOD-2026-0001","Status":"Open","비고":"...","Customer":"..."}
+```
+
+### v1 → v2 마이그레이션
+
+기존 v1 (필드당 1행)을 v2 (record당 1행 + JSON)로 변환. 한 번만 실행.
+```bash
+python migrate_sync_log_v2.py             # 마이그레이션 실행 — _sync_log_legacy 백업 후 변환
+python migrate_sync_log_v2.py --dry-run   # 변환 통계만 출력 (DB 변경 없음)
+python migrate_sync_log_v2.py --drop-legacy  # 검증 끝나면 _sync_log_legacy 제거
+```
+실측: 115,831행 → 15,263행 (86.8% 압축), 76개 세션 복원.
 
 ## 동기화 동작
 
@@ -115,19 +153,37 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 **조회 방법:**
 
 1. **대시보드** — `streamlit run dashboard.py` → 사이드바 "동기화 로그" 페이지
-2. **SQL 직접 조회**:
+2. **SQL 직접 조회** (v2 스키마):
    ```sql
-   -- 최근 7일 수정 이력
-   SELECT sync_time, sheet_name, pk, column_name, old_value, new_value
-   FROM _sync_log
-   WHERE sync_time >= date('now', '-7 days')
-     AND change_type = '수정'
-   ORDER BY sync_time DESC;
+   -- 최근 7일 수정 이력 (세션 메타와 함께)
+   SELECT r.started_at, r.actor, l.sheet_name, l.pk_display, l.changes_json
+   FROM _sync_log l
+   JOIN _sync_runs r ON l.sync_id = r.sync_id
+   WHERE r.started_at >= date('now', '-7 days')
+     AND l.change_type = '수정'
+   ORDER BY l.id DESC;
 
    -- 특정 PK 변경 이력 추적
-   SELECT * FROM _sync_log
-   WHERE pk LIKE 'SOD-2026-0001%'
-   ORDER BY id;
+   SELECT r.started_at, l.change_type, l.changes_json, l.row_snapshot_json
+   FROM _sync_log l
+   JOIN _sync_runs r ON l.sync_id = r.sync_id
+   WHERE l.pk_display LIKE 'SOD-2026-0001%'
+   ORDER BY l.id;
+
+   -- 삭제된 행 복구 (row_snapshot_json 활용)
+   SELECT r.started_at, r.actor, l.sheet_name, l.pk_display,
+          json_extract(l.row_snapshot_json, '$.Status') AS deleted_status
+   FROM _sync_log l
+   JOIN _sync_runs r ON l.sync_id = r.sync_id
+   WHERE l.change_type = '삭제'
+     AND l.row_snapshot_json IS NOT NULL
+   ORDER BY r.started_at DESC;
+
+   -- 사용자/호스트별 동기화 활동
+   SELECT actor, host, COUNT(*) AS sessions, SUM(total_changes) AS changes
+   FROM _sync_runs
+   WHERE started_at >= date('now', '-30 days')
+   GROUP BY actor, host;
    ```
 
 **CSV에서 DB로 마이그레이션** (1회성, 이미 완료):

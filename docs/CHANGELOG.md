@@ -20,6 +20,73 @@
 
 ---
 
+## 2026-04-22: `_sync_log` v2 스키마 — 세션 메타·JSON 압축·삭제 스냅샷·actor 추가
+
+전날 추가한 `_sync_log` v1 (필드당 1행, sync_time 문자열 그룹핑)을 audit/CDC best practice에
+가까운 v2로 재설계. 기존 115,831행이 record 단위로 압축되어 15,263행 (**86.8% 압축**).
+
+### 변경 — `_sync_runs` 신설 + `_sync_log` 재구성
+
+- **`_sync_runs` (신설)** — 동기화 세션 메타
+  - `sync_id INTEGER PK AUTO`, `started_at`, `ended_at`, `actor`, `host`, `dry_run`, `total_changes`, `note`
+  - 동일 초에 두 번 sync 돌아도 sync_id로 명확히 구분 (이전 sync_time 문자열로는 충돌 가능)
+- **`_sync_log` v2** — record 단위 + JSON
+  - `id`, `sync_id` (FK → `_sync_runs`), `sheet_name`, `change_type`
+  - `pk_json` (JSON 배열 `["A","B"]`) + `pk_display` (검색용 문자열 `"A | B"`) — 구조/검색 둘 다 만족
+  - `changes_json` — 신규: `{col: val,…}`; 수정: `{col: {old,new},…}`; 삭제: NULL
+  - `row_snapshot_json` — 삭제: 삭제 직전 전체 row JSON; 신규/수정: NULL
+- 인덱스: `idx_sync_log_sync_id`, `idx_sync_log_sheet (sheet_name, sync_id)`, `idx_sync_log_pk (pk_display)`, `idx_sync_runs_started`
+
+### 핵심 가치
+
+| Best practice | v1 (어제) | v2 (오늘) |
+|---|---|---|
+| 세션 식별 | sync_time 문자열 (충돌 가능) | sync_id PK + actor/host 메타 |
+| 신규/수정 표현 | 컬럼당 N행 (팽창) | record당 1행 + JSON (압축) |
+| 삭제 audit | PK만 기록 (행 손실) | row_snapshot_json에 전체 row 보존 |
+| PK 구조 | `"A | B"` 문자열 (역파싱 필요) | pk_json (배열) + pk_display (검색용) 병행 |
+
+### 코드 변경
+
+- `po_generator/db_schema.py`
+  - `ensure_sync_log_tables()` — v2 스키마 DDL (구 `ensure_sync_log_table`은 별칭 유지)
+  - `create_sync_run(conn, dry_run, note) → sync_id` — 세션 시작 (actor=USERNAME, host=hostname 자동 캡처)
+  - `finalize_sync_run(conn, sync_id, total_changes)` — 종료 시각 + 카운트 갱신
+- `po_generator/db_sync.py`
+  - `SheetSyncResult.pruned_snapshots` 필드 추가 — 삭제 직전 row 캡처
+  - 두 prune 분기(빈 시트 / 일반 prune) 모두 DELETE 직전 `SELECT *` 로 스냅샷 확보
+- `sync_db.py`
+  - `write_sync_log_to_db()` 전면 재작성 — record 단위 INSERT, sync_id로 그룹화, snapshot 포함
+  - 한 sync 호출 = 1개 `_sync_runs` row + N개 `_sync_log` row
+- `migrate_sync_log_v2.py` (신규)
+  - 기존 `_sync_log` (v1) → `_sync_log_legacy` 백업 후 v2 INSERT
+  - `--dry-run` (시뮬레이션) / `--drop-legacy` (백업 테이블 삭제)
+  - 실행 결과: 115,831 → 15,263행 (86.8% 압축), 76개 sync_runs 복원
+
+### 대시보드 업데이트
+
+- `dashboard.py`
+  - `load_sync_log()` — `_sync_log` JOIN `_sync_runs` 조회로 변경 (actor/host 포함)
+  - `load_sync_runs()` 신규 — 세션 단위 로드
+  - `pg_sync_log()` — KPI 5개 (총 record + 신규/수정/삭제 + 동기화 세션수)
+  - **상세 보기 모드 토글** — 요약(record당 1행, "Status, 비고 외 3개") vs 펼침(컬럼당 1행, 기존 형태)
+  - 세션 요약 테이블이 `_sync_runs` 기반 → 사용자/호스트/dry_run/시작·종료시각 표시
+  - 컬럼명 검색이 changes_json/row_snapshot_json 모두에서 동작
+
+### 문서
+
+- `docs/DB_SYNC_GUIDE.md` — v2 스키마, JSON 예제, snapshot 활용법 추가
+- `CLAUDE.md` — `migrate_sync_log_v2.py` + `_sync_runs` 항목 반영
+
+### 마이그레이션 후 정리
+
+`_sync_log_legacy` 테이블은 검증 기간 동안 보존. 검증 끝나면:
+```bash
+python migrate_sync_log_v2.py --drop-legacy
+```
+
+---
+
 ## 2026-04-21: 동기화 로그 DB 이관 + 대시보드 조회 페이지 + 라인 번호 UI
 
 `sync_log.csv` (9.14 MB까지 증가해 Excel 열기 곤란)를 SQLite `_sync_log` 테이블로 이관.

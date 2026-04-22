@@ -116,8 +116,9 @@ Reconciliation layer:
 | `docs/CHANGELOG.md` | 버전별 변경 이력 |
 | `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
 | `po_generator/snapshot.py` | SnapshotEngine — 월별 마감, Variance 추적 |
-| `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`), `_sync_log` 이력 테이블 |
-| `migrate_sync_log.py` | `sync_log.csv` → `_sync_log` 테이블 1회성 마이그레이션 스크립트 |
+| `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`), `_sync_runs` + `_sync_log` v2 (record당 1행 + JSON, actor/host/sync_id/snapshot 포함) |
+| `migrate_sync_log.py` | `sync_log.csv` → `_sync_log` v1 테이블 1회성 마이그레이션 (구) |
+| `migrate_sync_log_v2.py` | `_sync_log` v1 → v2 (record 단위 + JSON 압축, _sync_runs 메타 분리, snapshot 추가) |
 | `sql/order_book.sql` | 이벤트 기반 Order Book SQL (Input/Output 이벤트 월만 행 생성, 재귀 CTE 없음) |
 | `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL (마감 고정 + Variance) |
 | `sql/order_book_variance.sql` | Variance 변동이유 분석 SQL (환율차이/판매가변경/수량변경/반올림 자동 분류, 납기변경 제외) |

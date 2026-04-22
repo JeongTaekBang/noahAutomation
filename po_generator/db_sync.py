@@ -49,6 +49,8 @@ class SheetSyncResult:
     # 삭제(prune): Excel에서 제거된 행
     pruned: int = 0
     pruned_pks: list[tuple] = field(default_factory=list)
+    # 삭제 직전 행 스냅샷 — 감사/복구용 ([{pk: tuple, snapshot: {col: value}}])
+    pruned_snapshots: list[dict] = field(default_factory=list)
 
     @property
     def success(self) -> bool:
@@ -237,10 +239,24 @@ class SyncEngine:
                     row_count = 0
                 if row_count > 0:
                     safe_pk_cols = [f'[{c}]' for c in config.pk_columns]
-                    db_pks_cursor = conn.execute(
-                        f'SELECT {", ".join(safe_pk_cols)} FROM [{config.table_name}]'
-                    )
-                    stale_pks = [_normalize_pk(row) for row in db_pks_cursor.fetchall()]
+                    # 전체 컬럼 + PK 함께 조회해서 스냅샷 확보
+                    all_cols_info = conn.execute(
+                        f'PRAGMA table_info([{config.table_name}])'
+                    ).fetchall()
+                    snapshot_cols = [c[1] for c in all_cols_info if c[1] != '_sync_updated_at']
+                    safe_snap_cols = [f'[{c}]' for c in snapshot_cols]
+                    db_rows = conn.execute(
+                        f'SELECT {", ".join(safe_snap_cols)} FROM [{config.table_name}]'
+                    ).fetchall()
+                    stale_pks = []
+                    snapshots = []
+                    pk_idx = [snapshot_cols.index(c) for c in config.pk_columns if c in snapshot_cols]
+                    for row in db_rows:
+                        pk_tuple = _normalize_pk(tuple(row[i] for i in pk_idx))
+                        stale_pks.append(pk_tuple)
+                        snap = {col: row[i] for i, col in enumerate(snapshot_cols)
+                                if row[i] is not None and str(row[i]) != ''}
+                        snapshots.append({'pk': pk_tuple, 'snapshot': snap})
                     if stale_pks:
                         pk_placeholders = ' AND '.join(
                             f'[{c}] = ?' for c in config.pk_columns
@@ -252,6 +268,7 @@ class SyncEngine:
                             )
                     result.pruned = len(stale_pks)
                     result.pruned_pks = stale_pks
+                    result.pruned_snapshots = snapshots
                     if stale_pks:
                         logger.info(
                             "%s: %d행 삭제(prune) — 시트 전체 비어있음",
@@ -392,7 +409,7 @@ class SyncEngine:
                     result.error_messages.append(msg)
                     logger.warning("%s - %s", config.sheet_name, msg)
 
-            # 8. Prune: Excel에서 삭제된 행 제거
+            # 8. Prune: Excel에서 삭제된 행 제거 (스냅샷 캡처 후 DELETE)
             safe_pk_cols = [f'[{c}]' for c in pk_cols]
             db_pks_cursor = conn.execute(
                 f'SELECT {", ".join(safe_pk_cols)} FROM [{config.table_name}]'
@@ -401,6 +418,19 @@ class SyncEngine:
             stale_pks = db_pks - excel_pks
             if stale_pks:
                 for stale_pk in stale_pks:
+                    # 삭제 직전 행 스냅샷 캡처 (감사/복구용)
+                    snap_row = conn.execute(
+                        f'SELECT {", ".join(safe_cols)} FROM [{config.table_name}] '
+                        f'WHERE {pk_placeholders}',
+                        list(stale_pk),
+                    ).fetchone()
+                    if snap_row is not None:
+                        snap = {col: snap_row[i] for i, col in enumerate(columns)
+                                if snap_row[i] is not None and str(snap_row[i]) != ''}
+                    else:
+                        snap = {}
+                    result.pruned_snapshots.append({'pk': stale_pk, 'snapshot': snap})
+
                     conn.execute(
                         f'DELETE FROM [{config.table_name}] WHERE {pk_placeholders}',
                         list(stale_pk),

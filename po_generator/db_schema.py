@@ -8,9 +8,12 @@ SQLite 테이블/PK 정의 및 스키마 관리.
 
 from __future__ import annotations
 
+import os
+import socket
 import sqlite3
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from po_generator.config import (
     SO_DOMESTIC_SHEET, SO_EXPORT_SHEET,
@@ -217,26 +220,83 @@ def create_snapshot_tables(conn: sqlite3.Connection) -> None:
     logger.debug("스냅샷 테이블 생성/확인 완료")
 
 
-def ensure_sync_log_table(conn: sqlite3.Connection) -> None:
-    """_sync_log 테이블 및 인덱스 생성 (idempotent).
+def ensure_sync_log_tables(conn: sqlite3.Connection) -> None:
+    """_sync_runs + _sync_log v2 스키마 생성 (idempotent).
 
-    Excel → SQLite 동기화 시 발생한 신규/수정/삭제 이력을 누적 저장합니다.
-    기존 sync_log.csv를 대체 — 파일 크기 증가 문제 해소 + 대시보드 조회 용이.
+    구조:
+    - _sync_runs : 동기화 세션 메타 (sync_id, started/ended_at, actor, host, dry_run, total_changes)
+    - _sync_log  : 변경 이벤트 (sync_id FK, sheet, type, pk_json, pk_display, changes_json, row_snapshot_json)
+                   record(레코드)당 1행. 신규/수정/삭제 정보는 changes_json 또는 row_snapshot_json으로 저장.
     """
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS _sync_log (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            sync_time    TEXT NOT NULL,
-            sheet_name   TEXT NOT NULL,
-            change_type  TEXT NOT NULL,
-            pk           TEXT NOT NULL,
-            column_name  TEXT,
-            old_value    TEXT,
-            new_value    TEXT
+        CREATE TABLE IF NOT EXISTS _sync_runs (
+            sync_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at     TEXT NOT NULL,
+            ended_at       TEXT,
+            actor          TEXT,
+            host           TEXT,
+            dry_run        INTEGER NOT NULL DEFAULT 0,
+            total_changes  INTEGER NOT NULL DEFAULT 0,
+            note           TEXT
         )
     """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_time  ON _sync_log (sync_time)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_sheet ON _sync_log (sheet_name, sync_time)")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _sync_log (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            sync_id           INTEGER NOT NULL,
+            sheet_name        TEXT NOT NULL,
+            change_type       TEXT NOT NULL,
+            pk_json           TEXT NOT NULL,
+            pk_display        TEXT NOT NULL,
+            changes_json      TEXT,
+            row_snapshot_json TEXT,
+            FOREIGN KEY (sync_id) REFERENCES _sync_runs(sync_id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_sync_id ON _sync_log (sync_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_sheet   ON _sync_log (sheet_name, sync_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_log_pk      ON _sync_log (pk_display)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_runs_started ON _sync_runs (started_at)")
+
+
+# 하위 호환용 별칭 — 기존 호출자(있다면)가 깨지지 않도록
+ensure_sync_log_table = ensure_sync_log_tables
+
+
+def _resolve_actor() -> str | None:
+    """실행 사용자 식별 — Windows/Unix 어디서든 동작."""
+    for env in ("USERNAME", "USER", "LOGNAME"):
+        v = os.environ.get(env)
+        if v:
+            return v
+    try:
+        return os.getlogin()
+    except OSError:
+        return None
+
+
+def create_sync_run(conn: sqlite3.Connection, dry_run: bool = False,
+                    note: str | None = None) -> int:
+    """동기화 세션 시작 → _sync_runs 행 INSERT 후 sync_id 반환."""
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    actor = _resolve_actor()
+    host = socket.gethostname()
+    cur = conn.execute(
+        "INSERT INTO _sync_runs (started_at, actor, host, dry_run, total_changes, note) "
+        "VALUES (?, ?, ?, ?, 0, ?)",
+        (started_at, actor, host, int(bool(dry_run)), note),
+    )
+    return cur.lastrowid
+
+
+def finalize_sync_run(conn: sqlite3.Connection, sync_id: int,
+                      total_changes: int) -> None:
+    """동기화 세션 종료 — ended_at + total_changes 갱신."""
+    ended_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "UPDATE _sync_runs SET ended_at=?, total_changes=? WHERE sync_id=?",
+        (ended_at, total_changes, sync_id),
+    )
 
 
 def get_sync_metadata(conn: sqlite3.Connection) -> dict[str, dict]:

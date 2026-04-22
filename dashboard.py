@@ -9,6 +9,7 @@ Usage:
 """
 
 import calendar
+import json
 import logging
 import sqlite3
 from datetime import datetime, timedelta
@@ -650,7 +651,44 @@ def resolve_related_ids(input_id: str) -> list[str]:
 
 @st.cache_data(ttl=60)
 def load_sync_log(days: int = 30) -> pd.DataFrame:
-    """_sync_log 테이블 로드. days=0이면 전체."""
+    """_sync_log v2 + _sync_runs 조인 로드. days=0이면 전체.
+
+    반환 컬럼: id, sync_id, sync_time(=started_at), actor, host, dry_run,
+    sheet_name, change_type, pk, pk_json, changes_json, row_snapshot_json
+    """
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        base_sql = (
+            "SELECT l.id, l.sync_id, r.started_at AS sync_time, r.actor, r.host, "
+            "       r.dry_run, l.sheet_name, l.change_type, "
+            "       l.pk_display AS pk, l.pk_json, l.changes_json, l.row_snapshot_json "
+            "FROM _sync_log l JOIN _sync_runs r ON l.sync_id = r.sync_id "
+        )
+        if days > 0:
+            cutoff = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
+            df = pd.read_sql_query(
+                base_sql + "WHERE r.started_at >= ? ORDER BY l.id DESC",
+                conn, params=(cutoff,),
+            )
+        else:
+            df = pd.read_sql_query(
+                base_sql + "ORDER BY l.id DESC",
+                conn,
+            )
+    except Exception as e:
+        logger.warning("동기화 로그 로드 실패: %s", e)
+        _record_load_error("Sync Log", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    return df
+
+
+@st.cache_data(ttl=60)
+def load_sync_runs(days: int = 30) -> pd.DataFrame:
+    """_sync_runs 테이블 로드 (세션 단위)."""
     conn = _conn()
     if not conn:
         return pd.DataFrame()
@@ -658,21 +696,21 @@ def load_sync_log(days: int = 30) -> pd.DataFrame:
         if days > 0:
             cutoff = (_TODAY - timedelta(days=days)).strftime("%Y-%m-%d")
             df = pd.read_sql_query(
-                "SELECT sync_time, sheet_name, change_type, pk, "
-                "       column_name, old_value, new_value "
-                "FROM _sync_log WHERE sync_time >= ? ORDER BY id DESC",
+                "SELECT sync_id, started_at, ended_at, actor, host, dry_run, "
+                "       total_changes, note "
+                "FROM _sync_runs WHERE started_at >= ? ORDER BY sync_id DESC",
                 conn, params=(cutoff,),
             )
         else:
             df = pd.read_sql_query(
-                "SELECT sync_time, sheet_name, change_type, pk, "
-                "       column_name, old_value, new_value "
-                "FROM _sync_log ORDER BY id DESC",
+                "SELECT sync_id, started_at, ended_at, actor, host, dry_run, "
+                "       total_changes, note "
+                "FROM _sync_runs ORDER BY sync_id DESC",
                 conn,
             )
     except Exception as e:
-        logger.warning("동기화 로그 로드 실패: %s", e)
-        _record_load_error("Sync Log", e)
+        logger.warning("동기화 세션 로드 실패: %s", e)
+        _record_load_error("Sync Runs", e)
         return pd.DataFrame()
     finally:
         conn.close()
@@ -4413,26 +4451,114 @@ def pg_orderbook(market, sectors, customers, **_):
 # ═══════════════════════════════════════════════════════════════
 # Page: 동기화 로그
 # ═══════════════════════════════════════════════════════════════
+def _explode_changes(df: pd.DataFrame) -> pd.DataFrame:
+    """record 단위 _sync_log 행 → 컬럼별 표시 행으로 펼침.
+
+    신규: changes_json {col: val} → (컬럼, 이전값='', 변경값=val)
+    수정: changes_json {col: {old, new}} → (컬럼, 이전값=old, 변경값=new)
+    삭제: row_snapshot_json 있으면 {col: val} → (컬럼, 이전값=val, 변경값='(삭제됨)')
+                              없으면 PK only 1행
+    """
+    out = []
+    for _, r in df.iterrows():
+        common = {
+            "동기화시각": r["sync_time"],
+            "sync_id": r["sync_id"],
+            "actor": r.get("actor") or "",
+            "시트": r["sheet_name"],
+            "유형": r["change_type"],
+            "PK": r["pk"],
+        }
+        ctype = r["change_type"]
+        if ctype == "신규":
+            try:
+                changes = json.loads(r["changes_json"]) if r["changes_json"] else {}
+            except Exception:
+                changes = {}
+            if changes:
+                for col, val in changes.items():
+                    out.append({**common, "컬럼": col, "이전값": "", "변경값": "" if val is None else str(val)})
+            else:
+                out.append({**common, "컬럼": "", "이전값": "", "변경값": ""})
+        elif ctype == "수정":
+            try:
+                changes = json.loads(r["changes_json"]) if r["changes_json"] else {}
+            except Exception:
+                changes = {}
+            if changes:
+                for col, ch in changes.items():
+                    old = ch.get("old") if isinstance(ch, dict) else None
+                    new = ch.get("new") if isinstance(ch, dict) else None
+                    out.append({**common, "컬럼": col,
+                                "이전값": "" if old is None else str(old),
+                                "변경값": "" if new is None else str(new)})
+            else:
+                out.append({**common, "컬럼": "", "이전값": "", "변경값": ""})
+        else:  # 삭제
+            try:
+                snap = json.loads(r["row_snapshot_json"]) if r["row_snapshot_json"] else {}
+            except Exception:
+                snap = {}
+            if snap:
+                for col, val in snap.items():
+                    out.append({**common, "컬럼": col,
+                                "이전값": "" if val is None else str(val),
+                                "변경값": "(삭제됨)"})
+            else:
+                out.append({**common, "컬럼": "(스냅샷 없음)", "이전값": "", "변경값": "(삭제됨)"})
+    return pd.DataFrame(out)
+
+
+def _changes_summary(row) -> str:
+    """record 1행에 대한 변경 요약 텍스트 (테이블 컴팩트 뷰용)."""
+    ctype = row["change_type"]
+    try:
+        if ctype == "삭제":
+            snap = json.loads(row["row_snapshot_json"]) if row["row_snapshot_json"] else {}
+            n = len(snap)
+            return f"삭제 (스냅샷 {n}컬럼)" if n else "삭제 (스냅샷 없음)"
+        ch = json.loads(row["changes_json"]) if row["changes_json"] else {}
+    except Exception:
+        return "(파싱 실패)"
+    n = len(ch)
+    if n == 0:
+        return "(변경 없음)"
+    if ctype == "신규":
+        return f"신규 ({n}컬럼)"
+    # 수정 — 첫 1~2개 컬럼명 노출
+    keys = list(ch.keys())
+    head = ", ".join(keys[:2])
+    return f"{head}" + (f" 외 {n-2}개" if n > 2 else "")
+
+
 def pg_sync_log(**_):
     st.title("🔄 동기화 로그")
-    st.caption("Excel → SQLite 동기화 시 발생한 신규/수정/삭제 이력 (_sync_log 테이블)")
+    st.caption("Excel → SQLite 동기화 시 발생한 신규/수정/삭제 이력 (_sync_log v2 + _sync_runs)")
 
-    range_col, _pad = st.columns([1, 3])
+    range_col, view_col, _pad = st.columns([1, 1, 2])
     with range_col:
         range_opt = st.selectbox("조회 기간", ["7일", "30일", "90일", "전체"], index=1)
+    with view_col:
+        view_mode = st.radio(
+            "상세 보기 모드", ["요약 (record 1행)", "펼침 (컬럼 단위)"],
+            horizontal=True, index=0,
+            help="요약: record당 1행, 변경 요약 텍스트. 펼침: 변경된 컬럼마다 1행.",
+        )
     days_map = {"7일": 7, "30일": 30, "90일": 90, "전체": 0}
     log_df = load_sync_log(days=days_map[range_opt])
+    runs_df = load_sync_runs(days=days_map[range_opt])
 
     if log_df.empty:
         st.info("해당 기간에 동기화 변경 이력이 없습니다.")
         return
 
     # ── KPI ──
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("총 변경 건수", f"{len(log_df):,}")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("총 record", f"{len(log_df):,}")
     c2.metric("신규", f"{(log_df['change_type'] == '신규').sum():,}")
     c3.metric("수정", f"{(log_df['change_type'] == '수정').sum():,}")
     c4.metric("삭제", f"{(log_df['change_type'] == '삭제').sum():,}")
+    c5.metric("동기화 세션", f"{log_df['sync_id'].nunique():,}")
 
     # ── 필터 (2행) ──
     r1c1, r1c2 = st.columns(2)
@@ -4446,19 +4572,19 @@ def pg_sync_log(**_):
         order_query = st.text_input(
             "🔍 주문 통합 검색",
             placeholder="SO/PO/DN 번호 중 하나 (예: ND-0429, SOD-2026-0427, DND-2026-0001)",
-            help="입력한 번호와 연관된 SO↔PO↔DN 이력을 함께 표시. PK 구조가 시트마다 달라서 한 번호로는 일부만 나오는 문제 해소.",
+            help="입력한 번호와 연관된 SO↔PO↔DN 이력을 함께 표시.",
         )
     with r2c2:
         pk_query = st.text_input(
             "PK 원본 검색",
             placeholder="예: ND-0429",
-            help="PK 컬럼 부분 일치 (확장 없음, 대소문자 무시)",
+            help="pk_display 부분 일치 (대소문자 무시)",
         )
     with r2c3:
         col_query = st.text_input(
             "컬럼명",
             placeholder="예: Status",
-            help="변경된 컬럼명 부분 일치",
+            help="changes_json/row_snapshot_json 키 부분 일치",
         )
 
     filtered = log_df
@@ -4481,27 +4607,48 @@ def pg_sync_log(**_):
 
     if pk_query.strip():
         filtered = filtered[filtered["pk"].str.contains(pk_query.strip(), case=False, na=False)]
+
     if col_query.strip():
-        filtered = filtered[
-            filtered["column_name"].fillna("").str.contains(col_query.strip(), case=False, na=False)
-        ]
+        q = col_query.strip().lower()
+        def _col_match(row):
+            blob = (row.get("changes_json") or "") + " " + (row.get("row_snapshot_json") or "")
+            return q in blob.lower()
+        filtered = filtered[filtered.apply(_col_match, axis=1)]
 
     if filtered.empty:
         st.warning("필터 조건에 해당하는 이력이 없습니다.")
         return
 
-    # ── 동기화 세션 요약 (sync_time 단위) ──
+    # ── 동기화 세션 요약 (_sync_runs 기반 — actor/host 포함) ──
     st.subheader("동기화 세션별 요약")
-    session_g = filtered.groupby("sync_time").agg(
-        변경건수=("pk", "count"),
-        시트수=("sheet_name", "nunique"),
-        영향PK수=("pk", "nunique"),
-        신규=("change_type", lambda s: (s == "신규").sum()),
-        수정=("change_type", lambda s: (s == "수정").sum()),
-        삭제=("change_type", lambda s: (s == "삭제").sum()),
-    ).reset_index().sort_values("sync_time", ascending=False)
-    session_g.columns = ["동기화시각", "변경 건수", "시트 수", "영향 PK 수", "신규", "수정", "삭제"]
-    st.dataframe(session_g.head(50), use_container_width=True, hide_index=True)
+    if not runs_df.empty:
+        # 필터된 sync_id만 표시
+        active_sids = set(filtered["sync_id"].unique())
+        runs_view = runs_df[runs_df["sync_id"].isin(active_sids)].copy()
+        # 필터된 결과의 시트별 카운트도 합쳐서 보여주기
+        per_run = filtered.groupby("sync_id").agg(
+            필터된_변경=("id", "count"),
+            시트수=("sheet_name", "nunique"),
+            영향PK수=("pk", "nunique"),
+            신규=("change_type", lambda s: (s == "신규").sum()),
+            수정=("change_type", lambda s: (s == "수정").sum()),
+            삭제=("change_type", lambda s: (s == "삭제").sum()),
+        ).reset_index()
+        runs_view = runs_view.merge(per_run, on="sync_id", how="left")
+        runs_view = runs_view[[
+            "sync_id", "started_at", "ended_at", "actor", "host", "dry_run",
+            "필터된_변경", "시트수", "영향PK수", "신규", "수정", "삭제", "note",
+        ]]
+        runs_view.columns = [
+            "sync_id", "시작", "종료", "사용자", "호스트", "dry_run",
+            "변경수(필터)", "시트수", "PK수", "신규", "수정", "삭제", "비고",
+        ]
+        runs_view["dry_run"] = runs_view["dry_run"].apply(lambda v: "Y" if v else "")
+        runs_view["비고"] = runs_view["비고"].fillna("")
+        runs_view["사용자"] = runs_view["사용자"].fillna("")
+        runs_view["호스트"] = runs_view["호스트"].fillna("")
+        runs_view["종료"] = runs_view["종료"].fillna("")
+        st.dataframe(runs_view.head(50), use_container_width=True, hide_index=True)
 
     # ── 시트별 변경 추이 차트 ──
     st.subheader("시트별 변경 추이")
@@ -4511,25 +4658,39 @@ def pg_sync_log(**_):
     if not trend_g.empty:
         fig = px.bar(
             trend_g, x="date", y="건수", color="sheet_name",
-            labels={"date": "날짜", "건수": "변경 건수", "sheet_name": "시트"},
+            labels={"date": "날짜", "건수": "변경 record 수", "sheet_name": "시트"},
         )
         fig.update_layout(height=360, margin=dict(t=30, b=30))
         st.plotly_chart(fig, use_container_width=True)
 
     # ── 상세 테이블 ──
-    st.subheader(f"상세 ({len(filtered):,}건)")
-    max_rows = st.slider("표시 행 수", 100, 5000, 500, step=100)
-    detail = filtered.head(max_rows).copy()
-    detail.columns = ["동기화시각", "시트", "유형", "PK", "컬럼", "이전값", "변경값"]
-    for c in ("이전값", "변경값"):
-        detail[c] = detail[c].fillna("")
-    detail["컬럼"] = detail["컬럼"].fillna("")
-    st.dataframe(detail, use_container_width=True, hide_index=True)
+    st.subheader(f"상세 (필터 결과 {len(filtered):,} record)")
+    max_rows = st.slider("표시 record 수", 100, 5000, 500, step=100)
+    page = filtered.head(max_rows).copy()
 
-    # ── CSV 다운로드 ──
+    if view_mode.startswith("요약"):
+        page["변경 요약"] = page.apply(_changes_summary, axis=1)
+        compact = page[[
+            "sync_time", "sync_id", "actor", "sheet_name", "change_type", "pk", "변경 요약",
+        ]].copy()
+        compact.columns = ["동기화시각", "sync_id", "사용자", "시트", "유형", "PK", "변경 요약"]
+        compact["사용자"] = compact["사용자"].fillna("")
+        st.dataframe(compact, use_container_width=True, hide_index=True)
+    else:
+        exploded = _explode_changes(page)
+        if exploded.empty:
+            st.info("표시할 컬럼 변경 없음")
+        else:
+            exploded = exploded[[
+                "동기화시각", "sync_id", "actor", "시트", "유형", "PK", "컬럼", "이전값", "변경값",
+            ]]
+            exploded.columns = ["동기화시각", "sync_id", "사용자", "시트", "유형", "PK", "컬럼", "이전값", "변경값"]
+            st.dataframe(exploded, use_container_width=True, hide_index=True)
+
+    # ── CSV 다운로드 (record 단위 raw + JSON) ──
     csv_bytes = filtered.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
-        "필터 결과 CSV 다운로드",
+        "필터 결과 CSV 다운로드 (record 단위, JSON 포함)",
         data=csv_bytes,
         file_name=f"sync_log_{_TODAY.strftime('%Y%m%d')}.csv",
         mime="text/csv",
