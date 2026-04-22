@@ -87,16 +87,28 @@ class SyncSummary:
 
 
 def _sanitize_value(val):
-    """pandas/numpy 값을 SQLite 호환 Python 타입으로 변환"""
+    """pandas/numpy 값을 SQLite 호환 Python 타입으로 변환.
+
+    정수값을 가진 float(예: 1.0, 2.0)은 int로 내림 — PK 비교 시 "1" vs "1.0"
+    불일치로 phantom 신규/삭제 쌍이 생기는 문제 방지.
+    """
     if val is None:
         return None
     if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
         return None
+    if isinstance(val, bool):
+        return bool(val)
     if isinstance(val, (np.integer,)):
         return int(val)
     if isinstance(val, (np.floating,)):
         f = float(val)
-        return None if math.isnan(f) or math.isinf(f) else f
+        if math.isnan(f) or math.isinf(f):
+            return None
+        if f.is_integer():
+            return int(f)
+        return f
+    if isinstance(val, float) and val.is_integer():
+        return int(val)
     if isinstance(val, np.bool_):
         return bool(val)
     if isinstance(val, (pd.Timestamp, datetime)):
@@ -109,19 +121,37 @@ def _sanitize_value(val):
 
 
 def _add_row_seq(df: pd.DataFrame, group_cols: tuple[str, ...]) -> pd.DataFrame:
-    """그룹 내 순번(_row_seq) 부여. Excel 행 순서 기준."""
+    """그룹 내 순번(_row_seq) 부여. Excel 행 순서 기준.
+
+    명시적으로 int로 cast — group key 컬럼에 숫자가 섞이면 cumcount 결과가
+    float64로 승격되어 DB에 "1.0"로 저장되는 버그 방지.
+    """
     existing = [c for c in group_cols if c in df.columns]
     if not existing:
         df['_row_seq'] = 1
         return df
     df = df.copy()
-    df['_row_seq'] = df.groupby(existing, sort=False).cumcount() + 1
+    df['_row_seq'] = (df.groupby(existing, sort=False).cumcount() + 1).astype(int)
     return df
 
 
 def _normalize_pk(pk: tuple) -> tuple:
-    """PK 값을 문자열 튜플로 정규화 — Python set 비교 시 타입 불일치 방지."""
-    return tuple('' if v is None else str(v) for v in pk)
+    """PK 값을 문자열 튜플로 정규화 — Python set 비교 시 타입 불일치 방지.
+
+    방어적으로 "1.0"/"2.0" 같은 정수-float 문자열 표현도 "1"/"2"로 통일.
+    (_sanitize_value가 먼저 처리하지만, DB에 과거 오염된 데이터가 있을 수 있어 여기서도 보정)
+    """
+    out = []
+    for v in pk:
+        if v is None:
+            out.append('')
+            continue
+        s = str(v)
+        # "1.0", "42.0" 같이 .0으로 끝나고 나머지가 숫자면 int 형태로 정규화
+        if s.endswith('.0') and s[:-2].lstrip('-').isdigit():
+            s = s[:-2]
+        out.append(s)
+    return tuple(out)
 
 
 class SyncEngine:

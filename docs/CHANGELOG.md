@@ -20,6 +20,33 @@
 
 ---
 
+## 2026-04-22: `_row_seq` float 타입 유출 버그 수정 — phantom 신규/삭제 쌍 해소
+
+PO_해외 시트 전체(474건)가 매 sync마다 "신규 + 삭제" 쌍으로 잘못 기록되던 현상 수정.
+
+### 원인
+
+`_add_row_seq()`의 `cumcount() + 1`이 `Line item` group key에 숫자 셀이 섞여 있으면 `float64`로 승격 → DB TEXT 컬럼에 `"1.0"`으로 저장. 다음 sync에서 Excel이 만든 `1` (int)과 비교 시 타입 불일치로 전체 행이 다른 PK로 인식되어:
+- 기존 DB의 `"1.0"` → Excel에 없는 것으로 판정 → **prune DELETE**
+- Excel의 `1` → DB에 없는 것으로 판정 → **INSERT**
+
+→ 같은 record가 신규+삭제로 중복 로그 (실제 데이터는 변경 없음).
+
+### 수정 — 3-layer 방어
+
+- `po_generator/db_sync.py: _add_row_seq()` — `.astype(int)` 명시적 cast
+- `po_generator/db_sync.py: _sanitize_value()` — float 중 정수값(`1.0`, `2.0`)은 `int(1)`, `int(2)`로 변환
+- `po_generator/db_sync.py: _normalize_pk()` — 방어적으로 `"1.0"` → `"1"` 정규화 (과거 오염 데이터 대응)
+- DB 클린업: `UPDATE po_export SET _row_seq = SUBSTR(...)` — 기존 474행의 `"1.0"` → `"1"`
+
+### 검증
+
+수정 후 sync 재실행:
+- 수정 전: PO_해외 474 phantom pair
+- 수정 후: PO_해외 실제 변경 1건(신규+stale 빈 행 삭제)만 기록
+
+---
+
 ## 2026-04-22: `_sync_log` v2 스키마 — 세션 메타·JSON 압축·삭제 스냅샷·actor 추가
 
 전날 추가한 `_sync_log` v1 (필드당 1행, sync_time 문자열 그룹핑)을 audit/CDC best practice에
