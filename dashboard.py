@@ -4820,10 +4820,193 @@ def _changes_summary(row) -> str:
     return f"{head}" + (f" 외 {n-2}개" if n > 2 else "")
 
 
-def pg_sync_log(**_):
-    st.title("🔄 동기화 로그")
-    st.caption("Excel → SQLite 동기화 시 발생한 신규/수정/삭제 이력 (_sync_log v2 + _sync_runs)")
+def _timeline_event_summary(row, max_inline: int = 3) -> tuple[str, str | None]:
+    """타임라인 카드용 변경 요약 → (markdown, 전체 JSON 또는 None).
 
+    신규/삭제: 첫 N개 컬럼값, 수정: 'col: old → new' 첫 N개.
+    """
+    ctype = row["change_type"]
+
+    def _parse(key: str):
+        raw = row.get(key)
+        if not raw:
+            return {}
+        try:
+            return json.loads(raw)
+        except Exception:
+            return None
+
+    if ctype == "신규":
+        ch = _parse("changes_json")
+        if ch is None:
+            return "(파싱 실패)", None
+        if not ch:
+            return "✨ **신규 등록** (컬럼 정보 없음)", None
+        items = list(ch.items())
+        head = items[:max_inline]
+        lines = [f"- **{k}**: `{v}`" for k, v in head]
+        more = f"\n- _외 {len(items) - max_inline}개 컬럼_" if len(items) > max_inline else ""
+        body = f"✨ **신규 등록** ({len(items)}개 컬럼)\n" + "\n".join(lines) + more
+        return body, json.dumps(ch, ensure_ascii=False, indent=2)
+
+    if ctype == "수정":
+        ch = _parse("changes_json")
+        if ch is None:
+            return "(파싱 실패)", None
+        if not ch:
+            return "✏️ **수정** (변경 내용 없음)", None
+        items = list(ch.items())
+        head = items[:max_inline]
+        lines = []
+        for k, v in head:
+            old = v.get("old") if isinstance(v, dict) else None
+            new = v.get("new") if isinstance(v, dict) else None
+            old_s = "_(비어있음)_" if old in (None, "") else f"`{old}`"
+            new_s = "_(비어있음)_" if new in (None, "") else f"`{new}`"
+            lines.append(f"- **{k}**: {old_s} → {new_s}")
+        more = f"\n- _외 {len(items) - max_inline}개 컬럼_" if len(items) > max_inline else ""
+        body = f"✏️ **수정** ({len(items)}개 컬럼)\n" + "\n".join(lines) + more
+        return body, json.dumps(ch, ensure_ascii=False, indent=2)
+
+    # 삭제
+    snap = _parse("row_snapshot_json")
+    if snap is None:
+        return "🗑️ **삭제** (스냅샷 파싱 실패)", None
+    if not snap:
+        return "🗑️ **삭제** (스냅샷 없음)", None
+    items = list(snap.items())
+    head = items[:max_inline]
+    lines = [f"- **{k}**: `{v}`" for k, v in head]
+    more = f"\n- _외 {len(items) - max_inline}개 컬럼_" if len(items) > max_inline else ""
+    body = f"🗑️ **삭제** (직전 스냅샷 {len(items)}개 컬럼)\n" + "\n".join(lines) + more
+    return body, json.dumps(snap, ensure_ascii=False, indent=2)
+
+
+def _render_order_timeline() -> None:
+    """주문번호 하나에 대한 SO↔PO↔DN 변경 이력 타임라인 카드."""
+    st.markdown(
+        "**주문번호 하나**(SO/PO/DN 중)를 입력하면 연관된 모든 시트의 변경 이력을 "
+        "시간순 카드로 보여줍니다."
+    )
+
+    order_id = st.text_input(
+        "주문번호",
+        placeholder="예: ND-0429, SOD-2026-0427, DND-2026-0001, NO-0001",
+        key="timeline_order_id",
+    )
+
+    if not order_id.strip():
+        st.info("👆 주문번호를 입력하세요.")
+        return
+
+    related = resolve_related_ids(order_id.strip())
+    if not related:
+        st.warning(f"'{order_id}'에 연관된 ID를 찾을 수 없습니다.")
+        return
+
+    log_df = load_sync_log(days=0)
+    if log_df.empty:
+        st.info("동기화 로그가 비어 있습니다.")
+        return
+
+    mask = log_df["pk"].apply(lambda pk: any(rid in pk for rid in related))
+    events = log_df[mask].copy()
+
+    if events.empty:
+        st.info(
+            f"'{order_id}' 관련 동기화 이력 없음 "
+            f"(연관 ID: {', '.join(sorted(related))})"
+        )
+        return
+
+    events["sync_time_dt"] = pd.to_datetime(events["sync_time"], errors="coerce")
+    events = events.sort_values("sync_time_dt", ascending=False).reset_index(drop=True)
+
+    st.markdown(
+        "**연관 ID** (" + str(len(related)) + "개): "
+        + " · ".join(f"`{rid}`" for rid in sorted(related))
+    )
+
+    n_evt = len(events)
+    n_c = int((events["change_type"] == "신규").sum())
+    n_u = int((events["change_type"] == "수정").sum())
+    n_d = int((events["change_type"] == "삭제").sum())
+    first_evt = events["sync_time_dt"].min()
+    last_evt = events["sync_time_dt"].max()
+    actors = events["actor"].dropna().unique()
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("총 이벤트", f"{n_evt:,}")
+    k2.metric("신규·수정·삭제", f"{n_c}·{n_u}·{n_d}")
+    if pd.notna(first_evt):
+        k3.metric("최초 기록", first_evt.strftime("%Y-%m-%d %H:%M"))
+    if pd.notna(last_evt):
+        k4.metric("최근 변경", last_evt.strftime("%Y-%m-%d %H:%M"))
+    if len(actors) > 0:
+        st.caption(f"관여자: {', '.join(sorted(actors))}")
+
+    # 카드 렌더링 상한 — 너무 많을 때 페이지 과부하 방지
+    max_cards = 200
+    if n_evt > max_cards:
+        st.warning(
+            f"이벤트 {n_evt}건 중 최근 {max_cards}건만 카드로 표시. "
+            "더 필요하면 '📋 탐색' 탭에서 조회하세요."
+        )
+        events = events.head(max_cards)
+
+    st.divider()
+
+    type_emoji = {"신규": "🟢", "수정": "🔵", "삭제": "🔴"}
+    sheet_emoji = {
+        "SO_국내": "🛒", "SO_해외": "🛒",
+        "PO_국내": "🏭", "PO_해외": "🏭",
+        "DN_국내": "🚚", "DN_해외": "🚚",
+        "선수금_국내": "💰",
+    }
+
+    prev_date = None
+    for _, r in events.iterrows():
+        ts = r["sync_time_dt"]
+        if pd.notna(ts):
+            cur_date = ts.date()
+            time_only = ts.strftime("%H:%M:%S")
+            date_long = ts.strftime("%Y-%m-%d (%a)")
+        else:
+            cur_date = None
+            time_only = "?"
+            date_long = "(시각 없음)"
+
+        if cur_date != prev_date:
+            st.markdown(f"##### 📅 {date_long}")
+            prev_date = cur_date
+
+        actor = r.get("actor") or "(unknown)"
+        sheet = r["sheet_name"]
+        pk = r["pk"]
+        ctype = r["change_type"]
+        icon = type_emoji.get(ctype, "⚪")
+        s_emoji = sheet_emoji.get(sheet, "📄")
+        sync_id = r["sync_id"]
+
+        summary, full_json = _timeline_event_summary(r)
+
+        with st.container(border=True):
+            top = st.columns([1, 5])
+            with top[0]:
+                st.markdown(f"### {icon}")
+                st.caption(f"⏰ {time_only}")
+                st.caption(f"👤 {actor}")
+                st.caption(f"🔖 sync #{sync_id}")
+            with top[1]:
+                st.markdown(f"**{s_emoji} {sheet}** · `{pk}`")
+                st.markdown(summary)
+                if full_json:
+                    with st.expander("전체 JSON 보기"):
+                        st.code(full_json, language="json")
+
+
+def _render_sync_log_explore() -> None:
+    """기존 탐색 뷰 — KPI · 필터 · 세션 요약 · 추이 · 상세 테이블."""
     range_col, view_col, _pad = st.columns([1, 1, 2])
     with range_col:
         range_opt = st.selectbox("조회 기간", ["7일", "30일", "90일", "전체"], index=1)
@@ -4952,6 +5135,123 @@ def pg_sync_log(**_):
         fig.update_layout(height=360, margin=dict(t=30, b=30))
         st.plotly_chart(fig, use_container_width=True)
 
+    # ── 날짜 × 컬럼 히트맵 (어느 필드가 자주 바뀌나) ──
+    st.subheader("날짜 × 컬럼 변경 히트맵")
+    st.caption("컬럼 단위 변경 빈도 — 삭제는 제외 (row 단위라 컬럼 분석 의미 없음)")
+
+    hm_sheets = sorted(filtered[filtered["change_type"].isin(["신규", "수정"])]["sheet_name"].unique())
+    if not hm_sheets:
+        st.info("신규·수정 이벤트 없음 (히트맵 표시 불가)")
+    else:
+        hc1, hc2, hc3 = st.columns([2, 2, 1])
+        with hc1:
+            hm_sheet = st.selectbox(
+                "시트 선택", hm_sheets, key="heatmap_sheet",
+                help="히트맵은 한 번에 한 시트만 표시 (시트마다 컬럼 집합이 달라서)",
+            )
+        with hc2:
+            hm_mode = st.radio(
+                "카운트 대상",
+                ["수정만", "신규+수정"],
+                index=0, horizontal=True,
+                key="heatmap_mode",
+                help=(
+                    "수정만: 사후 변경 패턴(어느 필드가 자주 수정되나) — 추천. "
+                    "신규+수정: 신규 1건 시 모든 컬럼이 한꺼번에 spike → 노이즈 큼."
+                ),
+            )
+        with hc3:
+            top_n = st.slider("표시 컬럼 Top N", 5, 50, 20, step=5, key="heatmap_top_n")
+
+        types_to_count = ["수정"] if hm_mode == "수정만" else ["신규", "수정"]
+        hm_df = filtered[
+            (filtered["sheet_name"] == hm_sheet)
+            & (filtered["change_type"].isin(types_to_count))
+        ].copy()
+        hm_df["_date"] = pd.to_datetime(hm_df["sync_time"], errors="coerce").dt.date
+
+        valid_dates = hm_df["_date"].dropna()
+        hm_records: list[dict] = []
+        if valid_dates.empty:
+            st.info(f"'{hm_sheet}' 유효한 날짜 데이터 없음")
+        else:
+            if valid_dates.min() == valid_dates.max():
+                # 단일 날짜 — 슬라이더 표시 의미 없음
+                d_start = d_end = valid_dates.min()
+                st.caption(f"날짜 범위: {d_start} (단일 날짜)")
+            else:
+                d_min, d_max = valid_dates.min(), valid_dates.max()
+                d_start, d_end = st.slider(
+                    "날짜 범위",
+                    min_value=d_min, max_value=d_max,
+                    value=(d_min, d_max),
+                    format="YYYY-MM-DD",
+                    key="heatmap_date_range",
+                    help=f"이 시트의 실제 데이터 범위: {d_min} ~ {d_max}",
+                )
+
+            hm_df = hm_df[(hm_df["_date"] >= d_start) & (hm_df["_date"] <= d_end)]
+
+            # 컬럼 단위로 펼쳐 (date, col) 튜플 수집
+            for _, r in hm_df.iterrows():
+                raw = r.get("changes_json")
+                if not raw:
+                    continue
+                try:
+                    ch = json.loads(raw)
+                except Exception:
+                    continue
+                if not isinstance(ch, dict) or not ch:
+                    continue
+                date_str = r["_date"].strftime("%Y-%m-%d") if r["_date"] else None
+                if not date_str:
+                    continue
+                for col in ch.keys():
+                    hm_records.append({"날짜": date_str, "컬럼": col})
+
+        if not hm_records:
+            st.info(f"'{hm_sheet}' 선택 범위 내 컬럼 변경 이벤트 없음")
+        else:
+            hm_flat = pd.DataFrame(hm_records)
+            top_cols = hm_flat["컬럼"].value_counts().head(top_n).index.tolist()
+            hm_filt = hm_flat[hm_flat["컬럼"].isin(top_cols)]
+            pivot = (
+                hm_filt.groupby(["컬럼", "날짜"]).size()
+                .unstack(fill_value=0)
+            )
+            # y축: 전체 빈도 내림차순 (높은 빈도가 위쪽)
+            pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+            # x축: 날짜 오름차순
+            pivot = pivot[sorted(pivot.columns)]
+
+            fig = px.imshow(
+                pivot.values,
+                x=list(pivot.columns),
+                y=list(pivot.index),
+                labels=dict(x="날짜", y="컬럼", color="변경 횟수"),
+                color_continuous_scale="Blues",
+                aspect="auto",
+            )
+            fig.update_layout(
+                height=max(300, 22 * len(pivot) + 100),
+                margin=dict(t=30, b=80, l=140),
+            )
+            fig.update_xaxes(
+                tickangle=-45,
+                tickmode="array",
+                tickvals=list(pivot.columns),
+                ticktext=list(pivot.columns),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            total_hits = int(hm_filt.shape[0])
+            total_all = int(hm_flat.shape[0])
+            st.caption(
+                f"시트 `{hm_sheet}` · 카운트: **{hm_mode}** · "
+                f"상위 {len(pivot)}개 컬럼 표시 "
+                f"({total_hits:,} / 전체 {total_all:,} 컬럼-이벤트)"
+            )
+
     # ── 상세 테이블 ──
     st.subheader(f"상세 (필터 결과 {len(filtered):,} record)")
     max_rows = st.slider("표시 record 수", 100, 5000, 500, step=100)
@@ -4984,6 +5284,17 @@ def pg_sync_log(**_):
         file_name=f"sync_log_{_TODAY.strftime('%Y%m%d')}.csv",
         mime="text/csv",
     )
+
+
+def pg_sync_log(**_):
+    st.title("🔄 동기화 로그")
+    st.caption("Excel → SQLite 동기화 시 발생한 신규/수정/삭제 이력 (_sync_log v2 + _sync_runs)")
+
+    tab_explore, tab_timeline = st.tabs(["📋 탐색", "🕐 주문 타임라인"])
+    with tab_explore:
+        _render_sync_log_explore()
+    with tab_timeline:
+        _render_order_timeline()
 
 
 if __name__ == "__main__":
