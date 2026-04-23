@@ -423,6 +423,160 @@ def load_po_exw_pending() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
+def load_so_dn_anomalies() -> pd.DataFrame:
+    """SO ↔ DN 라인 단위 이상(불일치) 검출.
+
+    각 (SO_ID, Line item) 단위로 두 가지 무결성 체크:
+      • 과다출고: SUM(DN.Qty) > SO.[Item qty]
+      • 단가 불일치: SO.[Sales Unit Price] × SUM(DN.Qty) ≠ SUM(DN.[Total Sales])
+                    (abs ≥ 1 AND 상대 ≥ 0.1% — 반올림 노이즈 제거)
+    둘 중 하나라도 해당되는 라인만 반환. 부분납품(DN 누계 < SO 수량)은 정상.
+    원화/외화 비교는 각 통화 원본끼리 — FX 환산 노이즈 제거.
+    """
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query("""
+            WITH so_lines AS (
+                SELECT SO_ID,
+                       CAST([Line item] AS INTEGER) AS line_item,
+                       CAST([Sales Unit Price] AS REAL) AS so_unit_price,
+                       CAST([Item qty] AS REAL)         AS so_qty,
+                       COALESCE([Customer name], '')    AS customer_name,
+                       COALESCE(Sector, '')             AS sector,
+                       COALESCE([OS name], '')          AS os_name,
+                       COALESCE([Item name], '')        AS item_name,
+                       COALESCE(Currency, 'KRW')        AS currency,
+                       '국내' AS market
+                FROM so_domestic
+                WHERE COALESCE(Status, '') != 'Cancelled'
+                UNION ALL
+                SELECT SO_ID,
+                       CAST([Line item] AS INTEGER),
+                       CAST([Sales Unit Price] AS REAL),
+                       CAST([Item qty] AS REAL),
+                       COALESCE([Customer name], ''),
+                       COALESCE(Sector, ''),
+                       COALESCE([OS name], ''),
+                       COALESCE([Item name], ''),
+                       COALESCE(Currency, 'USD'),
+                       '해외'
+                FROM so_export
+                WHERE COALESCE(Status, '') != 'Cancelled'
+            ),
+            dn_lines AS (
+                SELECT SO_ID,
+                       CAST([Line item] AS INTEGER) AS line_item,
+                       CAST(Qty AS REAL)            AS dn_qty,
+                       CAST([Unit Price] AS REAL)   AS dn_unit_price,
+                       CAST([Total Sales] AS REAL)  AS dn_amount,
+                       '국내' AS market
+                FROM dn_domestic
+                UNION ALL
+                SELECT SO_ID,
+                       CAST([Line item] AS INTEGER),
+                       CAST(Qty AS REAL),
+                       CAST([Unit Price] AS REAL),
+                       CAST([Total Sales] AS REAL),
+                       '해외'
+                FROM dn_export
+            )
+            SELECT s.SO_ID, s.line_item, s.market, s.customer_name, s.sector,
+                   s.os_name, s.item_name, s.currency,
+                   s.so_unit_price, s.so_qty,
+                   SUM(d.dn_qty)     AS dn_qty_total,
+                   SUM(d.dn_amount)  AS dn_amount_total,
+                   MIN(d.dn_unit_price) AS dn_unit_min,
+                   MAX(d.dn_unit_price) AS dn_unit_max,
+                   COUNT(*) AS dn_line_count
+            FROM so_lines s
+            INNER JOIN dn_lines d
+              ON d.SO_ID = s.SO_ID
+             AND d.line_item = s.line_item
+             AND d.market = s.market
+            GROUP BY s.SO_ID, s.line_item, s.market
+        """, conn)
+    except Exception as e:
+        logger.warning("SO/DN anomaly 로드 실패: %s", e)
+        _record_load_error("SO/DN Anomaly", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+    if df.empty:
+        return df
+
+    for c in ("so_unit_price", "so_qty", "dn_qty_total", "dn_amount_total",
+             "dn_unit_min", "dn_unit_max"):
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    # 과다출고: SO 수량 입력된 라인에서 DN 누계 > SO qty (0.001 tolerance)
+    has_so_qty = df["so_qty"].notna() & (df["so_qty"] > 0)
+    over_qty = df["dn_qty_total"] - df["so_qty"]
+    df["over_delivered"] = has_so_qty & (over_qty > 0.001)
+    df["over_qty"] = over_qty.where(df["over_delivered"], 0)
+
+    # 단가 불일치: SO 단가 입력된 라인에서 (expected vs actual) 임계값 초과
+    has_so_unit = df["so_unit_price"].notna() & (df["so_unit_price"] > 0)
+    df["expected_amount"] = df["so_unit_price"] * df["dn_qty_total"]
+    df["diff"] = df["dn_amount_total"] - df["expected_amount"]
+    df["abs_diff"] = df["diff"].abs()
+    exp_abs = df["expected_amount"].abs()
+    df["rel_diff"] = df["abs_diff"] / exp_abs.where(exp_abs > 0)
+    df["price_mismatch"] = (
+        has_so_unit & (df["abs_diff"] >= 1) & (df["rel_diff"] >= 0.001)
+    )
+
+    # 하나라도 이상이 있는 라인만 → 과다출고 먼저, 그 다음 금액 차이 큰 순
+    result = df[df["over_delivered"] | df["price_mismatch"]].copy()
+    if result.empty:
+        return result
+    result["_sort"] = (
+        result["over_delivered"].astype(int) * 1e15
+        + result["abs_diff"].fillna(0)
+    )
+    return result.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
+
+
+@st.cache_data(ttl=300)
+def load_dn_lines_by_so_line() -> pd.DataFrame:
+    """SO 라인별 DN 라인 detail — 단가 불일치 expander 용."""
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query("""
+            SELECT DN_ID, SO_ID,
+                   CAST([Line item] AS INTEGER) AS line_item,
+                   CAST(Qty AS REAL)            AS dn_qty,
+                   CAST([Unit Price] AS REAL)   AS dn_unit_price,
+                   CAST([Total Sales] AS REAL)  AS dn_amount,
+                   [출고일] AS dispatch_date,
+                   '국내' AS market
+            FROM dn_domestic
+            UNION ALL
+            SELECT DN_ID, SO_ID,
+                   CAST([Line item] AS INTEGER),
+                   CAST(Qty AS REAL),
+                   CAST([Unit Price] AS REAL),
+                   CAST([Total Sales] AS REAL),
+                   [선적일],
+                   '해외'
+            FROM dn_export
+        """, conn)
+    except Exception as e:
+        logger.warning("DN lines 로드 실패: %s", e)
+        _record_load_error("DN Lines", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    if not df.empty:
+        df["dispatch_date"] = pd.to_datetime(df["dispatch_date"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=300)
 def load_dn_tax_pending() -> pd.DataFrame:
     """국내 DN 세금계산서 미발행 건 — 출고 완료 but 세금계산서/선수금 세금계산서 모두 미발행."""
     conn = _conn()
@@ -2198,6 +2352,141 @@ def pg_today(market, sectors, customers, **_):
                 st.success("세금계산서 미발행 건 없음 (필터 기준)")
         else:
             st.success("세금계산서 미발행 건 없음")
+
+    # ── SO/DN 불일치 (과다출고 + 단가 불일치) ──
+    # 부분납품은 정상 — SO 수량 초과 출고, 또는 DN 단가가 SO와 다른 케이스만 검출
+    st.subheader("⚠️ SO/DN 불일치")
+    anomalies = load_so_dn_anomalies()
+    if not anomalies.empty:
+        if market != "전체":
+            anomalies = anomalies[anomalies["market"] == market]
+        if sectors:
+            anomalies = anomalies[anomalies["sector"].isin(sectors)]
+        if customers:
+            anomalies = anomalies[anomalies["customer_name"].isin(customers)]
+
+    if not anomalies.empty:
+        n_over = int(anomalies["over_delivered"].sum())
+        n_price = int(anomalies["price_mismatch"].sum())
+        n_both = int((anomalies["over_delivered"] & anomalies["price_mismatch"]).sum())
+        parts = []
+        if n_over:
+            parts.append(f"📦 과다출고 {n_over}건")
+        if n_price:
+            parts.append(f"💰 단가 불일치 {n_price}건")
+        both_tag = f" (동시 {n_both}건)" if n_both else ""
+        st.caption(" · ".join(parts) + both_tag)
+
+        dn_lines = load_dn_lines_by_so_line()
+
+        tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
+        for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
+            with tab:
+                mkt_m = anomalies[anomalies["market"] == mkt]
+                if mkt_m.empty:
+                    st.info(f"{mkt} 불일치 건 없음")
+                    continue
+
+                for r in mkt_m.itertuples():
+                    so_id = r.SO_ID
+                    line = r.line_item
+                    cust = r.customer_name
+                    sec = r.sector
+                    item = r.item_name or r.os_name
+                    cur = r.currency
+
+                    # 아이콘 조합
+                    icon = "🔴"
+                    if r.over_delivered:
+                        icon += "📦"
+                    if r.price_mismatch:
+                        icon += "💰"
+                    sec_tag = f" [{sec}]" if sec else ""
+
+                    # 헤더 요약 (조건부)
+                    summary_parts = []
+                    if r.over_delivered:
+                        so_q = int(r.so_qty) if pd.notna(r.so_qty) else 0
+                        dn_q = int(r.dn_qty_total) if pd.notna(r.dn_qty_total) else 0
+                        over = int(r.over_qty)
+                        summary_parts.append(
+                            f"수량 SO {so_q:,} / DN {dn_q:,} (**+{over:,}**)"
+                        )
+                    if r.price_mismatch:
+                        dn_min, dn_max = r.dn_unit_min, r.dn_unit_max
+                        dn_up_str = (
+                            f"{dn_min:,.2f}" if abs(dn_min - dn_max) < 0.005
+                            else f"{dn_min:,.2f}~{dn_max:,.2f}"
+                        )
+                        diff = r.diff
+                        rel_pct = (r.rel_diff * 100) if pd.notna(r.rel_diff) else 0.0
+                        arrow = "▲" if diff > 0 else "▼"
+                        summary_parts.append(
+                            f"단가 SO {r.so_unit_price:,.2f} / DN {dn_up_str} ({cur}) · "
+                            f"{arrow}{abs(diff):,.2f} ({rel_pct:.1f}%)"
+                        )
+                    header = (
+                        f"{icon} **{so_id}** Line {line}  {cust}{sec_tag} — {item} · "
+                        + " · ".join(summary_parts)
+                    )
+
+                    with st.expander(header):
+                        if r.over_delivered:
+                            st.markdown(
+                                f"**📦 과다출고**\n"
+                                f"- SO 수량: {int(r.so_qty):,}\n"
+                                f"- DN 누계 수량: {int(r.dn_qty_total):,} "
+                                f"(DN {int(r.dn_line_count)}건)\n"
+                                f"- 초과: **+{int(r.over_qty):,}**"
+                            )
+                        if r.price_mismatch:
+                            rel_pct = (r.rel_diff * 100) if pd.notna(r.rel_diff) else 0.0
+                            st.markdown(
+                                f"**💰 단가 불일치**\n"
+                                f"- SO 단가: {r.so_unit_price:,.4f} {cur}\n"
+                                f"- DN 누계 수량: {int(r.dn_qty_total):,}\n"
+                                f"- 예상 금액 (SO 단가 × DN 수량): {r.expected_amount:,.2f} {cur}\n"
+                                f"- 실제 DN 금액 합계: {r.dn_amount_total:,.2f} {cur}\n"
+                                f"- 차이: {r.diff:+,.2f} {cur} ({rel_pct:+.2f}%)"
+                            )
+                        if not dn_lines.empty:
+                            detail = dn_lines[
+                                (dn_lines["SO_ID"] == so_id)
+                                & (dn_lines["line_item"] == line)
+                                & (dn_lines["market"] == mkt)
+                            ].copy()
+                            if not detail.empty:
+                                if r.price_mismatch:
+                                    detail["예상금액"] = r.so_unit_price * detail["dn_qty"]
+                                    detail["차이"] = detail["dn_amount"] - detail["예상금액"]
+                                    cols = ["DN_ID", "dispatch_date", "dn_qty",
+                                            "dn_unit_price", "dn_amount",
+                                            "예상금액", "차이"]
+                                    names = ["DN_ID", "출고/선적일", "수량", "DN 단가",
+                                             "DN 금액", "예상 (SO×수량)", "차이"]
+                                else:
+                                    cols = ["DN_ID", "dispatch_date", "dn_qty",
+                                            "dn_unit_price", "dn_amount"]
+                                    names = ["DN_ID", "출고/선적일", "수량",
+                                             "DN 단가", "DN 금액"]
+                                detail = detail.sort_values("dispatch_date")[cols]
+                                detail.columns = names
+                                detail["출고/선적일"] = detail["출고/선적일"].apply(fmt_date)
+                                detail["수량"] = detail["수량"].apply(fmt_qty)
+                                for col in ("DN 단가", "DN 금액"):
+                                    detail[col] = detail[col].apply(
+                                        lambda v: f"{v:,.2f}" if pd.notna(v) else ""
+                                    )
+                                if r.price_mismatch:
+                                    detail["예상 (SO×수량)"] = detail["예상 (SO×수량)"].apply(
+                                        lambda v: f"{v:,.2f}" if pd.notna(v) else ""
+                                    )
+                                    detail["차이"] = detail["차이"].apply(
+                                        lambda v: f"{v:+,.2f}" if pd.notna(v) else ""
+                                    )
+                                st.dataframe(detail, use_container_width=True, hide_index=True)
+    else:
+        st.success("SO/DN 일치 — 과다출고·단가 불일치 없음")
 
 
 # ═══════════════════════════════════════════════════════════════
