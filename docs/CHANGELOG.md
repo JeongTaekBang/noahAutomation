@@ -20,6 +20,61 @@
 
 ---
 
+## 2026-04-28: SO 단가/수량 무단 변동 감지 — 데이터 입력 오류 검출
+
+오늘의 현황 페이지에 ⚠️ Customer PO 미변경 단가/수량 변동 섹션 추가. Excel에서 Customer PO는 그대로 두고 `Item qty` 또는 `Sales Unit Price` 가 바뀐 케이스를 감지 — 자릿수 실수(`126,000 → 1,260,000`), 단위 혼동(`25 → 99`) 같은 입력 오류와 매출/세금계산서/매출대사에 영향 가는 임의 변경을 잡기 위함.
+
+### 데이터 흐름
+
+`_sync_log` v2 (record-level JSON diff) 활용. SO 시트의 `change_type='수정'` 이벤트 중:
+
+1. `Customer PO` 가 함께 변경된 경우 → "허가된 변경"으로 자동 제외
+2. `Item qty` 또는 `Sales Unit Price` 가 실제로 변경됨
+3. 빈값(`None`/공백) ↔ 값 변경 제외 — 최초 입력/삭제는 변경 아님
+4. `dry_run=1` 동기화 제외
+5. 이미 ack된 건 제외
+
+### 노이즈 필터링 — 557건 → 53건
+
+1차 구현(감시 필드 4개: Item qty / Sales Unit Price / Sales amount / Sales amount KRW)에서 557건 발생. 분석 결과:
+
+- 456건(82%) — `Sales amount KRW` 단독 변경 (해외 환율 자동 재계산)
+- 359건(64%) — 변경량 < 1원 (부동소수점 반올림)
+- 단가/수량 실제 변경은 약 60건뿐
+
+→ `Sales amount(KRW)` 는 사람의 액션이 아닌 Excel 수식·환율 자동 재계산 결과라 감시 제외. `Item qty` / `Sales Unit Price` 만 + 빈값↔값 제외 → **53건**으로 87% 감소. 잔존 건 모두 검토 가치 있음.
+
+### Acknowledge 기반 dismiss
+
+매출/세금계산서/매출대사에 영향이 있어 "오늘만 표시 → 내일 사라짐" 패턴은 위험. 단순 N일 윈도우 대신 영구 ack 방식 채택.
+
+- 새 테이블 `_so_change_ack(sync_log_id PRIMARY KEY, acked_at, acked_by, note)` — `po_generator/db_schema.py` 에 `ensure_so_change_ack_table()` 추가
+- `LEFT JOIN _so_change_ack ... WHERE a.sync_log_id IS NULL` 로 자동 필터
+- 같은 SO·Line에 새로운 변경이 또 일어나면 별개 sync_log_id 라 다시 경고 (의도된 동작)
+
+### UI
+
+`pg_today()` 페이지 **맨 아래** (다른 검증 섹션과 일관). 0건이면 ✅ success 메시지로 명시 표시 ("Customer PO 미변경 단가/수량 변동 없음"). 1건 이상이면 노란 warning 배너 + expander 카드 목록.
+
+카드 구성:
+- 타이틀: `[국내] 업체명 · SOD-2026-0344 | 32 · Sales Unit Price: 3609000 → 4159000 · 감지시각`
+- 본문 상단: 업체 / Customer PO / SO 한 줄 강조
+- 변경 상세 표 (필드 / 이전값 / 변경값)
+- 우측 [✅ 확인 완료] 버튼 → ack INSERT + 캐시 무효화 + rerun
+
+### 한계 명시
+
+`sync_time` 은 **Excel에서 변경된 시점이 아니라 sync_db.py 가 변경을 감지한 시점**. Excel 셀 단위 timestamp가 없어 sync 시점이 추적 가능한 가장 정확한 신호. `actor` 도 마찬가지로 "sync 실행자"이지 "Excel 수정자"가 아님.
+
+### 신규/수정 파일
+
+- `po_generator/db_schema.py` — `_so_change_ack` DDL + ensure 헬퍼
+- `dashboard.py` — `load_so_unauth_changes()` / `_ack_so_change()` / `_render_so_unauth_changes()` / `_is_blank()` 추가, `pg_today()` 페이지 끝에 호출
+- `tasks/todo.md` — Review 섹션 기록
+- `tasks/lessons.md` — "변경 감지 / 알림 설계" 섹션 추가 (자동 재계산 파생필드 제외, 빈값↔값 제외, 분포 분석 우선)
+
+---
+
 ## 2026-04-23: 동기화 로그 직관성 개선 — 주문 타임라인 탭 + 날짜×컬럼 히트맵
 
 audit log 페이지가 너무 복잡해서 한 주문 검색 시 결과를 머릿속에서 재구성해야 했음. 두 가지 시각화를 추가해 raw event → narrative/pattern 변환을 UI가 대신 하도록 개선.

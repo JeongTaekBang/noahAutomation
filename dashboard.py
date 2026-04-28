@@ -11,6 +11,7 @@ Usage:
 import calendar
 import json
 import logging
+import os
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -21,7 +22,7 @@ import plotly.io as pio
 import streamlit as st
 
 from po_generator.config import DB_FILE
-from po_generator.db_schema import get_sync_metadata
+from po_generator.db_schema import ensure_so_change_ack_table, get_sync_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -871,6 +872,128 @@ def load_sync_runs(days: int = 30) -> pd.DataFrame:
     return df
 
 
+# SO 시트에서 단가/수량은 변경됐지만 Customer PO는 변경되지 않은 케이스를 감시.
+# 매출/세금계산서/매출대사에 영향이 있어 한 번이라도 못 보면 안 됨 → ack 기반 dismiss.
+#
+# Sales amount(KRW)는 의도적으로 제외 — Excel 수식 자동 재계산 / 환율 재계산으로
+# 사람의 액션 없이 매번 바뀌어 노이즈가 압도적임. 단가·수량이 사람이 만지는 1차 신호.
+_SO_WATCHED_FIELDS = ("Item qty", "Sales Unit Price")
+_SO_AUTHORIZE_FIELD = "Customer PO"
+_SO_SHEETS = ("SO_국내", "SO_해외")
+
+
+def _is_blank(v) -> bool:
+    """None / 빈문자열 → 빈 값으로 간주 (최초 입력 vs 변경 구분용)."""
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
+
+@st.cache_data(ttl=60)
+def load_so_unauth_changes() -> pd.DataFrame:
+    """Customer PO 변경 없이 수량/단가가 바뀐 미확인 SO 변경 로드.
+
+    반환 컬럼: sync_log_id, sync_id, sync_time, actor, sheet_name, pk, changes
+        changes: list[(field, old, new)] — 감시 필드만 필터됨
+    """
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        ensure_so_change_ack_table(conn)
+        sheets_in = ",".join("?" * len(_SO_SHEETS))
+        df = pd.read_sql_query(
+            f"""
+            SELECT l.id AS sync_log_id, l.sync_id,
+                   r.started_at AS sync_time, r.actor,
+                   l.sheet_name, l.pk_display AS pk, l.pk_json,
+                   l.changes_json
+            FROM _sync_log l
+            JOIN _sync_runs r ON l.sync_id = r.sync_id
+            LEFT JOIN _so_change_ack a ON a.sync_log_id = l.id
+            WHERE l.sheet_name IN ({sheets_in})
+              AND l.change_type = '수정'
+              AND a.sync_log_id IS NULL
+              AND r.dry_run = 0
+            ORDER BY l.id DESC
+            """,
+            conn, params=_SO_SHEETS,
+        )
+    except Exception as e:
+        logger.warning("SO 미확인 변경 로드 실패: %s", e)
+        _record_load_error("SO Unauthorized Changes", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+
+    if df.empty:
+        return df
+
+    rows = []
+    for _, r in df.iterrows():
+        try:
+            changes = json.loads(r["changes_json"]) if r["changes_json"] else {}
+        except Exception:
+            continue
+        if not isinstance(changes, dict):
+            continue
+        # Customer PO 가 함께 바뀐 경우는 "허가된 변경"으로 간주 → 제외
+        if _SO_AUTHORIZE_FIELD in changes:
+            continue
+        watched = []
+        for field in _SO_WATCHED_FIELDS:
+            ch = changes.get(field)
+            if not isinstance(ch, dict):
+                continue
+            old, new = ch.get("old"), ch.get("new")
+            if old == new:
+                continue
+            # 빈값 ↔ 값 (None/"" → 값 또는 그 반대): 최초 입력/삭제로 보고 제외
+            if _is_blank(old) or _is_blank(new):
+                continue
+            watched.append((field, old, new))
+        if not watched:
+            continue
+        # PK json → SO_ID 추출 (SO 시트 PK = (SO_ID, Line item))
+        so_id = None
+        try:
+            pk_list = json.loads(r["pk_json"]) if r["pk_json"] else []
+            if pk_list:
+                so_id = str(pk_list[0])
+        except Exception:
+            pass
+        rows.append({
+            "sync_log_id": int(r["sync_log_id"]),
+            "sync_id": int(r["sync_id"]),
+            "sync_time": r["sync_time"],
+            "actor": r.get("actor") or "",
+            "sheet_name": r["sheet_name"],
+            "pk": r["pk"],
+            "SO_ID": so_id,
+            "changes": watched,
+        })
+    return pd.DataFrame(rows)
+
+
+def _ack_so_change(sync_log_id: int, note: str | None = None) -> None:
+    """미확인 SO 변경을 ack 처리. 캐시 무효화는 호출자 책임."""
+    conn = _conn()
+    if not conn:
+        return
+    try:
+        ensure_so_change_ack_table(conn)
+        acked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        acked_by = os.environ.get("USERNAME") or os.environ.get("USER") or ""
+        conn.execute(
+            "INSERT OR IGNORE INTO _so_change_ack "
+            "(sync_log_id, acked_at, acked_by, note) VALUES (?, ?, ?, ?)",
+            (sync_log_id, acked_at, acked_by, note),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.warning("SO 변경 ack 실패 (id=%s): %s", sync_log_id, e)
+    finally:
+        conn.close()
+
+
 # ═══════════════════════════════════════════════════════════════
 # 헬퍼
 # ═══════════════════════════════════════════════════════════════
@@ -1227,6 +1350,74 @@ def build_calendar_data(so_pending: pd.DataFrame, dn: pd.DataFrame,
     for c in ("so_count", "so_amount", "dn_count", "dn_amount", "exw_count", "pk_count", "ship_count"):
         merged[c] = pd.to_numeric(merged[c], errors="coerce").fillna(0)
     return merged
+
+
+def _render_so_unauth_changes(market: str):
+    """Customer PO 변경 없이 SO 수량/단가가 바뀐 미확인 변경 경고 섹션.
+
+    매출/세금계산서/매출대사에 영향이 있어 한 번이라도 못 보면 안 됨 →
+    ack 기반 dismiss(영구 보존). 0건이면 success 메시지로 명시 표시.
+    """
+    st.subheader("⚠️ Customer PO 미변경 단가/수량 변동")
+
+    df = load_so_unauth_changes()
+
+    # 사이드바 market 필터 적용 (SO_국내 ↔ '국내', SO_해외 ↔ '해외')
+    if not df.empty and market != "전체":
+        target = "SO_국내" if market == "국내" else "SO_해외"
+        df = df[df["sheet_name"] == target]
+
+    if df.empty:
+        st.success("Customer PO 미변경 단가/수량 변동 없음")
+        return
+
+    n = len(df)
+    st.warning(
+        f"미확인 변경 **{n}건** — 고객 PO 변경 없이 수량 또는 단가가 바뀌었습니다. "
+        "각 행을 검토 후 **확인 완료** 처리하세요."
+    )
+
+    # SO 마스터에서 customer_name + customer_po 조회용 룩업
+    so_master = load_so()
+    so_lookup: dict[str, dict] = {}
+    if not so_master.empty:
+        so_lookup = (so_master[["SO_ID", "customer_name", "customer_po"]]
+                     .drop_duplicates(subset=["SO_ID"])
+                     .set_index("SO_ID")
+                     .to_dict("index"))
+
+    market_label = {"SO_국내": "국내", "SO_해외": "해외"}
+    for _, row in df.iterrows():
+        log_id = row["sync_log_id"]
+        mkt = market_label.get(row["sheet_name"], row["sheet_name"])
+        meta = so_lookup.get(row.get("SO_ID") or "", {})
+        cust = meta.get("customer_name") or "-"
+        cust_po = meta.get("customer_po") or "(없음)"
+        change_summary = " / ".join(
+            f"{f}: {'' if o is None else o} → {'' if n_ is None else n_}"
+            for f, o, n_ in row["changes"]
+        )
+        title = f"[{mkt}] {cust}  ·  {row['pk']}  ·  {change_summary}  ·  {row['sync_time']}"
+        with st.expander(title, expanded=False):
+            c1, c2 = st.columns([3, 1])
+            with c1:
+                meta_md = (
+                    f"**업체**: {cust}  ·  **Customer PO**: `{cust_po}`  ·  "
+                    f"**SO**: `{row['pk']}`"
+                )
+                st.markdown(meta_md)
+                detail = pd.DataFrame(
+                    [{"필드": f, "이전값": "" if o is None else str(o),
+                      "변경값": "" if n_ is None else str(n_)}
+                     for f, o, n_ in row["changes"]]
+                )
+                st.dataframe(detail, use_container_width=True, hide_index=True)
+                st.caption(f"sync_id={row['sync_id']}  ·  변경자: {row['actor'] or '-'}  ·  {row['sync_time']}")
+            with c2:
+                if st.button("✅ 확인 완료", key=f"ack_so_{log_id}", use_container_width=True):
+                    _ack_so_change(log_id)
+                    load_so_unauth_changes.clear()
+                    st.rerun()
 
 
 def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
@@ -2487,6 +2678,9 @@ def pg_today(market, sectors, customers, **_):
                                 st.dataframe(detail, use_container_width=True, hide_index=True)
     else:
         st.success("SO/DN 일치 — 과다출고·단가 불일치 없음")
+
+    # ── Customer PO 미변경 단가/수량 변동 (미확인) — 데이터 입력 오류 검출 ──
+    _render_so_unauth_changes(market)
 
 
 # ═══════════════════════════════════════════════════════════════

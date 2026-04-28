@@ -259,6 +259,19 @@ def ensure_sync_log_tables(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_sync_runs_started ON _sync_runs (started_at)")
 
 
+def ensure_so_change_ack_table(conn: sqlite3.Connection) -> None:
+    """SO 시트 무단 단가/수량 변경 확인(ack) 테이블 — idempotent."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS _so_change_ack (
+            sync_log_id INTEGER PRIMARY KEY,
+            acked_at    TEXT NOT NULL,
+            acked_by    TEXT,
+            note        TEXT,
+            FOREIGN KEY (sync_log_id) REFERENCES _sync_log(id)
+        )
+    """)
+
+
 # 하위 호환용 별칭 — 기존 호출자(있다면)가 깨지지 않도록
 ensure_sync_log_table = ensure_sync_log_tables
 
