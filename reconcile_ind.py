@@ -35,6 +35,7 @@ from po_generator.config import (
     PO_DOMESTIC_SHEET, PO_EXPORT_SHEET,
 )
 from po_generator.logging_config import setup_logging
+from po_generator.recon_paths import resolve_period_dir, iter_period_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,8 @@ def find_orderbook_file(period_code: str | None = None) -> Path | None:
     없으면 전체 하위 폴더에서 가장 최근 파일 반환.
     """
     if period_code:
-        period_dir = RECON_DIR / period_code.upper()
-        if not period_dir.exists():
+        period_dir = resolve_period_dir(RECON_DIR, period_code)
+        if period_dir is None:
             return None
         for f in period_dir.iterdir():
             if f.suffix == '.xlsx' and not f.name.startswith('~'):
@@ -72,9 +73,7 @@ def find_orderbook_file(period_code: str | None = None) -> Path | None:
 
     # period 없으면 전체 검색 (마스터 용도)
     candidates = []
-    for sub in RECON_DIR.iterdir():
-        if not sub.is_dir():
-            continue
+    for sub in iter_period_dirs(RECON_DIR):
         for f in sub.iterdir():
             if f.suffix == '.xlsx' and not f.name.startswith('~'):
                 if 'orderbook' in f.name.lower() and '결과' not in f.name:
@@ -507,7 +506,8 @@ def main() -> int:
             result['NOAH Sector'] = None
             result['매핑상태'] = None
 
-        ind_file = RECON_DIR / period / f"ind_code_결과_{period}.xlsx"
+        period_dir = resolve_period_dir(RECON_DIR, period) or (RECON_DIR / period)
+        ind_file = period_dir / f"ind_code_결과_{period}.xlsx"
         write_ind_code_output(result, ind_file)
         print(f"\n출력1: {ind_file}")
 

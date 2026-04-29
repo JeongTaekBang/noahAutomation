@@ -29,6 +29,7 @@ from po_generator.config import (
     DN_DOMESTIC_SHEET, DN_EXPORT_SHEET,
 )
 from po_generator.logging_config import setup_logging
+from po_generator.recon_paths import resolve_period_dir
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +53,9 @@ FX_DIFF_THRESHOLD = 100
 
 
 def find_ax_sales_file(period_code: str) -> Path | None:
-    """so_reconciliation/{period_code}/ 에서 AX_Sales 파일 찾기"""
-    period_dir = RECON_DIR / period_code.upper()
-    if not period_dir.exists():
+    """period 디렉터리(플랫 또는 연도 중첩)에서 AX_Sales 파일 찾기"""
+    period_dir = resolve_period_dir(RECON_DIR, period_code)
+    if period_dir is None:
         return None
     for f in period_dir.iterdir():
         if f.suffix == '.xlsx' and not f.name.startswith('~'):
@@ -482,7 +483,8 @@ def main() -> int:
     detail = detail.sort_values(sort_cols).reset_index(drop=True)
 
     # 6. Excel 출력
-    output_file = RECON_DIR / period / f"대사결과_SO_{period}.xlsx"
+    period_dir = resolve_period_dir(RECON_DIR, period) or (RECON_DIR / period)
+    output_file = period_dir / f"대사결과_SO_{period}.xlsx"
     write_output(summary, detail, output_file)
     print(f"\n출력: {output_file}")
 

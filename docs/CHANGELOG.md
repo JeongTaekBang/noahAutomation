@@ -20,6 +20,62 @@
 
 ---
 
+## 2026-04-29: PO 매입대사 — 연도 폴더 구조 + 양방향 합계 검증
+
+### 폴더 구조: 연도 중첩 지원
+
+`po_reconciliation/`, `so_reconciliation/`, `ind_code_reconciliation/` 모두 `RECON_DIR/{year}/{period}/` 레이아웃을 도입. 신규 헬퍼 `po_generator/recon_paths.py` 의 `resolve_period_dir()` / `iter_period_dirs()` 가 플랫(`{period}/`) / 중첩(`{year}/{period}/`) 두 레이아웃을 모두 자동 인식 — bat 메뉴는 그대로(P04만 인자로 넘김).
+
+- `ind_code_reconciliation/P03/` → `2026/P03/` 이동 (sector_검증.xlsx은 월 무관 파일이라 루트 유지)
+- 같은 period가 여러 연도에 있을 때 최신 연도 선택 + `[경고] po_reconciliation/P04 가 여러 연도에 존재 — 2027 사용 (다른 연도: 2026)` 출력
+- reconcile_po / reconcile_so / reconcile_ind 세 스크립트 모두 입력/출력 경로가 새 헬퍼로 통일
+
+### GRN 시트 자동 탐색 — `Purchase order` 컬럼 기준
+
+회계팀이 4월 GRN 파일에 빈 시트(`GRN List_04`)를 첫 번째로 추가하면서 `pd.read_excel(..., sheet_name=None)` 이 잘못된 시트를 읽어 `KeyError: 'Purchase order'` 발생. `load_grn()` 이 시트 목록을 훑어 `Purchase order` 컬럼이 있는 시트를 자동 선택하도록 변경 — 시트 순서/이름이 또 바뀌어도 안전.
+
+### 대사결과_PXX.xlsx — 양방향 합계 검증 블록
+
+대사 시트 표 아래(테이블 외부)에 합계 블록 자동 삽입:
+
+```
+── GRN 기준 ──
+GRN 합계         : 851M (전체 GRN, raw 합계와 일치)
+비교가능 합계    : 851M (PO/출고 매칭)
+비교불가         : 0M   (서비스/기타: GRN만 존재)
+
+── PO Invoiced P04 기준 ──
+PO Invoiced 합계 : 1,379M
+  GRN 매칭       : 826M (대사 시트 PO 합계)
+  GRN 미포함     : 553M (별도 시트 — AX에 GRN 처리 필요)
+  AX PO 미입력   : 0M   (AX_PO_미입력 시트)
+```
+
+- **검증식**: `GRN 매칭 + GRN 미포함 + AX PO 미입력 = PO Invoiced 합계` ✓
+- 사용자가 Excel에서 수동으로 SUBTOTAL 합계 행을 추가하다 컬럼 참조 오타로 GRN_금액 칸에 비교_금액 합이 표시되던 문제 해소
+- 합계 행은 Excel Table 범위 밖이라 정렬·필터 동작에 영향 없음
+
+### GRN_미포함 시트 — PO Invoiced 기준만 (출고-only 분리)
+
+이전에는 `(del_set | po_set) - grn_set` 으로 출고만 있고 PO Invoiced에는 없는 건까지 포함돼, 한 'PO_금액' 컬럼에 출고 금액이 섞여 합계가 부풀어 보였음(P04 기준 599M = 553M + 46M).
+
+매입 대사 의미를 분명히 하려고 `po_set - grn_set` 으로 단순화:
+
+- GRN_미포함 = "PO Invoiced 인데 당월 GRN에 없는 건 → AX에 GRN 처리 필요"
+- 컬럼: `AX PO`, `PO_금액` 두 개로 단순화 (47건 → 19건)
+- raw_data_미포함 시트도 자동으로 PO 측만 남아 일관성 확보
+- 범례·콘솔 요약 문구도 "AX에 GRN 처리 필요"로 명시
+
+### 신규/수정 파일
+
+- `po_generator/recon_paths.py` — 신규. `resolve_period_dir()`, `iter_period_dirs()`
+- `reconcile_po.py` — `find_file()` / `load_grn()` / `build_raw_data()` / `_append_totals_block()` 신설
+- `reconcile_so.py` — `find_ax_sales_file()` 경로 헬퍼 사용
+- `reconcile_ind.py` — `find_orderbook_file()` (period 있을 때 / 없을 때 모두) + `ind_code_결과` 출력 경로
+- `CLAUDE.md`, `docs/PO_RECONCILIATION.md` — 폴더 구조 설명 업데이트
+
+---
+
 ## 2026-04-28: SO 단가/수량 무단 변동 감지 — 데이터 입력 오류 검출
 
 오늘의 현황 페이지에 ⚠️ Customer PO 미변경 단가/수량 변동 섹션 추가. Excel에서 Customer PO는 그대로 두고 `Item qty` 또는 `Sales Unit Price` 가 바뀐 케이스를 감지 — 자릿수 실수(`126,000 → 1,260,000`), 단위 혼동(`25 → 99`) 같은 입력 오류와 매출/세금계산서/매출대사에 영향 가는 임의 변경을 잡기 위함.

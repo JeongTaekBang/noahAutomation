@@ -75,9 +75,9 @@ Reconciliation layer:
   reconcile_po.py → 3-source merge (Delivery + Internal PO + GRN) → 대사결과 + AX_PO_매핑
   reconcile_so.py → 2-source merge (AX Sales + NOAH DN) → 대사결과_SO (매출일 필터: 국내=출고일, 해외=선적일)
   reconcile_ind.py → Industry code 채움 (PO→SO 매핑) + SO Sector 검증 (마스터 Category 교차)
-  po_reconciliation/{period}/ — PO input/output files per period
-  so_reconciliation/{period}/ — SO input/output files per period
-  ind_code_reconciliation/{period}/ — Industry code input/output files per period
+  po_reconciliation/{year}/{period}/ — PO input/output files per period (flat `{period}/` 도 자동 호환)
+  so_reconciliation/{year}/{period}/ — SO input/output files per period
+  ind_code_reconciliation/{year}/{period}/ — Industry code input/output files per period (sector_검증.xlsx은 루트)
 ```
 
 **Data flow:** CLI → FinderService loads Excel data → validators check fields → generator fills template → output saved to `generated_*/` + history snapshot to `po_history/YYYY/M월/`.

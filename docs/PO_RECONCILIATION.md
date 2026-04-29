@@ -17,21 +17,22 @@ bat 메뉴에서 `[R]` 선택 후 월 코드 입력으로도 실행 가능.
 
 | 소스 | 파일 위치 | 조인 키 | 금액 컬럼 | 비고 |
 |------|----------|---------|----------|------|
-| 회계 GRN | `po_reconciliation/P03/Noah purchase_GRN_P03_2026.xlsx` | Purchase order (P######) | Cost amount physical | 회계팀 제공, **대사 기준** |
-| 공장 출고 | `po_reconciliation/P03/2026리스트_RCK_P03.xlsx` → Delivery 시트 | RCK ODER (ND-xxxx 또는 P######) | 계산서금액 | 공장 전체 출고 내역 |
+| 회계 GRN | `po_reconciliation/2026/P03/Noah purchase_GRN_P03_2026.xlsx` | Purchase order (P######) | Cost amount physical | 회계팀 제공, **대사 기준** |
+| 공장 출고 | `po_reconciliation/2026/P03/2026리스트_RCK_P03.xlsx` → Delivery 시트 | RCK ODER (ND-xxxx 또는 P######) | 계산서금액 | 공장 전체 출고 내역 |
 | 내부 PO | `NOAH_SO_PO_DN.xlsx` → PO_국내/PO_해외 시트 | PO_ID ↔ AX PO | Total ICO | 담당자가 관리하는 오더만 |
 
 ### 파일 구조
 
 ```
 po_reconciliation/
-  P03/
-    Noah purchase_GRN_P03_2026.xlsx    ← 회계 GRN
-    2026리스트_RCK_P03.xlsx            ← 공장 출고
-    대사결과_P03.xlsx                   ← 출력
+  2026/
+    P03/
+      Noah purchase_GRN_P03_2026.xlsx    ← 회계 GRN
+      2026리스트_RCK_P03.xlsx            ← 공장 출고
+      대사결과_P03.xlsx                   ← 출력
 ```
 
-월별로 폴더를 만들고 해당 월 파일을 넣는다. 스크립트는 월 코드(P03)로 폴더와 파일을 자동 매칭한다.
+연도/월별로 폴더를 만들고 해당 월 파일을 넣는다. 스크립트는 월 코드(P03)로 폴더와 파일을 자동 매칭하며, 연도 폴더가 없는 평면 구조(`po_reconciliation/P03/`)도 호환된다.
 
 ## 데이터 흐름도
 
@@ -201,7 +202,7 @@ po_reconciliation/
 
 ```
 1. 파일 찾기
-   po_reconciliation/{월코드}/ 에서 GRN, 출고리스트 파일 자동 탐색
+   po_reconciliation/{연도}/{월코드}/ (또는 평면 {월코드}/) 에서 GRN, 출고리스트 파일 자동 탐색
 
 2. 데이터 로드
    ├─ 내부 PO: PO_국내 + PO_해외 (PO_ID ~ Status), Cancelled 제외
