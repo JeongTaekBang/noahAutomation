@@ -355,10 +355,12 @@ def build_raw_data(delivery: pd.DataFrame, df_po: pd.DataFrame,
     for col in ['건수', '수량']:
         result[col] = result[col].fillna(0).astype(int)
 
-    # --- GRN 미포함: PO Invoiced에는 있지만 당월 GRN에 없는 건 (AX에 GRN 처리 필요) ---
-    not_in_grn_ax = po_set - grn_set
+    # --- GRN 미포함: 출고/PO에는 있지만 당월 GRN에 없는 건 (AX에 GRN 처리 필요) ---
+    not_in_grn_ax = (del_set | po_set) - grn_set
     if not_in_grn_ax:
-        missing = po_agg[po_agg['AX PO'].isin(not_in_grn_ax)][OUT_COLS].copy()
+        del_miss = del_agg[del_agg['AX PO'].isin(not_in_grn_ax)][OUT_COLS]
+        po_miss = po_agg[po_agg['AX PO'].isin(not_in_grn_ax)][OUT_COLS]
+        missing = pd.concat([del_miss, po_miss], ignore_index=True)
         missing['매칭상태'] = 'GRN 미포함'
         missing = missing.sort_values(['AX PO', '소스']).reset_index(drop=True)
         for col in ['건수', '수량']:
@@ -407,7 +409,7 @@ def print_summary_table(raw_data: pd.DataFrame, missing: pd.DataFrame,
         print(f"    서비스/기타:   {service} (GRN에만 존재)")
     print()
     print(f"  [GRN 미포함] {grn_not_included}건 (별도 시트)")
-    print(f"    PO Invoiced인데 당월 GRN에 없는 건 — AX에 GRN 처리 필요")
+    print(f"    출고/PO에는 있는데 당월 GRN에 없는 건 — AX에 GRN 처리 필요")
 
     # 불일치 상세
     if mismatched + mismatched_exp + mismatched_svc > 0:
@@ -560,45 +562,31 @@ def main() -> int:
 
     def _append_totals_block(
         ws, summary_df: pd.DataFrame,
-        po_period_df: pd.DataFrame, grn_df: pd.DataFrame,
-        ax_empty_df: pd.DataFrame,
+        ax_empty_df: pd.DataFrame, missing_summary_df: pd.DataFrame,
     ) -> None:
-        """대사 시트 표 아래에 양방향(GRN/PO) 합계 블록 추가."""
+        """대사 시트 표 아래에 합계 블록 추가."""
         grn_total = float(summary_df['GRN_금액'].sum())
         cmp_total = float(summary_df['비교_금액'].sum())
         gap = grn_total - cmp_total
-
-        po_total = float(po_period_df['Total ICO'].sum()) if len(po_period_df) else 0.0
-        grn_ax_set = set(grn_df['Purchase order'].astype(str).str.strip().unique())
-        po_in_grn = float(po_period_df.loc[
-            po_period_df['AX PO'].astype(str).str.strip().isin(grn_ax_set), 'Total ICO'
-        ].sum()) if len(po_period_df) else 0.0
-        po_not_in_grn = po_total - po_in_grn
+        miss_total = (float(missing_summary_df['매입금액'].sum())
+                      if '매입금액' in missing_summary_df.columns else 0.0)
         ax_empty_total = float(ax_empty_df['Total ICO'].sum()) if (
             len(ax_empty_df) and 'Total ICO' in ax_empty_df.columns
         ) else 0.0
 
         bold = Font(bold=True)
         rows = [
-            ('── GRN 기준 ──',     None,           None,           ''),
-            ('GRN 합계',            None,           grn_total,      '전체 GRN 금액 (raw 합계와 일치)'),
-            ('비교가능 합계',       cmp_total,      None,           'PO/출고에 매칭된 금액'),
-            ('비교불가',            None,           gap,            '서비스/기타 — GRN만 존재'),
-            ('', None, None, ''),
-            (f'── PO {po_period_df.attrs.get("status", "Invoiced")} 기준 ──',
-                                    None,           None,           ''),
-            ('PO Invoiced 합계',    po_total,       None,           '당월 Status=Invoiced PO 전체 (AX PO 있음)'),
-            ('  GRN 매칭',          po_in_grn,      None,           '대사 시트에 잡힌 PO 합계'),
-            ('  GRN 미포함',        po_not_in_grn,  None,           'GRN_미포함 시트 — AX에 GRN 처리 필요'),
-            ('  AX PO 미입력',      ax_empty_total, None,           'AX_PO_미입력 시트 (Invoiced인데 AX PO 없음)'),
+            ('GRN 합계',         None,           grn_total,      '전체 GRN (raw 합계와 일치)'),
+            ('비교가능 합계',    cmp_total,      None,           'PO/출고에 매칭된 금액'),
+            ('비교불가',         None,           gap,            '서비스/기타 — GRN만 존재'),
+            ('GRN 미포함 합계',  miss_total,     None,           '별도 시트 — AX에 GRN 처리 필요'),
+            ('AX PO 미입력',     ax_empty_total, None,           '별도 시트 — Invoiced인데 AX PO 없음'),
         ]
         start = ws.max_row + 2
-        bold_labels = {'GRN 합계', '비교가능 합계', '비교불가', 'PO Invoiced 합계'}
         for i, (label, b_val, c_val, note) in enumerate(rows):
             r = start + i
             cell = ws.cell(r, 1, label)
-            if label.startswith('──') or label in bold_labels:
-                cell.font = bold
+            cell.font = bold
             if b_val is not None:
                 c = ws.cell(r, 2, b_val)
                 c.number_format = '#,##0'
@@ -618,7 +606,7 @@ def main() -> int:
         ['불일치(서비스)', 'O', 'O', 'X', '출고 ≠ GRN (서비스/YTC)'],
         ['AX PO 누락', 'O', 'O', 'X', 'Product인데 PO시트에 AX PO 미입력'],
         ['서비스/기타', 'O', 'X', 'X', 'GRN에만 존재 (출고리스트에도 없음)'],
-        ['GRN 미포함', 'X', '-', 'O', 'PO Invoiced인데 GRN에 없음 — AX에 GRN 처리 필요 (별도 시트)'],
+        ['GRN 미포함', 'X', '-', '-', '출고/PO에는 있는데 GRN에 없음 — AX에 GRN 처리 필요 (별도 시트, 출처별)'],
     ], columns=['매칭상태', 'GRN', '출고리스트', '내부PO', '설명'])
 
     # GRN 대사 요약: AX PO별 1행
@@ -645,22 +633,30 @@ def main() -> int:
     summary = summary[['AX PO', '비교_금액', 'GRN_금액', '매칭상태']]
     summary = summary.sort_values('AX PO').reset_index(drop=True)
 
-    # GRN 미포함 요약: AX PO + PO_금액 (PO Invoiced 기준)
+    # GRN 미포함 요약: AX PO + 매입금액 (PO 우선, 없으면 출고)
     if len(missing) > 0:
-        missing_summary = (missing.groupby('AX PO')['금액'].sum()
-                           .reset_index()
-                           .rename(columns={'금액': 'PO_금액'})
-                           .sort_values('AX PO').reset_index(drop=True))
+        pivoted = (missing.pivot_table(
+                index='AX PO', columns='소스', values='금액',
+                aggfunc='sum', fill_value=0)
+            .reset_index())
+        rename_map = {po_name: 'PO_금액', del_name: '출고_금액'}
+        pivoted = pivoted.rename(columns=rename_map)
+        for col in ('PO_금액', '출고_금액'):
+            if col not in pivoted.columns:
+                pivoted[col] = 0
+        pivoted['매입금액'] = pivoted['PO_금액'].where(
+            pivoted['PO_금액'] > 0, pivoted['출고_금액'])
+        missing_summary = (pivoted[['AX PO', '매입금액']]
+                           .sort_values('매입금액', ascending=False)
+                           .reset_index(drop=True))
     else:
-        missing_summary = pd.DataFrame(columns=['AX PO', 'PO_금액'])
-
-    df_po_period.attrs['status'] = invoiced_status
+        missing_summary = pd.DataFrame(columns=['AX PO', '매입금액'])
 
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         summary.to_excel(writer, sheet_name='대사', index=False)
         _add_table(writer, '대사', '대사')
         _append_totals_block(writer.sheets['대사'], summary,
-                              df_po_period, grn, ax_empty)
+                              ax_empty, missing_summary)
 
         if len(missing_summary) > 0:
             missing_summary.to_excel(writer, sheet_name='GRN_미포함', index=False)
