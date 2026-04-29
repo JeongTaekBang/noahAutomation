@@ -1,5 +1,7 @@
 # PO 매입대사 (reconcile_po.py)
 
+> 운영자 관점 시각 가이드는 [매입대사_가이드.md](매입대사_가이드.md) 참고. 본 문서는 기술 참고용.
+
 ## 목적
 
 NOAH 공장에서 출고된 금액과 회계팀이 AX에 입력한 GRN(Goods Received Note) 금액이 AX PO 번호 기준으로 일치하는지 확인한다.

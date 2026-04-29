@@ -115,6 +115,7 @@ Reconciliation layer:
 | `docs/ERP_CONCEPTS.md` | ERP 개념 학습 노트 — SO-PO 라인 매칭, BOM/Kit, 정규화 수준 비교 |
 | `docs/CHANGELOG.md` | 버전별 변경 이력 |
 | `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
+| `docs/매입대사_가이드.md` | 운영자 관점 시각 가이드 — 데이터 흐름·합계 블록 해석·월별 액션 |
 | `po_generator/snapshot.py` | SnapshotEngine — 월별 마감, Variance 추적 |
 | `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`), `_sync_runs` + `_sync_log` v2 (record당 1행 + JSON, actor/host/sync_id/snapshot 포함) |
 | `migrate_sync_log.py` | `sync_log.csv` → `_sync_log` v1 테이블 1회성 마이그레이션 (구) |
