@@ -563,30 +563,66 @@ def main() -> int:
     def _append_totals_block(
         ws, summary_df: pd.DataFrame,
         ax_empty_df: pd.DataFrame, missing_summary_df: pd.DataFrame,
+        po_period_df: pd.DataFrame,
     ) -> None:
-        """대사 시트 표 아래에 합계 블록 추가."""
+        """대사 시트 표 아래에 합계 블록 추가 (GRN/미포함/PO Invoiced 검증)."""
         grn_total = float(summary_df['GRN_금액'].sum())
         cmp_total = float(summary_df['비교_금액'].sum())
         gap = grn_total - cmp_total
+
         miss_total = (float(missing_summary_df['매입금액'].sum())
                       if '매입금액' in missing_summary_df.columns else 0.0)
+        miss_product = miss_service = 0.0
+        if 'Type' in missing_summary_df.columns and len(missing_summary_df):
+            miss_product = float(
+                missing_summary_df.loc[missing_summary_df['Type'] == 'Product', '매입금액'].sum())
+            miss_service = float(
+                missing_summary_df.loc[missing_summary_df['Type'] == 'Service', '매입금액'].sum())
+
         ax_empty_total = float(ax_empty_df['Total ICO'].sum()) if (
             len(ax_empty_df) and 'Total ICO' in ax_empty_df.columns
         ) else 0.0
 
+        # PO Invoiced 합계 + 구분(국내/해외) breakdown
+        po_total = float(po_period_df['Total ICO'].sum()) if len(po_period_df) else 0.0
+        po_count = len(po_period_df)
+        po_qty = float(po_period_df['Item qty'].sum()) if (
+            'Item qty' in po_period_df.columns) else 0.0
+        dom_total = exp_total = 0.0
+        dom_count = exp_count = 0
+        dom_qty = exp_qty = 0.0
+        if '구분' in po_period_df.columns:
+            dom = po_period_df[po_period_df['구분'] == '국내']
+            exp = po_period_df[po_period_df['구분'] == '해외']
+            dom_total = float(dom['Total ICO'].sum()); dom_count = len(dom)
+            exp_total = float(exp['Total ICO'].sum()); exp_count = len(exp)
+            if 'Item qty' in po_period_df.columns:
+                dom_qty = float(dom['Item qty'].sum())
+                exp_qty = float(exp['Item qty'].sum())
+
         bold = Font(bold=True)
         rows = [
-            ('GRN 합계',         None,           grn_total,      '전체 GRN (raw 합계와 일치)'),
-            ('비교가능 합계',    cmp_total,      None,           'PO/출고에 매칭된 금액'),
-            ('비교불가',         None,           gap,            '서비스/기타 — GRN만 존재'),
-            ('GRN 미포함 합계',  miss_total,     None,           '별도 시트 — AX에 GRN 처리 필요'),
-            ('AX PO 미입력',     ax_empty_total, None,           '별도 시트 — Invoiced인데 AX PO 없음'),
+            ('GRN 합계',          None,           grn_total,      '전체 GRN (raw 합계와 일치)'),
+            ('비교가능 합계',     cmp_total,      None,           'PO/출고 매칭'),
+            ('비교불가',          None,           gap,            '서비스/기타 — GRN만 존재'),
+            ('', None, None, ''),
+            ('GRN 미포함 합계',   miss_total,     None,           '별도 시트 — AX에 GRN 처리 필요'),
+            ('  Product',         miss_product,   None,           'PO Invoiced (NOAH_SO_PO_DN 관리)'),
+            ('  Service',         miss_service,   None,           '출고만 (NOAH_SO_PO_DN 외)'),
+            ('AX PO 미입력',      ax_empty_total, None,           '별도 시트 — Invoiced인데 AX PO 없음'),
+            ('', None, None, ''),
+            ('PO Invoiced 합계',  po_total,       None,           f'당월 Invoiced PO 전체 ({po_count}건/{po_qty:,.0f}수량)'),
+            ('  국내',            dom_total,      None,           f'{dom_count}건/{dom_qty:,.0f}수량'),
+            ('  해외',            exp_total,      None,           f'{exp_count}건/{exp_qty:,.0f}수량'),
         ]
         start = ws.max_row + 2
+        bold_labels = {'GRN 합계', '비교가능 합계', '비교불가',
+                       'GRN 미포함 합계', 'AX PO 미입력', 'PO Invoiced 합계'}
         for i, (label, b_val, c_val, note) in enumerate(rows):
             r = start + i
             cell = ws.cell(r, 1, label)
-            cell.font = bold
+            if label in bold_labels:
+                cell.font = bold
             if b_val is not None:
                 c = ws.cell(r, 2, b_val)
                 c.number_format = '#,##0'
@@ -633,7 +669,9 @@ def main() -> int:
     summary = summary[['AX PO', '비교_금액', 'GRN_금액', '매칭상태']]
     summary = summary.sort_values('AX PO').reset_index(drop=True)
 
-    # GRN 미포함 요약: AX PO + 매입금액 (PO 우선, 없으면 출고)
+    # GRN 미포함 요약: AX PO + Type + 매입금액
+    #   Type — PO Invoiced(=NOAH_SO_PO_DN 관리 대상)에 있으면 'Product', 없으면 'Service'
+    #   매입금액 — PO 우선, 없으면 출고
     if len(missing) > 0:
         pivoted = (missing.pivot_table(
                 index='AX PO', columns='소스', values='금액',
@@ -646,17 +684,20 @@ def main() -> int:
                 pivoted[col] = 0
         pivoted['매입금액'] = pivoted['PO_금액'].where(
             pivoted['PO_금액'] > 0, pivoted['출고_금액'])
-        missing_summary = (pivoted[['AX PO', '매입금액']]
-                           .sort_values('매입금액', ascending=False)
+        po_invoiced_set = set(df_po_period['AX PO'].astype(str).str.strip())
+        pivoted['Type'] = pivoted['AX PO'].apply(
+            lambda ax: 'Product' if ax in po_invoiced_set else 'Service')
+        missing_summary = (pivoted[['AX PO', 'Type', '매입금액']]
+                           .sort_values(['Type', '매입금액'], ascending=[True, False])
                            .reset_index(drop=True))
     else:
-        missing_summary = pd.DataFrame(columns=['AX PO', '매입금액'])
+        missing_summary = pd.DataFrame(columns=['AX PO', 'Type', '매입금액'])
 
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         summary.to_excel(writer, sheet_name='대사', index=False)
         _add_table(writer, '대사', '대사')
         _append_totals_block(writer.sheets['대사'], summary,
-                              ax_empty, missing_summary)
+                              ax_empty, missing_summary, df_po_period)
 
         if len(missing_summary) > 0:
             missing_summary.to_excel(writer, sheet_name='GRN_미포함', index=False)
