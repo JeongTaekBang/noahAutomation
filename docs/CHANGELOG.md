@@ -20,6 +20,47 @@
 
 ---
 
+## 2026-04-30: PO 매입대사 — Confirmed 출고 제외 + 요약 시트 추가
+
+### Confirmed PO 매핑 출고 제외 — `(서비스 출고만 ∪ Invoiced this-month) − GRN`
+
+GRN_미포함이 Confirmed 상태 PO의 출고까지 잡아 잘못 집계되던 문제. 예: 출고리스트의 `ND-0232` → PO_국내 매핑 → AX PO=`P023207` (Status=Confirmed)이 P04 GRN_미포함에 Service로 분류돼 들어옴. P04 대사 범위 밖인데 노이즈로 보였음.
+
+원인: AX PO 매핑 테이블이 `df_po` (Status 무관, AX PO 있는 모든 PO) 기준으로 만들어져 Confirmed/기타 상태 PO도 매핑 후보. 매핑 자체는 AX_PO_매핑 export 등 다른 출력에 필요하니 유지하되, **미포함 후보 산출 시에만 필터** 적용.
+
+수정 (`build_raw_data`):
+```python
+service_del_set = del_set - po_all_ax_set    # 어떤 PO에도 등록 안 된 직접 P###### 출고
+not_in_grn_ax = (service_del_set | po_set) - grn_set
+```
+
+`po_all_ax_set` = `df_po_all` (Cancelled 제외, Status 무관)의 AX PO 전체. 출고 AX PO가 여기 포함되면 어떤 PO에 등록된 건이므로 매핑된 출고 — Invoiced 아니면 미포함 후보에서 제외. 직접 P###### 출고만 service로 카운트.
+
+`build_raw_data` 시그니처에 `df_po_all` 인자 추가, main()에서 전달.
+
+### 요약 시트 — `구분 × {Excel, AX, Total}` (첫 번째 탭)
+
+PO Invoiced 매입금액 / 회계 GRN 처리금액을 한 화면에 비교. Total = AX − Excel 차이로 GRN 처리 잔액 표시.
+
+```
+구분          | Excel         | AX            | Total (AX-Excel)
+Product(국내) |   491,535,008 |   387,327,138 |   -104,207,870
+Product(해외) | 1,034,921,076 |   999,095,301 |    -35,825,775
+Service       |    49,439,526 |    49,439,526 |             0
+Total         | 1,575,895,610 | 1,435,861,965 |  -140,033,645
+```
+
+- **Excel** = NOAH_SO_PO_DN Invoiced PXX (Product 국내/해외) + 출고리스트의 직접 P###### 행 (Service)
+- **AX** = GRN의 `Cost amount physical` — AX PO가 어느 PO 그룹에 속하는지로 분류
+- **Total** = AX − Excel = GRN 처리 필요분 (음수면 미처리, 양수면 초과 처리)
+- Total 합계가 대사 시트 합계 블록의 'GRN 미포함 합계' 와 일치 → 양방향 검증
+
+### 신규/수정 파일
+
+- `reconcile_po.py` — `build_raw_data()` 시그니처 + Confirmed 매핑 출고 필터 / `요약` 시트 생성
+
+---
+
 ## 2026-04-29: PO 매입대사 — 연도 폴더 구조 + 양방향 합계 검증
 
 ### 폴더 구조: 연도 중첩 지원

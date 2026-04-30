@@ -297,8 +297,14 @@ OUT_COLS = ['AX PO', '소스', 'Type', 'Customer', 'SECTOR', 'RCK_ODER', 'SO_ID'
 def build_raw_data(delivery: pd.DataFrame, df_po: pd.DataFrame,
                    grn: pd.DataFrame,
                    delivery_name: str = '', po_name: str = '',
-                   grn_name: str = '') -> tuple[pd.DataFrame, pd.DataFrame]:
-    """GRN 기준 long format raw_data + GRN 미포함 건 반환"""
+                   grn_name: str = '',
+                   df_po_all: pd.DataFrame | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """GRN 기준 long format raw_data + GRN 미포함 건 반환
+
+    Args:
+        df_po_all: 전체 PO (Cancelled 제외, Status 무관). 미포함 산출 시 출고의
+            매핑된 AX PO가 비-Invoiced PO 소속이면 제외하기 위해 사용.
+    """
     del_agg = _agg_delivery(delivery, delivery_name)
     po_agg = _agg_po(df_po, po_name)
     grn_agg = _agg_grn(grn, grn_name)
@@ -306,6 +312,14 @@ def build_raw_data(delivery: pd.DataFrame, df_po: pd.DataFrame,
     grn_set = set(grn_agg['AX PO'])
     del_set = set(del_agg['AX PO'])
     po_set = set(po_agg['AX PO'])
+
+    # df_po_all 의 모든 AX PO (Status 무관) — Confirmed 등 비-Invoiced 매핑 식별용
+    if df_po_all is not None and 'AX PO' in df_po_all.columns:
+        po_all_ax_set = set(
+            df_po_all['AX PO'].dropna().astype(str).str.strip()
+        ) - {'', 'nan'}
+    else:
+        po_all_ax_set = po_set
 
     # --- 매칭 상태: PO vs GRN 기준 (GRN 행에만 표시) ---
     status_map = {}
@@ -355,11 +369,17 @@ def build_raw_data(delivery: pd.DataFrame, df_po: pd.DataFrame,
     for col in ['건수', '수량']:
         result[col] = result[col].fillna(0).astype(int)
 
-    # --- GRN 미포함: 출고/PO에는 있지만 당월 GRN에 없는 건 (AX에 GRN 처리 필요) ---
-    not_in_grn_ax = (del_set | po_set) - grn_set
+    # --- GRN 미포함: 당월 GRN 처리 필요 건 ---
+    # 포함:
+    #   (a) PO Invoiced this-month (po_set) — GRN이 안 끝난 매입 PO
+    #   (b) 진짜 서비스 출고 (del_set 중 어느 PO에도 등록 안 된 직접 P###### 건)
+    # 제외:
+    #   비-Invoiced PO에서 매핑된 출고 (Confirmed 등 — 이번 달 대상 아님)
+    service_del_set = del_set - po_all_ax_set
+    not_in_grn_ax = (service_del_set | po_set) - grn_set
     if not_in_grn_ax:
-        del_miss = del_agg[del_agg['AX PO'].isin(not_in_grn_ax)][OUT_COLS]
-        po_miss = po_agg[po_agg['AX PO'].isin(not_in_grn_ax)][OUT_COLS]
+        del_miss = del_agg[del_agg['AX PO'].isin(not_in_grn_ax & service_del_set)][OUT_COLS]
+        po_miss = po_agg[po_agg['AX PO'].isin(not_in_grn_ax & po_set)][OUT_COLS]
         missing = pd.concat([del_miss, po_miss], ignore_index=True)
         missing['매칭상태'] = 'GRN 미포함'
         missing = missing.sort_values(['AX PO', '소스']).reset_index(drop=True)
@@ -542,6 +562,7 @@ def main() -> int:
         delivery_name=delivery_file.stem,
         po_name=NOAH_SO_PO_DN_FILE.stem,
         grn_name=grn_file.stem,
+        df_po_all=df_po_all,
     )
 
     # 5. Excel 출력
@@ -693,7 +714,52 @@ def main() -> int:
     else:
         missing_summary = pd.DataFrame(columns=['AX PO', 'Type', '매입금액'])
 
+    # 요약 시트: 구분 × (Excel/AX/Total) — Total은 사용자가 수동 입력
+    excel_dom = excel_exp = 0.0
+    po_dom_set: set[str] = set()
+    po_exp_set: set[str] = set()
+    if '구분' in df_po_period.columns:
+        excel_dom = float(df_po_period.loc[df_po_period['구분'] == '국내', 'Total ICO'].sum())
+        excel_exp = float(df_po_period.loc[df_po_period['구분'] == '해외', 'Total ICO'].sum())
+        po_dom_set = set(df_po_period.loc[df_po_period['구분'] == '국내', 'AX PO']
+                         .astype(str).str.strip())
+        po_exp_set = set(df_po_period.loc[df_po_period['구분'] == '해외', 'AX PO']
+                         .astype(str).str.strip())
+
+    direct_service_mask = ~delivery['RCK ODER'].astype(str).str.startswith(('ND-', 'NO-'))
+    excel_service = float(delivery.loc[direct_service_mask, '계산서금액'].sum())
+
+    grn_pos = grn['Purchase order'].astype(str).str.strip()
+    grn_amt = grn['Cost amount physical']
+    ax_dom = float(grn_amt[grn_pos.isin(po_dom_set)].sum())
+    ax_exp = float(grn_amt[grn_pos.isin(po_exp_set)].sum())
+    ax_service = float(grn_amt.sum()) - ax_dom - ax_exp
+
+    excel_total = excel_dom + excel_exp + excel_service
+    ax_total = ax_dom + ax_exp + ax_service
+    pivot_summary = pd.DataFrame({
+        '구분':  ['Product(국내)', 'Product(해외)', 'Service', 'Total'],
+        'Excel': [excel_dom, excel_exp, excel_service, excel_total],
+        'AX':    [ax_dom, ax_exp, ax_service, ax_total],
+        'Total': [ax_dom - excel_dom, ax_exp - excel_exp,
+                  ax_service - excel_service, ax_total - excel_total],
+    })
+
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+        pivot_summary.to_excel(writer, sheet_name='요약', index=False)
+        ws_sum = writer.sheets['요약']
+        # 숫자 포맷 + Total 행 굵게
+        for r in range(2, 6):
+            for c in (2, 3, 4):
+                cell = ws_sum.cell(r, c)
+                if cell.value is not None:
+                    cell.number_format = '#,##0'
+        for c in range(1, 5):
+            cell = ws_sum.cell(5, c)  # Total 행
+            cell.font = Font(bold=True)
+        for col_letter, width in (('A', 16), ('B', 18), ('C', 18), ('D', 18)):
+            ws_sum.column_dimensions[col_letter].width = width
+
         summary.to_excel(writer, sheet_name='대사', index=False)
         _add_table(writer, '대사', '대사')
         _append_totals_block(writer.sheets['대사'], summary,
