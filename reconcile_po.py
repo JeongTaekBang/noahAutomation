@@ -726,12 +726,18 @@ def main() -> int:
         po_exp_set = set(df_po_period.loc[df_po_period['구분'] == '해외', 'AX PO']
                          .astype(str).str.strip())
 
-    direct_service_mask = ~delivery['RCK ODER'].astype(str).str.startswith(('ND-', 'NO-'))
-    excel_service = float(delivery.loc[direct_service_mask, '계산서금액'].sum())
+    direct_mask = ~delivery['RCK ODER'].astype(str).str.startswith(('ND-', 'NO-'))
+    ytc_mask = direct_mask & (
+        delivery['Type'].astype(str).str.upper().str.strip() == 'YTC')
+    service_mask = direct_mask & ~ytc_mask
+    # YTC는 Product(국내)에 합산
+    excel_dom += float(delivery.loc[ytc_mask, '계산서금액'].sum())
+    excel_service = float(delivery.loc[service_mask, '계산서금액'].sum())
+    ytc_ax_set = set(delivery.loc[ytc_mask, 'AX PO'].astype(str).str.strip())
 
     grn_pos = grn['Purchase order'].astype(str).str.strip()
     grn_amt = grn['Cost amount physical']
-    ax_dom = float(grn_amt[grn_pos.isin(po_dom_set)].sum())
+    ax_dom = float(grn_amt[grn_pos.isin(po_dom_set | ytc_ax_set)].sum())
     ax_exp = float(grn_amt[grn_pos.isin(po_exp_set)].sum())
     ax_service = float(grn_amt.sum()) - ax_dom - ax_exp
 
@@ -741,22 +747,22 @@ def main() -> int:
         '구분':  ['Product(국내)', 'Product(해외)', 'Service', 'Total'],
         'Excel': [excel_dom, excel_exp, excel_service, excel_total],
         'AX':    [ax_dom, ax_exp, ax_service, ax_total],
-        'Total': [ax_dom - excel_dom, ax_exp - excel_exp,
+        'Diff':  [ax_dom - excel_dom, ax_exp - excel_exp,
                   ax_service - excel_service, ax_total - excel_total],
     })
 
     with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
         pivot_summary.to_excel(writer, sheet_name='요약', index=False)
         ws_sum = writer.sheets['요약']
+        total_row = len(pivot_summary) + 1  # header + data rows
         # 숫자 포맷 + Total 행 굵게
-        for r in range(2, 6):
+        for r in range(2, total_row + 1):
             for c in (2, 3, 4):
                 cell = ws_sum.cell(r, c)
                 if cell.value is not None:
                     cell.number_format = '#,##0'
         for c in range(1, 5):
-            cell = ws_sum.cell(5, c)  # Total 행
-            cell.font = Font(bold=True)
+            ws_sum.cell(total_row, c).font = Font(bold=True)
         for col_letter, width in (('A', 16), ('B', 18), ('C', 18), ('D', 18)):
             ws_sum.column_dimensions[col_letter].width = width
 

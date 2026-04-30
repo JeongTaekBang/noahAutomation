@@ -38,22 +38,24 @@ not_in_grn_ax = (service_del_set | po_set) - grn_set
 
 `build_raw_data` 시그니처에 `df_po_all` 인자 추가, main()에서 전달.
 
-### 요약 시트 — `구분 × {Excel, AX, Total}` (첫 번째 탭)
+### 요약 시트 — `구분 × {Excel, AX, Diff}` (첫 번째 탭)
 
-PO Invoiced 매입금액 / 회계 GRN 처리금액을 한 화면에 비교. Total = AX − Excel 차이로 GRN 처리 잔액 표시.
+PO Invoiced 매입금액 / 회계 GRN 처리금액을 한 화면에 비교. Diff = AX − Excel 로 GRN 처리 잔액 표시.
 
 ```
-구분          | Excel         | AX            | Total (AX-Excel)
-Product(국내) |   491,535,008 |   387,327,138 |   -104,207,870
+구분          | Excel         | AX            | Diff (AX-Excel)
+Product(국내) |   491,707,008 |   387,499,138 |   -104,207,870
 Product(해외) | 1,034,921,076 |   999,095,301 |    -35,825,775
-Service       |    49,439,526 |    49,439,526 |             0
+Service       |    49,267,526 |    49,267,526 |             0
 Total         | 1,575,895,610 | 1,435,861,965 |  -140,033,645
 ```
 
-- **Excel** = NOAH_SO_PO_DN Invoiced PXX (Product 국내/해외) + 출고리스트의 직접 P###### 행 (Service)
+- **Excel** = NOAH_SO_PO_DN Invoiced PXX (Product 국내/해외) + 출고리스트 직접 P###### 행
+  - 출고리스트의 Type=`YTC` 직접 출고는 Product(국내)에 합산 (서비스 분류 아님)
+  - Type=`Service` 또는 그 외 직접 출고는 Service 행
 - **AX** = GRN의 `Cost amount physical` — AX PO가 어느 PO 그룹에 속하는지로 분류
-- **Total** = AX − Excel = GRN 처리 필요분 (음수면 미처리, 양수면 초과 처리)
-- Total 합계가 대사 시트 합계 블록의 'GRN 미포함 합계' 와 일치 → 양방향 검증
+- **Diff** = AX − Excel = GRN 처리 필요분 (음수면 미처리, 양수면 초과 처리)
+- Diff 합계가 대사 시트 합계 블록의 'GRN 미포함 합계' 와 일치 → 양방향 검증
 
 ### 신규/수정 파일
 
