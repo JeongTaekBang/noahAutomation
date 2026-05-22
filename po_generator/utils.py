@@ -932,6 +932,10 @@ def resolve_weight_code(
       3. base 코드 (옵션 무시 폴백)
       4. 원본 Model 코드 (NA/SA 미제거 케이스 대비)
 
+    LCU 'L' 이중 인코딩 방지: 'SA005L' 처럼 Model명에 이미 LCU('L')가
+    들어 있는데 옵션열 LCU=Y 까지 중복으로 체크된 경우, 옵션 쪽 LCU를
+    버려 'L' 이 두 번 붙은 엉터리 코드(`005LLP` 등)를 만들지 않는다.
+
     Args:
         model: PO Model 값 (예: 'NA006')
         y_options: Y 로 체크된 옵션 컬럼명 리스트
@@ -947,8 +951,15 @@ def resolve_weight_code(
     # 무게 영향 옵션만, 우선순위 순서로
     wopts = [o for o in WEIGHT_OPTION_PRIORITY if o in y_options]
 
+    # Model명이 이미 'L'(LCU)로 끝나면 옵션열 LCU=Y 는 중복 표기 → 제거
+    base_has_lcu = base.endswith('L')
+    if base_has_lcu and 'LCU' in wopts:
+        wopts = [o for o in wopts if o != 'LCU']
+
     candidates: list[str] = []
-    if 'LCU' in wopts and 'PCU+PIU' in wopts:
+    # LCU + PCU+PIU 결합코드 …LP — Model명에 'L' 미포함일 때만 별도 생성.
+    # 'L' 포함 시엔 아래 옵션 루프의 base+'P'(= …LP) 가 곧 결합코드가 된다.
+    if 'LCU' in wopts and 'PCU+PIU' in wopts and not base_has_lcu:
         candidates.append(base + 'LP')
     for o in wopts:
         candidates.append(base + WEIGHT_OPTION_SUFFIX[o])

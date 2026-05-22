@@ -429,3 +429,20 @@ class TestResolveWeightCode:
         """비표준 Model + 빈 맵 → (None, None)"""
         assert resolve_weight_code('MS01', [], {}) == (None, None)
         assert resolve_weight_code('SCP-SET-SA', ['SCP'], {'006': 11.0}) == (None, None)
+
+    def test_lcu_double_encoding_blocked(self):
+        """Model명에 'L'(LCU) 내장 + 옵션열 LCU=Y 중복 → 'L' 이중 부착 차단
+
+        'SA005L' base='005L' 인데 옵션 LCU 까지 Y 면 결합분기가 '005LLP' 를
+        만들 수 있음. LCU 옵션을 버려 PCU 의 'P' 만 붙어 '005LP' 가 나와야 한다.
+        엉터리 코드 '005LLP'/'005LL' 가 맵에 있더라도 선택되면 안 됨.
+        """
+        wmap = {'005LP': 4.1, '005LLP': 999.0, '005LL': 888.0}
+        assert resolve_weight_code(
+            'SA005L', ['LCU', 'PCU+PIU'], wmap
+        ) == (4.1, '005LP')
+
+    def test_lcu_option_only_with_L_model_no_double(self):
+        """Model명 'L' 내장 + 옵션 LCU 단독 → base '005L' (005LL 아님)"""
+        wmap = {'005L': 3.8, '005LL': 777.0}
+        assert resolve_weight_code('SA005L', ['LCU'], wmap) == (3.8, '005L')

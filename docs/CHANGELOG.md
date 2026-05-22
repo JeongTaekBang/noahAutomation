@@ -40,6 +40,9 @@ PL의 Net Weight(G열)는 `_enrich_with_weight()`가 SO_해외 `Model code`로 W
 | `pl_generator.py` | Total 행 G열 수식 `SUM` → `SUMPRODUCT(Qty,단위중량)` |
 | `tests/test_utils.py` | `normalize_line_item`/`_po_base_code`/`resolve_weight_code` 단위 테스트 추가 |
 
+### 후속 수정 — LCU 'L' 이중 인코딩 차단
+`resolve_weight_code()`: `SA005L` 처럼 Model명에 이미 LCU('L')가 들어 있는데 옵션열 `LCU=Y` 까지 중복 체크되면 결합분기가 `005LLP` 같은 'L' 이중 코드를 만들 수 있었음. Model명이 'L'로 끝나면 옵션 LCU를 제거하고, 결합코드 `…LP`는 Model명에 'L' 미포함일 때만 별도 생성하도록 수정. 실데이터 영향 0건(LP 결합 34건·전체 매칭 불변), 순수 안전망. 엣지케이스 단위 테스트 2개 추가.
+
 ---
 
 ## 2026-04-30: PO 매입대사 — Confirmed 출고 제외 + 요약 시트 추가
