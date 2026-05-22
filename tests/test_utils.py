@@ -14,6 +14,9 @@ from po_generator.utils import (
     load_noah_po_lists,
     find_order_data,
     escape_excel_formula,
+    normalize_line_item,
+    resolve_weight_code,
+    _po_base_code,
 )
 
 
@@ -334,3 +337,95 @@ class TestEscapeExcelFormula:
         assert escape_excel_formula("A=B+C") == "A=B+C"
         assert escape_excel_formula("test@example.com") == "test@example.com"
         assert escape_excel_formula("1+1=2") == "1+1=2"
+
+
+class TestNormalizeLineItem:
+    """normalize_line_item 함수 테스트"""
+
+    def test_integer(self):
+        assert normalize_line_item(1) == '1'
+
+    def test_float_integral(self):
+        """1.0 → '1' (pandas 가 float 로 읽어도 정수 키로 정규화)"""
+        assert normalize_line_item(1.0) == '1'
+        assert normalize_line_item(12.0) == '12'
+
+    def test_float_string(self):
+        """'1.0' 문자열도 '1' 로 정규화"""
+        assert normalize_line_item('1.0') == '1'
+
+    def test_plain_string(self):
+        assert normalize_line_item('2') == '2'
+        assert normalize_line_item('  3 ') == '3'
+
+    def test_nan_and_none(self):
+        assert normalize_line_item(float('nan')) == ''
+        assert normalize_line_item(None) == ''
+
+
+class TestPoBaseCode:
+    """_po_base_code 함수 테스트 (NA/SA 접두어 제거)"""
+
+    def test_na_prefix_stripped(self):
+        assert _po_base_code('NA006') == '006'
+        assert _po_base_code('NA250') == '250'
+
+    def test_sa_prefix_stripped(self):
+        assert _po_base_code('SA005L') == '005L'
+        assert _po_base_code('SA003') == '003'
+
+    def test_no_prefix_kept(self):
+        """SR/NL 등 다른 접두어는 유지"""
+        assert _po_base_code('SR05') == 'SR05'
+        assert _po_base_code('NL04') == 'NL04'
+
+    def test_uppercased(self):
+        assert _po_base_code('na006') == '006'
+
+
+class TestResolveWeightCode:
+    """resolve_weight_code 함수 테스트"""
+
+    def test_base_match_no_options(self):
+        """옵션 없으면 base Model 무게"""
+        wmap = {'006': 11.0, '006IM': 15.2}
+        assert resolve_weight_code('NA006', [], wmap) == (11.0, '006')
+
+    def test_single_option_match(self):
+        """무게 영향 옵션 1개 → 옵션 코드 매칭"""
+        wmap = {'006': 11.0, '006IM': 15.2}
+        assert resolve_weight_code('NA006', ['IMS'], wmap) == (15.2, '006IM')
+
+    def test_non_weight_option_ignored(self):
+        """무게 무관 옵션(ALS 등)은 base 로 매칭"""
+        wmap = {'006': 11.0, '006IM': 15.2}
+        assert resolve_weight_code('NA006', ['ALS', 'Bush-STAR'], wmap) == (11.0, '006')
+
+    def test_priority_when_multiple_options(self):
+        """복수 무게옵션 → 우선순위 최상위(INTEGRAL > PCU+PIU)"""
+        wmap = {'150': 68.0, '150IN': 75.0, '150P': 70.5}
+        assert resolve_weight_code(
+            'NA150', ['PCU+PIU', 'INTEGRAL'], wmap
+        ) == (75.0, '150IN')
+
+    def test_lcu_pcu_combined_code(self):
+        """LCU + PCU+PIU 동시 → 결합코드 …LP 우선"""
+        wmap = {'006': 11.0, '006L': 14.0, '006P': 13.5, '006LP': 11.5}
+        assert resolve_weight_code(
+            'NA006', ['LCU', 'PCU+PIU'], wmap
+        ) == (11.5, '006LP')
+
+    def test_fallback_to_base_when_option_code_missing(self):
+        """옵션 코드 행이 없으면 base 무게로 폴백"""
+        wmap = {'006': 11.0}
+        assert resolve_weight_code('NA006', ['IMS'], wmap) == (11.0, '006')
+
+    def test_sa_model_option(self):
+        """SA 모델 + 옵션 (SA005L + PCU → 005LP)"""
+        wmap = {'005L': 3.8, '005LP': 4.1}
+        assert resolve_weight_code('SA005L', ['PCU+PIU'], wmap) == (4.1, '005LP')
+
+    def test_no_match_returns_none(self):
+        """비표준 Model + 빈 맵 → (None, None)"""
+        assert resolve_weight_code('MS01', [], {}) == (None, None)
+        assert resolve_weight_code('SCP-SET-SA', ['SCP'], {'006': 11.0}) == (None, None)

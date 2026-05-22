@@ -28,7 +28,12 @@ from po_generator.config import (
     PL_TEMPLATE_FILE,
     OC_TEMPLATE_FILE,
 )
-from po_generator.utils import get_value, resolve_column, build_weight_map
+from po_generator.utils import (
+    get_value,
+    resolve_column,
+    build_po_line_weight_map,
+    normalize_line_item,
+)
 from po_generator.validators import validate_order_data, validate_multiple_items
 from po_generator.history import check_duplicate_order, save_to_history
 from po_generator.excel_generator import create_po_workbook
@@ -137,23 +142,31 @@ class DocumentService:
         return items_df
 
     def _enrich_with_weight(self, items_df: pd.DataFrame) -> pd.DataFrame:
-        """Weight 시트 기반으로 Net Weight (Weight per unit) 보강
+        """PO_해외 Model+옵션 기반으로 Net Weight (Weight per unit) 보강
 
-        items_df의 'Model code' 값으로 Weight 시트의 ITEM→WEIGHT 매핑을 조회하여
-        'Weight per unit' 컬럼을 추가합니다.
+        DN 아이템을 (SO_ID, Line item) 복합키로 PO_해외와 조인하여,
+        PO 라인의 Model + Y옵션을 Weight 시트와 매칭한 단위중량을
+        'Weight per unit' 컬럼에 채웁니다.
         """
-        model_code_col = resolve_column(items_df.columns, 'model_code')
-        if not model_code_col:
-            logger.debug("Model code 컬럼 없음 — Weight 보강 건너뜀")
+        so_id_col = resolve_column(items_df.columns, 'so_id')
+        line_col = 'Line item' if 'Line item' in items_df.columns else None
+        if not so_id_col or not line_col:
+            logger.debug("SO_ID/Line item 컬럼 없음 — Weight 보강 건너뜀")
             return items_df
 
-        weight_map = build_weight_map()
-        if not weight_map:
+        line_weight_map = build_po_line_weight_map()
+        if not line_weight_map:
             return items_df
 
         items_df = items_df.copy()
-        items_df['Weight per unit'] = items_df[model_code_col].map(weight_map)
-        matched = items_df['Weight per unit'].notna().sum()
+        weights = [
+            line_weight_map.get(
+                (str(row[so_id_col]).strip(), normalize_line_item(row[line_col]))
+            )
+            for _, row in items_df.iterrows()
+        ]
+        items_df['Weight per unit'] = weights
+        matched = sum(w is not None for w in weights)
         logger.debug(f"Weight 보강 완료: {matched}/{len(items_df)}건 매칭")
         return items_df
 
@@ -532,9 +545,13 @@ class DocumentService:
         # 출력 디렉토리 생성
         FI_OUTPUT_DIR.mkdir(exist_ok=True)
 
-        # 파일명 생성 (PO 지정 시 PO번호 포함)
+        # 파일명 생성 (PO 분리 시 Customer PO 값을 라벨로 사용; 없으면 RCK PO로 폴백)
         customer_name = order_data.get_value('customer_name', 'Unknown')
-        order_label = f"{dn_id}_{rck_po}" if rck_po else dn_id
+        if rck_po:
+            po_label = order_data.get_value('customer_po', '') or rck_po
+            order_label = f"{dn_id}_{po_label}"
+        else:
+            order_label = dn_id
         output_file = generate_output_filename("FI", order_label, customer_name, FI_OUTPUT_DIR)
 
         if not validate_output_path(output_file, FI_OUTPUT_DIR):

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import pandas as pd
@@ -30,6 +31,8 @@ from po_generator.config import (
     OPTION_START_COLUMN,
     SPEC_FIELDS,
     OPTION_FIELDS,
+    WEIGHT_OPTION_SUFFIX,
+    WEIGHT_OPTION_PRIORITY,
 )
 
 logger = logging.getLogger(__name__)
@@ -841,14 +844,14 @@ def load_weight_data() -> pd.DataFrame:
     return df
 
 
-def build_weight_map() -> dict[str, float]:
-    """ITEM → WEIGHT 매핑 딕셔너리 (Weight 시트 기반)
+def build_model_weight_map() -> dict[str, float]:
+    """Weight 시트 MODEL 코드 → WEIGHT 매핑 (대문자 정규화 키)
 
-    Weight 시트의 ITEM 컬럼을 key, WEIGHT 컬럼을 value로 dict 생성.
-    시트가 없거나 로드 실패 시 빈 dict 반환 (graceful fallback).
+    Weight 시트의 MODEL 단축코드(예: '006IM', '005LP')를 key,
+    WEIGHT 를 value 로 dict 생성. 시트가 없거나 로드 실패 시 빈 dict 반환.
 
     Returns:
-        {item_code: weight_value} 딕셔너리
+        {model_code_upper: weight_value} 딕셔너리
     """
     try:
         df = load_weight_data()
@@ -856,22 +859,186 @@ def build_weight_map() -> dict[str, float]:
         logger.warning(f"Weight 데이터 로드 실패 (빈 매핑 반환): {e}")
         return {}
 
-    # ITEM, WEIGHT 컬럼 찾기 (대소문자 무관)
-    item_col = None
+    # MODEL, WEIGHT 컬럼 찾기 (대소문자 무관)
+    model_col = None
     weight_col = None
     for col in df.columns:
         col_lower = col.strip().lower()
-        if col_lower == 'item':
-            item_col = col
+        if col_lower == 'model':
+            model_col = col
         elif col_lower == 'weight':
             weight_col = col
 
-    if item_col is None or weight_col is None:
-        logger.warning(f"Weight 시트에 ITEM/WEIGHT 컬럼 없음: {list(df.columns)}")
+    if model_col is None or weight_col is None:
+        logger.warning(f"Weight 시트에 MODEL/WEIGHT 컬럼 없음: {list(df.columns)}")
         return {}
 
-    # NaN 제거 후 dict 생성
-    valid = df[[item_col, weight_col]].dropna(subset=[item_col, weight_col])
-    weight_map = dict(zip(valid[item_col].astype(str), valid[weight_col].astype(float)))
-    logger.info(f"Weight 매핑 {len(weight_map)}건 생성 완료")
+    valid = df[[model_col, weight_col]].dropna(subset=[model_col, weight_col])
+    weight_map: dict[str, float] = {}
+    for code, wt in zip(valid[model_col], valid[weight_col]):
+        key = str(code).strip().upper()
+        try:
+            weight_map[key] = float(wt)
+        except (ValueError, TypeError):
+            continue
+    logger.info(f"Weight MODEL 매핑 {len(weight_map)}건 생성 완료")
     return weight_map
+
+
+# === PO 해외 로드 + Net Weight 매핑 (Packing List) ===
+
+_NA_SA_PREFIX = re.compile(r'^(NA|SA)')
+
+
+def normalize_line_item(value: Any) -> str:
+    """Line item 값 정규화 (1.0 → '1', 공백 제거)
+
+    pandas 가 시트에 따라 Line item 을 int / float 로 다르게 읽어
+    조인 키가 어긋나는 것을 방지합니다.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ''
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, int):
+        return str(value)
+    s = str(value).strip()
+    if s.endswith('.0') and s[:-2].isdigit():
+        return s[:-2]
+    return s
+
+
+def _po_base_code(model: Any) -> str:
+    """PO Model → Weight MODEL base 코드 (NA/SA 접두어 제거, 대문자)
+
+    예: 'NA006' → '006', 'SA005L' → '005L', 'SR05' → 'SR05'
+    """
+    m = str(model).strip().upper()
+    return _NA_SA_PREFIX.sub('', m)
+
+
+def resolve_weight_code(
+    model: Any,
+    y_options: list[str],
+    model_weight_map: dict[str, float],
+) -> tuple[float | None, str | None]:
+    """Model + Y옵션으로 Weight 단위중량 해결
+
+    매칭 순서:
+      1. (LCU + PCU+PIU 동시) 결합코드 base+'LP'
+      2. 우선순위 최상위 단일 옵션 → base+접미사
+      3. base 코드 (옵션 무시 폴백)
+      4. 원본 Model 코드 (NA/SA 미제거 케이스 대비)
+
+    Args:
+        model: PO Model 값 (예: 'NA006')
+        y_options: Y 로 체크된 옵션 컬럼명 리스트
+        model_weight_map: build_model_weight_map() 결과
+
+    Returns:
+        (weight, matched_code) — 못 찾으면 (None, None)
+    """
+    base = _po_base_code(model)
+    if not base:
+        return None, None
+
+    # 무게 영향 옵션만, 우선순위 순서로
+    wopts = [o for o in WEIGHT_OPTION_PRIORITY if o in y_options]
+
+    candidates: list[str] = []
+    if 'LCU' in wopts and 'PCU+PIU' in wopts:
+        candidates.append(base + 'LP')
+    for o in wopts:
+        candidates.append(base + WEIGHT_OPTION_SUFFIX[o])
+    candidates.append(base)
+    candidates.append(str(model).strip().upper())
+
+    for code in candidates:
+        if code in model_weight_map:
+            return model_weight_map[code], code
+    return None, None
+
+
+def load_po_export_data() -> pd.DataFrame:
+    """PO_해외 데이터 로드 (Model + 옵션 컬럼 포함)
+
+    Packing List Net Weight 매핑에 사용됩니다.
+    Model 컬럼은 문자열로 읽어 코드 형태를 보존합니다.
+
+    Returns:
+        PO_해외 DataFrame (PO_ID 가 있는 행만)
+
+    Raises:
+        FileNotFoundError: 소스 파일이 없는 경우
+    """
+    if not NOAH_SO_PO_DN_FILE.exists():
+        raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
+
+    logger.info(f"PO 해외 데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        df_po = pd.read_excel(xl, sheet_name=PO_EXPORT_SHEET, dtype={'Model': str})
+
+    if 'PO_ID' in df_po.columns:
+        df_po = df_po[df_po['PO_ID'].notna()].copy()
+
+    logger.info(f"PO 해외 데이터 {len(df_po)}건 로드 완료")
+    return df_po
+
+
+def build_po_line_weight_map() -> dict[tuple[str, str], float]:
+    """PO_해외 기반 (SO_ID, Line item) → Net Weight(단위중량) 매핑
+
+    각 PO 라인의 Model + Y옵션을 Weight 시트와 매칭하여 단위중량을 구합니다.
+    매칭 실패 시 base Model 무게로 폴백하며, 그것도 없으면 제외됩니다.
+    동일 (SO_ID, Line item) 이 중복되면 첫 행을 사용합니다.
+
+    Returns:
+        {(so_id, line_item): weight} 딕셔너리
+    """
+    model_weight_map = build_model_weight_map()
+    if not model_weight_map:
+        return {}
+
+    try:
+        df_po = load_po_export_data()
+    except FileNotFoundError as e:
+        logger.warning(f"PO 해외 로드 실패 (빈 Weight 매핑 반환): {e}")
+        return {}
+
+    model_col = resolve_column(df_po.columns, 'model')
+    if model_col is None or 'SO_ID' not in df_po.columns or 'Line item' not in df_po.columns:
+        logger.warning("PO 해외에 Model/SO_ID/Line item 컬럼 없음 — Weight 매핑 건너뜀")
+        return {}
+
+    # 무게 영향 옵션 컬럼 중 실제 존재하는 것
+    opt_cols = [o for o in WEIGHT_OPTION_SUFFIX if o in df_po.columns]
+
+    line_map: dict[tuple[str, str], float] = {}
+    unmatched: list[str] = []
+    for _, row in df_po.iterrows():
+        model = row[model_col]
+        if model is None or pd.isna(model) or str(model).strip() == '':
+            continue
+        so_id, line_item = row['SO_ID'], row['Line item']
+        if pd.isna(so_id) or pd.isna(line_item):
+            continue
+        key = (str(so_id).strip(), normalize_line_item(line_item))
+        if key in line_map:
+            continue  # 중복 (SO_ID, Line item) — 첫 행 우선
+
+        y_opts = [c for c in opt_cols if str(row.get(c, '')).strip().upper() == 'Y']
+        weight, _code = resolve_weight_code(model, y_opts, model_weight_map)
+        if weight is not None:
+            line_map[key] = weight
+        else:
+            unmatched.append(f"{key[0]}#{key[1]}({model})")
+
+    if unmatched:
+        logger.warning(
+            f"Weight 미매칭 {len(unmatched)}건 (비표준 Model 등): "
+            f"{', '.join(unmatched[:10])}"
+        )
+    logger.info(f"PO 라인 Weight 매핑 {len(line_map)}건 생성 완료")
+    return line_map

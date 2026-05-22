@@ -257,7 +257,8 @@ def _fill_items(
 def _update_total_row(ws: xw.Sheet, num_items: int) -> None:
     """Total 행의 수식 업데이트
 
-    PL Total: F=SUM qty, G=SUM net weight, H=SUM gross weight, I=SUM CBM
+    PL Total: F=SUM qty, G=Σ(qty×net weight), H=SUM gross weight, I=SUM CBM
+    G열은 행별로 단위중량(KG/PC)이므로 합계는 수량을 곱한 총 Net Weight.
     """
     total_row = ITEM_START_ROW + num_items
     last_item_row = total_row - 1
@@ -265,8 +266,11 @@ def _update_total_row(ws: xw.Sheet, num_items: int) -> None:
     # F열: Qty 합계
     ws.range(f'F{total_row}').formula = f"=SUM(F{ITEM_START_ROW}:F{last_item_row})"
 
-    # G열: Net Weight 합계
-    ws.range(f'G{total_row}').formula = f"=SUM(G{ITEM_START_ROW}:G{last_item_row})"
+    # G열: 총 Net Weight 합계 (수량 × 단위중량)
+    ws.range(f'G{total_row}').formula = (
+        f"=SUMPRODUCT(F{ITEM_START_ROW}:F{last_item_row},"
+        f"G{ITEM_START_ROW}:G{last_item_row})"
+    )
 
     # H열: Gross Weight 합계
     ws.range(f'H{total_row}').formula = f"=SUM(H{ITEM_START_ROW}:H{last_item_row})"

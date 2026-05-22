@@ -567,4 +567,7 @@ python create_oc.py SOO-2026-0001                  # SO_ID 기반 (Dispatch date
 | `create_pl_xlwings()` | pl_generator.py | Packing List 생성 (xlwings) |
 | `create_oc_xlwings()` | oc_generator.py | Order Confirmation 생성 (xlwings) |
 | `load_weight_data()` | utils.py | Weight 시트 데이터 로드 |
-| `build_weight_map()` | utils.py | ITEM→WEIGHT 매핑 dict 생성 |
+| `build_model_weight_map()` | utils.py | Weight MODEL 코드→WEIGHT 매핑 dict 생성 |
+| `load_po_export_data()` | utils.py | PO_해외 로드 (Model+옵션) |
+| `resolve_weight_code()` | utils.py | Model+옵션 → Weight 단위중량 해결 |
+| `build_po_line_weight_map()` | utils.py | (SO_ID, Line item)→Net Weight 매핑 |

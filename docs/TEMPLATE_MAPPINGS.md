@@ -152,10 +152,15 @@
 - 아이템을 Model number 오름차순으로 정렬
 
 ### Weight 보강 로직 (PL 전용)
-- `DocumentService._enrich_with_weight()` — Weight 시트의 ITEM→WEIGHT 매핑으로 Net Weight 자동 조회
-- Model code (AX Project number) 값을 키로 사용하여 Weight 시트의 ITEM 컬럼과 매칭
-- 매칭 결과를 `'Weight per unit'` 컬럼으로 items_df에 추가 → pl_generator가 F열에 자동 출력
-- Weight 시트가 없거나 매칭 실패 시 graceful fallback (빈 값)
+- `DocumentService._enrich_with_weight()` — PO_해외의 Model + 옵션을 Weight 시트와 매칭하여 Net Weight(단위중량) 자동 조회
+- DN 아이템을 **(SO_ID, Line item) 복합키**로 PO_해외와 조인 → PO 라인의 `Model`(AN열) + 옵션(AO~BH열, Y표시) 획득
+- 매핑 규칙 (`build_po_line_weight_map()` / `resolve_weight_code()`):
+  - PO Model에서 `NA`/`SA` 접두어 제거 → Weight 시트 `MODEL` base 코드
+  - 무게 영향 옵션(`config.WEIGHT_OPTION_SUFFIX`: INTEGRAL/IMS/LCU/PCU+PIU/SCP/EXP)을 접미사로 부착해 `MODEL` 코드 조회
+  - 복수 옵션 시 `config.WEIGHT_OPTION_PRIORITY` 최상위 1개 사용 (단, LCU+PCU 동시는 결합코드 `…LP` 우선)
+  - 옵션 조합 행 없으면 base Model 무게로 폴백, base도 없으면 공란
+- 매칭 결과를 `'Weight per unit'` 컬럼으로 items_df에 추가 → pl_generator가 G열에 자동 출력
+- Weight/PO 시트가 없거나 매칭 실패 시 graceful fallback (빈 값)
 
 
 ---
@@ -196,8 +201,9 @@
 | 열 | 필드명 | 설명 |
 |----|--------|------|
 | A | Item name | **Model number + Item name** (CI와 동일 보강 로직) |
-| E | Quantity | 수량 |
-| F | Net Weight | KG/PC — **Weight 시트 기반 자동 조회** (Model code → ITEM 매핑) |
+| E | Customer PO | 고객 PO No. |
+| F | Quantity | 수량 |
+| G | Net Weight | KG/PC — **PO_해외 Model+옵션 → Weight 시트 자동 조회** |
 | H | Gross Weight | Kg (gross_weight) |
 | I | CBM | Measurement (cbm) |
 
@@ -205,8 +211,8 @@
 
 | 열 | 내용 |
 |----|------|
-| E | SUM(Qty) |
-| G | "KGS" |
+| F | SUM(Qty) |
+| G | SUMPRODUCT(Qty, 단위중량) — 총 Net Weight |
 | H | SUM(Gross Weight) |
 | I | SUM(CBM) |
 

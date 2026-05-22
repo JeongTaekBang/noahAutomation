@@ -20,6 +20,28 @@
 
 ---
 
+## 2026-05-22: Packing List Net Weight — Model+옵션 기반 Weight 매핑
+
+### 배경
+PL의 Net Weight(G열)는 `_enrich_with_weight()`가 SO_해외 `Model code`로 Weight 시트를 조회했으나, 해당 컬럼이 전 행 비어 있어 **항상 공란**이었음. 액추에이터 Model/옵션은 `PO_해외`에만 존재.
+
+### 변경
+- `_enrich_with_weight()` 재구현 — DN 아이템을 **(SO_ID, Line item) 복합키**로 PO_해외와 조인, PO의 `Model`(AN열) + 옵션(AO~BH열, Y표시)을 Weight 시트와 매칭
+- 매핑 규칙: PO Model에서 `NA`/`SA` 접두어 제거 → Weight `MODEL` base 코드. 무게 영향 옵션(INTEGRAL/IMS/LCU/PCU+PIU/SCP/EXP)을 접미사로 부착해 조회. 복수 옵션은 우선순위 1개(LCU+PCU 동시는 결합코드 `…LP` 우선). 미매칭 시 base Model 무게 폴백, base도 없으면 공란
+- Total 행 G열 = `SUMPRODUCT(Qty, 단위중량)` — 행별 단위중량(KG/PC)에 수량을 곱한 총 Net Weight (기존 단위중량 단순 합에서 변경)
+- 검증: PO_해외 Model 보유 553행 중 549행(99.3%) 해결, 미매칭은 비표준 액세서리 4건(MOTOR/MS01/SCP-SET)
+
+### 파일 변경
+| 파일 | 변경 |
+|------|------|
+| `config.py` | `WEIGHT_OPTION_SUFFIX`, `WEIGHT_OPTION_PRIORITY` 상수 추가 |
+| `utils.py` | `build_weight_map()`(ITEM→WEIGHT, 미사용) 제거 → `build_model_weight_map()`, `load_po_export_data()`, `resolve_weight_code()`, `build_po_line_weight_map()`, `normalize_line_item()` 추가 |
+| `services/document_service.py` | `_enrich_with_weight()` PO 기반 (SO_ID, Line item) 조인으로 교체 |
+| `pl_generator.py` | Total 행 G열 수식 `SUM` → `SUMPRODUCT(Qty,단위중량)` |
+| `tests/test_utils.py` | `normalize_line_item`/`_po_base_code`/`resolve_weight_code` 단위 테스트 추가 |
+
+---
+
 ## 2026-04-30: PO 매입대사 — Confirmed 출고 제외 + 요약 시트 추가
 
 ### Confirmed PO 매핑 출고 제외 — `(서비스 출고만 ∪ Invoiced this-month) − GRN`

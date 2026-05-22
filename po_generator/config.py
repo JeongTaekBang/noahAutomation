@@ -179,6 +179,27 @@ OPTION_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
+# === Weight 매핑 설정 (Packing List Net Weight) ===
+# PO_해외 옵션열(Y 체크) → Weight 시트 MODEL 코드 접미사
+# 예: Model 'NA006' + IMS 옵션 → '006' + 'IM' → Weight 코드 '006IM'
+# 여기 없는 옵션(Bush/ALS/EXT/DC24V/PIU 등)은 무게에 영향 없음 → 매핑 미사용
+WEIGHT_OPTION_SUFFIX: Final[dict[str, str]] = {
+    'INTEGRAL': 'IN',
+    'IMS': 'IM',
+    'LCU': 'L',
+    'PCU+PIU': 'P',
+    'SCP': 'S',
+    'EXP': 'X',
+}
+
+# 한 라인에 무게 영향 옵션이 복수로 Y일 때 적용 우선순위 (앞이 우선)
+# Weight 시트엔 단일 옵션 행만 존재하므로 우선순위 최상위 1개로 코드를 만든다.
+# (예외: LCU + PCU+PIU 동시면 결합코드 '…LP'를 우선 시도)
+WEIGHT_OPTION_PRIORITY: Final[tuple[str, ...]] = (
+    'INTEGRAL', 'IMS', 'LCU', 'PCU+PIU', 'SCP', 'EXP',
+)
+
+
 @dataclass(frozen=True)
 class Colors:
     """Excel 셀 배경색 (RGB hex)"""
