@@ -461,6 +461,88 @@ def print_summary_table(raw_data: pd.DataFrame, missing: pd.DataFrame,
         print(f"  {src}:  {src_total:>14,.0f}")
 
 
+def _build_excel_vs_ax(df_po_period: pd.DataFrame, delivery: pd.DataFrame,
+                       grn: pd.DataFrame) -> pd.DataFrame:
+    """AX PO 단위로 Excel vs AX 금액 상세 비교 DataFrame 생성.
+
+    분류 기준은 요약 시트와 동일:
+      - Product(국내) = PO_국내 Invoiced + YTC 직접 P###### 출고
+      - Product(해외) = PO_해외 Invoiced
+      - Service       = 그 외 (서비스 직접 P###### 출고 + GRN-only)
+    """
+    rows: list[dict] = []
+
+    if '구분' in df_po_period.columns:
+        for ax, grp in df_po_period[df_po_period['구분'] == '국내'].groupby('AX PO'):
+            if not ax or str(ax).lower() == 'nan':
+                continue
+            rows.append({
+                '분류': 'Product(국내)',
+                'AX PO': ax,
+                'Excel': float(grp['Total ICO'].sum()),
+                '참조': f"{grp['PO_ID'].iloc[0]} / {grp['Customer name'].iloc[0]}",
+            })
+        for ax, grp in df_po_period[df_po_period['구분'] == '해외'].groupby('AX PO'):
+            if not ax or str(ax).lower() == 'nan':
+                continue
+            rows.append({
+                '분류': 'Product(해외)',
+                'AX PO': ax,
+                'Excel': float(grp['Total ICO'].sum()),
+                '참조': f"{grp['PO_ID'].iloc[0]} / {grp['Customer name'].iloc[0]}",
+            })
+
+    direct_mask = ~delivery['RCK ODER'].astype(str).str.startswith(('ND-', 'NO-'))
+    ytc_mask = direct_mask & (
+        delivery['Type'].astype(str).str.upper().str.strip() == 'YTC')
+    svc_mask = direct_mask & ~ytc_mask
+
+    for ax, grp in delivery[ytc_mask].groupby('AX PO'):
+        rows.append({
+            '분류': 'Product(국내)',
+            'AX PO': ax,
+            'Excel': float(grp['계산서금액'].sum()),
+            '참조': f"{grp['RCK ODER'].iloc[0]} (YTC) / {grp['Customer'].iloc[0]}",
+        })
+    for ax, grp in delivery[svc_mask].groupby('AX PO'):
+        rows.append({
+            '분류': 'Service',
+            'AX PO': ax,
+            'Excel': float(grp['계산서금액'].sum()),
+            '참조': f"{grp['RCK ODER'].iloc[0]} / {grp['Customer'].iloc[0]}",
+        })
+
+    excel_df = (pd.DataFrame(rows)
+                if rows else pd.DataFrame(columns=['분류', 'AX PO', 'Excel', '참조']))
+
+    ax_agg = (grn.groupby('Purchase order', as_index=False)
+              .agg(AX=('Cost amount physical', 'sum'))
+              .rename(columns={'Purchase order': 'AX PO'}))
+    ax_agg['AX'] = ax_agg['AX'].astype(float)
+
+    merged = excel_df.merge(ax_agg, on='AX PO', how='outer')
+    merged['Excel'] = merged['Excel'].fillna(0.0)
+    merged['AX'] = merged['AX'].fillna(0.0)
+    merged['분류'] = merged['분류'].fillna('Service')
+    merged['참조'] = merged['참조'].fillna('')
+
+    # Service이고 참조가 비어있으면 = GRN-only → Item name으로 채움
+    if 'Item name' in grn.columns:
+        item_map = (grn.dropna(subset=['Item name'])
+                    .groupby('Purchase order')['Item name'].first().to_dict())
+        mask = (merged['분류'] == 'Service') & (merged['참조'] == '')
+        merged.loc[mask, '참조'] = merged.loc[mask, 'AX PO'].map(item_map).fillna('')
+
+    merged['Diff'] = merged['AX'] - merged['Excel']
+    merged = merged[['분류', 'AX PO', 'Excel', 'AX', 'Diff', '참조']]
+    merged['_o'] = merged['분류'].map(
+        {'Product(국내)': 0, 'Product(해외)': 1, 'Service': 2}).fillna(3)
+    merged = (merged.sort_values(['_o', 'AX PO'])
+              .drop(columns='_o')
+              .reset_index(drop=True))
+    return merged
+
+
 def create_argument_parser() -> argparse.ArgumentParser:
     """CLI 인자 파서 생성"""
     parser = argparse.ArgumentParser(
@@ -765,6 +847,20 @@ def main() -> int:
             ws_sum.cell(total_row, c).font = Font(bold=True)
         for col_letter, width in (('A', 16), ('B', 18), ('C', 18), ('D', 18)):
             ws_sum.column_dimensions[col_letter].width = width
+
+        # Excel_vs_AX 상세: AX PO 단위 비교
+        detail = _build_excel_vs_ax(df_po_period, delivery, grn)
+        detail.to_excel(writer, sheet_name='Excel_vs_AX', index=False)
+        ws_d = writer.sheets['Excel_vs_AX']
+        for r in range(2, ws_d.max_row + 1):
+            for c in (3, 4, 5):  # Excel, AX, Diff
+                cell = ws_d.cell(r, c)
+                if cell.value is not None:
+                    cell.number_format = '#,##0'
+        for col_letter, width in (
+                ('A', 14), ('B', 14), ('C', 16), ('D', 16), ('E', 16), ('F', 50)):
+            ws_d.column_dimensions[col_letter].width = width
+        _add_table(writer, 'Excel_vs_AX', 'Excel_vs_AX')
 
         summary.to_excel(writer, sheet_name='대사', index=False)
         _add_table(writer, '대사', '대사')
