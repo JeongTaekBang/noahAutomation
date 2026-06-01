@@ -29,6 +29,7 @@
 - **소스 금액 원 단위 ROUND** — rolling/snapshot SQL의 SO/DN 금액 컬럼에 `ROUND(CAST(... AS REAL))` 적용. 향후 모든 마감이 정수 유지, 진짜 ≥1원 차이만 Variance(`> 0.5`)·경고(`> 1`)로 노출
   - `Sales amount`/`Sales amount KRW`(SO 국내/해외), `Total Sales`/`Total Sales KRW`(DN 국내/해외)
 - **기존 스냅샷 제자리 ROUND 마이그레이션** (`migrate_snapshot_round.py`, 멱등) — 전체 재마감 대신 `ob_snapshot` 금액 5컬럼(start/input/output/variance/ending)만 정수화. **전체 재마감은 마감 간 소급변경 이력(Variance)을 0으로 소실시키므로 채택하지 않음** — `closed_at`이 실제 월별 마감(3/13·4/1·5/1·6/1)이고 Variance 대부분이 납기변경 상쇄쌍·가격변경 등 진짜 감사 이력이라 보존 필요. 드롭된 잔량은 전부 < 0.5원 → `round`=0 → `Σ Start = Σ 전월 Ending` 정확히 성립
+- **`order_book_snapshot.sql` 임의 월 조회 파라미터화** — `params(period)` CTE 한 줄로 마감월/미마감월 모두 조회. 마감월 → `ob_snapshot` 동결값(무활동 그룹 포함 전 그룹, `--list` 총계와 일치), 미마감월 → 라이브 롤링. 기존 "open period만 표시"의 한계(마감월은 못 봄) 해소. `fallback_periods`는 `closed_periods`로 대체(미마감·스냅샷 없음 케이스는 `open_periods`가 흡수). ⚠️ 단순 `Period` group 합산은 이벤트 기반이라 활동월 그룹만 잡혀 과소집계 — 월말 총 백로그는 이 SQL(또는 `--list`/대시보드 ffill)로 조회
 
 ### 검증 (실데이터, 2026-01~05)
 - `--list` 경고 사라짐 / Start − 전월 Ending 전 구간 `+0.0000` / 비정수 ending 225행 → **0**
@@ -40,7 +41,7 @@
 |------|------|
 | `po_generator/snapshot.py` | `_ORDER_BOOK_BASE_SQL`의 so/dn 금액 4컬럼 `ROUND` |
 | `sql/order_book.sql` | so/dn 금액 4컬럼 `ROUND` (대시보드 Order Book 페이지도 정수 표시) |
-| `sql/order_book_snapshot.sql` | so/dn 금액 4컬럼 `ROUND` |
+| `sql/order_book_snapshot.sql` | so/dn 금액 4컬럼 `ROUND` + `params(period)` CTE로 임의 월(마감/미마감) 조회 파라미터화 (`fallback_periods`→`closed_periods`) |
 | `migrate_snapshot_round.py` | 신규 — 기존 `ob_snapshot` 금액 원 단위 ROUND (1회성·멱등, `--dry-run` 지원) |
 
 ---

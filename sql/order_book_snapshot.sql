@@ -1,14 +1,16 @@
 -- ═══════════════════════════════════════════════════════════════
--- Order Book — 스냅샷 기반 (Open Period만 표시)
+-- Order Book — 스냅샷 기반 (params.period로 임의 월 조회)
 -- ═══════════════════════════════════════════════════════════════
--- 마감된 Period는 close_period.py --list로 조회
--- 이 SQL은 미마감(open) Period만 표시:
---   스냅샷 있음: Start=마지막스냅샷Ending, Variance=소급변경분
---   스냅샷 없음: 기존 롤링 계산 fallback
+-- params CTE의 period 한 줄만 바꿔 조회:
+--   • 마감(closed)월 → ob_snapshot 동결값 그대로
+--                      (월말 총 백로그 = 무활동 그룹 포함 전 그룹, close_period --list 총계와 일치)
+--   • 미마감(open)월 → 라이브 롤링 (Start=마지막스냅샷Ending, Variance=소급변경분)
+--                      스냅샷 없으면 순수 롤링 (활동 있는 월만)
 --
 -- 전제: sync_db.py + close_period.py로 스냅샷 생성
 
 WITH
+params AS (SELECT '2026-05' AS period),   -- ← 조회할 월 (yyyy-MM). 마감월/미마감월 모두 가능
 -- ─── 1~5: 이벤트 기반 롤링 계산 ───
 so_combined AS (
     SELECT
@@ -198,44 +200,44 @@ open_periods AS (
         ON c2.SO_ID = r.SO_ID
        AND c2.[OS name] = r.[OS name]
        AND COALESCE(c2.[Expected delivery date], '') = COALESCE(r.[Expected delivery date], '')
-    WHERE r.Period NOT IN (SELECT period FROM active_snapshots)
-      AND r.Period > COALESCE((SELECT last_period FROM last_snapshot), '')
+    WHERE r.Period = (SELECT period FROM params)
+      AND r.Period NOT IN (SELECT period FROM active_snapshots)
 ),
 
--- ─── 9. 스냅샷 없는 경우 fallback (전체 롤링) ───
-fallback_periods AS (
+-- ─── 9. 마감(closed) Period — ob_snapshot 동결값 (무활동 그룹 포함 전 그룹) ───
+closed_periods AS (
     SELECT
-        r.Period,
-        r.등록Period,
-        r.구분,
-        r.SO_ID,
-        r.[Customer name],
-        r.[Customer PO],
-        r.[Item name],
-        r.[OS name],
-        r.[Expected delivery date],
-        r.[AX Period],
-        r.[Model code],
-        r.Sector,
-        r.[Business registration number],
-        r.[Industry code],
-        r.Value_Start_qty,
-        r.Value_Input_qty,
-        r.Value_Output_qty,
-        0 AS Value_Variance_qty,
-        r.Value_Ending_qty,
-        r.Value_Start_amount,
-        r.Value_Input_amount,
-        r.Value_Output_amount,
-        0 AS Value_Variance_amount,
-        r.Value_Ending_amount
-    FROM rolling r
-    WHERE (SELECT last_period FROM last_snapshot) IS NULL
+        s.snapshot_period AS Period,
+        s.등록Period,
+        s.구분,
+        s.SO_ID,
+        s.customer_name   AS [Customer name],
+        ''                AS [Customer PO],
+        s.item_name       AS [Item name],
+        s.[OS name],
+        s.[Expected delivery date],
+        s.[AX Period],
+        s.[Model code],
+        s.Sector,
+        ''                AS [Business registration number],
+        ''                AS [Industry code],
+        s.start_qty       AS Value_Start_qty,
+        s.input_qty       AS Value_Input_qty,
+        s.output_qty      AS Value_Output_qty,
+        s.variance_qty    AS Value_Variance_qty,
+        s.ending_qty      AS Value_Ending_qty,
+        s.start_amount    AS Value_Start_amount,
+        s.input_amount    AS Value_Input_amount,
+        s.output_amount   AS Value_Output_amount,
+        s.variance_amount AS Value_Variance_amount,
+        s.ending_amount   AS Value_Ending_amount
+    FROM ob_snapshot s, params p
+    WHERE s.snapshot_period = p.period
+      AND p.period IN (SELECT period FROM active_snapshots)
 )
 
--- ═══ 최종: Open Period만 (스냅샷 있으면 open, 없으면 fallback) ═══
-SELECT * FROM open_periods
-WHERE (SELECT last_period FROM last_snapshot) IS NOT NULL
+-- ═══ 최종: params.period가 마감월이면 동결 스냅샷, 미마감월이면 라이브 롤링 ═══
+SELECT * FROM closed_periods
 UNION ALL
-SELECT * FROM fallback_periods
+SELECT * FROM open_periods
 ORDER BY Period DESC, 구분, SO_ID, [OS name];
