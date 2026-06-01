@@ -15,7 +15,7 @@ so_combined AS (
         SO_ID, [Customer name], [Customer PO], [Item name], [OS name],
         CAST([Line item] AS INTEGER) AS [Line item],
         CAST([Item qty] AS REAL) AS [Item qty],
-        CAST([Sales amount] AS REAL) AS [Sales amount KRW],
+        ROUND(CAST([Sales amount] AS REAL)) AS [Sales amount KRW],
         Period, [AX Period], [Model code], Sector,
         [Business registration number], [Industry code],
         [Expected delivery date], '국내' AS 구분
@@ -27,7 +27,7 @@ so_combined AS (
         SO_ID, [Customer name], [Customer PO], [Item name], [OS name],
         CAST([Line item] AS INTEGER),
         CAST([Item qty] AS REAL),
-        CAST([Sales amount KRW] AS REAL),
+        ROUND(CAST([Sales amount KRW] AS REAL)),
         Period, [AX Period], [Model code], Sector,
         [Business registration number], [Industry code],
         [Expected delivery date], '해외'
@@ -37,13 +37,13 @@ so_combined AS (
 ),
 dn_combined AS (
     SELECT SO_ID, CAST([Line item] AS INTEGER) AS [Line item],
-        CAST(Qty AS REAL) AS Qty, CAST([Total Sales] AS REAL) AS 출고금액,
+        CAST(Qty AS REAL) AS Qty, ROUND(CAST([Total Sales] AS REAL)) AS 출고금액,
         SUBSTR([출고일], 1, 7) AS 출고월
     FROM dn_domestic
     WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
     UNION ALL
     SELECT SO_ID, CAST([Line item] AS INTEGER),
-        CAST(Qty AS REAL), CAST([Total Sales KRW] AS REAL),
+        CAST(Qty AS REAL), ROUND(CAST([Total Sales KRW] AS REAL)),
         SUBSTR([선적일], 1, 7)
     FROM dn_export
     WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''

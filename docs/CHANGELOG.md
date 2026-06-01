@@ -20,6 +20,31 @@
 
 ---
 
+## 2026-06-01: Order Book 마감 — 금액 원 단위 ROUND (유령 잔량 / 'Start != 전월 Ending' 경고 제거)
+
+### 배경
+`close_period.py --list`(메뉴 [9]→[3])에서 `** Start != 전월 Ending (!차이 1)` 경고가 디테일 없이 떴음. 추적 결과 KRW 금액이 DB에 `REAL`로 저장되는데, 이른 마감 시점에 **소수점이 박힌 값이 스냅샷에 동결**(예: 1월 input `10425305.49251159`)됐고, 이후 원본이 정수로 정리되며 생긴 < 1원 차이를 Variance 임계값(`> 0.5`)이 걸러내 **유령 ending 잔량**으로 남음. 이 잔량이 월별로 누적(비정수 ending 1월 41건→…)되어 5월에 1.39원이 되며 `diff > 1` 경고를 유발. 각 조각이 0.5원 미만이라 Variance 디테일엔 안 잡혀 "디테일 없는 경고"가 됨. KRW는 정수 통화이므로 sub-won 값 자체가 float 인공물.
+
+### 변경
+- **소스 금액 원 단위 ROUND** — rolling/snapshot SQL의 SO/DN 금액 컬럼에 `ROUND(CAST(... AS REAL))` 적용. 향후 모든 마감이 정수 유지, 진짜 ≥1원 차이만 Variance(`> 0.5`)·경고(`> 1`)로 노출
+  - `Sales amount`/`Sales amount KRW`(SO 국내/해외), `Total Sales`/`Total Sales KRW`(DN 국내/해외)
+- **기존 스냅샷 제자리 ROUND 마이그레이션** (`migrate_snapshot_round.py`, 멱등) — 전체 재마감 대신 `ob_snapshot` 금액 5컬럼(start/input/output/variance/ending)만 정수화. **전체 재마감은 마감 간 소급변경 이력(Variance)을 0으로 소실시키므로 채택하지 않음** — `closed_at`이 실제 월별 마감(3/13·4/1·5/1·6/1)이고 Variance 대부분이 납기변경 상쇄쌍·가격변경 등 진짜 감사 이력이라 보존 필요. 드롭된 잔량은 전부 < 0.5원 → `round`=0 → `Σ Start = Σ 전월 Ending` 정확히 성립
+
+### 검증 (실데이터, 2026-01~05)
+- `--list` 경고 사라짐 / Start − 전월 Ending 전 구간 `+0.0000` / 비정수 ending 225행 → **0**
+- Variance 이력 보존 (3월 -6.7M, 4월 -119.6M, 5월 -21.4M, 정수화만)
+- 미래 마감(2026-06) 시뮬 823그룹 비정수 0 / `pytest` dashboard+integration 75 passed
+
+### 파일 변경
+| 파일 | 변경 |
+|------|------|
+| `po_generator/snapshot.py` | `_ORDER_BOOK_BASE_SQL`의 so/dn 금액 4컬럼 `ROUND` |
+| `sql/order_book.sql` | so/dn 금액 4컬럼 `ROUND` (대시보드 Order Book 페이지도 정수 표시) |
+| `sql/order_book_snapshot.sql` | so/dn 금액 4컬럼 `ROUND` |
+| `migrate_snapshot_round.py` | 신규 — 기존 `ob_snapshot` 금액 원 단위 ROUND (1회성·멱등, `--dry-run` 지원) |
+
+---
+
 ## 2026-05-22: Packing List Net Weight — Model+옵션 기반 Weight 매핑
 
 ### 배경
