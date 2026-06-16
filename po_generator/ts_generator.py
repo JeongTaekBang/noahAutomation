@@ -61,6 +61,7 @@ def create_ts_xlwings(
     order_data: pd.Series,
     items_df: pd.DataFrame | None = None,
     doc_type: str = 'DN',
+    use_po_as_remark: bool = False,
 ) -> None:
     """xlwings로 거래명세표 생성
 
@@ -70,6 +71,7 @@ def create_ts_xlwings(
         order_data: 주문 데이터 (첫 번째 아이템 또는 단일 아이템)
         items_df: 다중 아이템인 경우 전체 아이템 DataFrame
         doc_type: 문서 유형 ('DN' 또는 'PMT')
+        use_po_as_remark: 월합 거래명세표 — 각 행의 비고(C열)에 해당 아이템의 Customer PO 표기
     """
     # 템플릿 준비 (임시 폴더로 복사)
     temp_template, temp_output = prepare_template(template_path, "ts")
@@ -99,7 +101,7 @@ def create_ts_xlwings(
 
             # DN/ADV 공통 처리 (remark만 다름)
             remark = '선수금' if doc_type == 'ADV' else ''
-            _fill_ts_data(ws, order_data, items_df, dispatch_date, remark)
+            _fill_ts_data(ws, order_data, items_df, dispatch_date, remark, use_po_as_remark)
 
             # 임시 위치에 저장
             wb.save(str(temp_output))
@@ -173,6 +175,7 @@ def _fill_ts_data(
     items_df: pd.DataFrame | None,
     dispatch_date: datetime,
     remark: str = '',
+    use_po_as_remark: bool = False,
 ) -> None:
     """거래명세표 데이터 채우기 (DN/ADV 공통) - 배치 쓰기 최적화
 
@@ -182,6 +185,7 @@ def _fill_ts_data(
         items_df: 다중 아이템인 경우 DataFrame
         dispatch_date: 출고일
         remark: 비고 텍스트 (예: '선수금')
+        use_po_as_remark: 월합 거래명세표 — 각 행 비고(C열)에 해당 아이템의 Customer PO 표기
     """
     # 아이템 준비
     if items_df is None:
@@ -225,7 +229,9 @@ def _fill_ts_data(
     ws.range(f'A{item_start_row}:H{end_row}').value = None
 
     # 아이템 데이터 배치 쓰기 (N개 아이템 * 8열 COM 호출 → 1회로 감소)
-    total_amount, total_tax = _fill_items_batch(ws, item_start_row, items_df, dispatch_date, remark)
+    total_amount, total_tax = _fill_items_batch(
+        ws, item_start_row, items_df, dispatch_date, remark, use_po_as_remark
+    )
 
     # 소계 행 수식 업데이트 (다중 아이템인 경우)
     subtotal_row = item_start_row + num_items
@@ -235,22 +241,26 @@ def _fill_ts_data(
         ws.range(f'G{subtotal_row}').formula = f'=SUM(G{item_start_row}:G{last_item_row})'
         ws.range(f'H{subtotal_row}').formula = f'=SUM(H{item_start_row}:H{last_item_row})'
 
+    # 행 삽입/삭제로 라벨이 이동한 양 (음수면 라벨이 위로 올라옴)
+    row_shift = num_items - template_item_count
+    label_search_end = LABEL_SEARCH_END + max(0, row_shift)
+
     # PO No. 채우기 (여러 발주번호면 콤마로 구분)
     if items_df is not None and 'Customer PO' in items_df.columns:
         po_values = items_df['Customer PO'].dropna().unique()
         customer_po = ', '.join(str(v) for v in po_values if str(v).strip())
     else:
         customer_po = get_value(order_data, 'customer_po', '')
-    po_row = find_text_in_column_batch(ws, 'A', 'PO No', LABEL_SEARCH_START, LABEL_SEARCH_END)
+    po_row = find_text_in_column_batch(ws, 'A', 'PO No', LABEL_SEARCH_START, label_search_end)
     if po_row is None:
-        po_row = BASE_PO_ROW + (num_items - 1) if num_items > 1 else BASE_PO_ROW
+        po_row = BASE_PO_ROW + row_shift
     ws.range(f'B{po_row}').value = customer_po
 
     # 합계 채우기 (레이블 위치를 찾아서 같은 행에 값 입력)
     grand_total = total_amount + total_tax
-    total_row = find_text_in_column_batch(ws, 'E', '합 계', LABEL_SEARCH_START, LABEL_SEARCH_END)
+    total_row = find_text_in_column_batch(ws, 'E', '합 계', LABEL_SEARCH_START, label_search_end)
     if total_row is None:
-        total_row = BASE_TOTAL_ROW + (num_items - 1) if num_items > 1 else BASE_TOTAL_ROW
+        total_row = BASE_TOTAL_ROW + row_shift
     ws.range(f'G{total_row}').value = grand_total
 
 
@@ -260,6 +270,7 @@ def _fill_items_batch(
     items_df: pd.DataFrame,
     dispatch_date: datetime,
     remark: str = '',
+    use_po_as_remark: bool = False,
 ) -> tuple[int, int]:
     """아이템 데이터 배치 쓰기 (성능 최적화)
 
@@ -271,6 +282,7 @@ def _fill_items_batch(
         items_df: 아이템 DataFrame
         dispatch_date: 출고일
         remark: 비고 텍스트
+        use_po_as_remark: True면 행별 비고를 해당 아이템의 Customer PO로 채움
 
     Returns:
         (총 금액, 총 세액)
@@ -315,11 +327,17 @@ def _fill_items_batch(
         total_amount += amount
         total_tax += tax
 
+        # 비고: 월합 케이스에선 행별 Customer PO, 그 외엔 공통 remark
+        if use_po_as_remark:
+            row_remark = str(get_value(item, 'customer_po', '') or '')
+        else:
+            row_remark = remark
+
         # 행 데이터: A(월/일), B(품명), C(비고), D(규격), E(수량), F(단가), G(금액), H(세액)
         data_2d.append([
             date_str,
             get_value(item, 'item_name', ''),
-            remark,
+            row_remark,
             "EA",
             qty,
             unit_price,

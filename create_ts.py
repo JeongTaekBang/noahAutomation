@@ -240,6 +240,7 @@ def generate_merged_ts(dn_ids: list[str]) -> bool:
             order_data=first_order_data.first_item,
             items_df=merged_items_df,
             doc_type='DN',
+            use_po_as_remark=True,
         )
         print(f"\n  -> 월합 거래명세표 생성 완료: {output_filename}")
         return True
