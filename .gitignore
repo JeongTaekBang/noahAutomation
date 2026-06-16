@@ -55,6 +55,11 @@ templates/Old/
 po_history.xlsx
 po_history/
 
+# Reconciliation 운영 데이터 (대사 입출력 파일 - 제외)
+po_reconciliation/
+so_reconciliation/
+ind_code_reconciliation/
+
 # Claude Code temp files
 tmpclaude-*
 .claude/
