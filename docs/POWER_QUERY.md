@@ -539,7 +539,7 @@ in
 - SO_국내 + SO_해외 통합
 - PO에서 원가 조인 → 마진/마진율 계산
 - DN에서 출고금액 조인 → 출고완료 여부, 미출고금액 계산
-- Cancelled 건 제외
+- Cancelled·Hold 건 제외
 
 ### 결과 컬럼
 | 컬럼 | 설명 |
@@ -589,12 +589,12 @@ let
     SO_해외_Selected = Table.SelectColumns(SO_해외_Raw, CommonColumns_Filtered & {"Sales amount", "Sales amount KRW", "Status"}),
     SO_해외_Tagged = Table.AddColumn(SO_해외_Selected, "구분", each "해외"),
 
-    // SO 합치기 + 에러 치환 + Cancelled 제외 (null은 포함)
+    // SO 합치기 + 에러 치환 + Cancelled·Hold 제외 (null은 포함)
     SO_Combined = Table.Combine({SO_국내_Tagged, SO_해외_Tagged}),
     SO_CleanErrors = Table.ReplaceErrorValues(SO_Combined,
         List.Transform(Table.ColumnNames(SO_Combined), each {_, null})
     ),
-    SO_Filtered = Table.SelectRows(SO_CleanErrors, each [Status] = null or [Status] <> "Cancelled"),
+    SO_Filtered = Table.SelectRows(SO_CleanErrors, each [Status] = null or not List.Contains({"Cancelled", "Hold"}, [Status])),
     SO_Final = Table.RemoveColumns(SO_Filtered, {"Status"}),
 
     // ========== PO 원가 (SO_ID + Line item 기준 합산) ==========

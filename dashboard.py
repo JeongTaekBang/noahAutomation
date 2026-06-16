@@ -134,7 +134,7 @@ def load_so() -> pd.DataFrame:
                    '' AS shipping_method,
                    '국내' AS market
             FROM so_domestic
-            WHERE COALESCE(Status, '') != 'Cancelled'
+            WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
               AND Period IS NOT NULL AND TRIM(Period) != ''
             UNION ALL
             SELECT SO_ID, [Customer name], [Item name], [OS name],
@@ -152,7 +152,7 @@ def load_so() -> pd.DataFrame:
                    COALESCE([Shipping method], ''),
                    '해외'
             FROM so_export
-            WHERE COALESCE(Status, '') != 'Cancelled'
+            WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
               AND Period IS NOT NULL AND TRIM(Period) != ''
         """, conn)
     except Exception as e:
