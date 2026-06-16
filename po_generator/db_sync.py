@@ -125,13 +125,16 @@ def _add_row_seq(df: pd.DataFrame, group_cols: tuple[str, ...]) -> pd.DataFrame:
 
     명시적으로 int로 cast — group key 컬럼에 숫자가 섞이면 cumcount 결과가
     float64로 승격되어 DB에 "1.0"로 저장되는 버그 방지.
+
+    dropna=False — group key가 NaN인 행도 자체 그룹으로 묶어야 cumcount가
+    NaN을 반환하지 않음 (NaN이면 .astype(int)에서 터짐).
     """
     existing = [c for c in group_cols if c in df.columns]
     if not existing:
         df['_row_seq'] = 1
         return df
     df = df.copy()
-    df['_row_seq'] = (df.groupby(existing, sort=False).cumcount() + 1).astype(int)
+    df['_row_seq'] = (df.groupby(existing, sort=False, dropna=False).cumcount() + 1).astype(int)
     return df
 
 
