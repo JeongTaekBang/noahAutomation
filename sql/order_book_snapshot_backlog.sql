@@ -17,7 +17,7 @@ so_combined AS (
         [Business registration number], [Industry code],
         [Expected delivery date], '국내' AS 구분
     FROM so_domestic
-    WHERE COALESCE(Status, '') != 'Cancelled'
+    WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
     UNION ALL
     SELECT
@@ -29,7 +29,7 @@ so_combined AS (
         [Business registration number], [Industry code],
         [Expected delivery date], '해외'
     FROM so_export
-    WHERE COALESCE(Status, '') != 'Cancelled'
+    WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
 ),
 dn_combined AS (

@@ -628,7 +628,7 @@ def load_backlog() -> pd.DataFrame:
                    [Model code] AS model_code, Sector AS sector,
                    [Expected delivery date] AS delivery_date, '국내' AS market
             FROM so_domestic
-            WHERE COALESCE(Status, '') != 'Cancelled'
+            WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
               AND Period IS NOT NULL AND TRIM(Period) != ''
             UNION ALL
             SELECT SO_ID, [Customer name], [OS name],
@@ -637,7 +637,7 @@ def load_backlog() -> pd.DataFrame:
                    CAST([Sales amount KRW] AS REAL),
                    [Model code], Sector, [Expected delivery date], '해외'
             FROM so_export
-            WHERE COALESCE(Status, '') != 'Cancelled'
+            WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
               AND Period IS NOT NULL AND TRIM(Period) != ''
         ),
         dn_combined AS (

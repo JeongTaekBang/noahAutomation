@@ -8,7 +8,7 @@
 -- 전제: sync_db.py로 동기화된 noah_data.db 사용
 
 WITH
--- ─── 1. SO 통합 (국내 + 해외, Cancelled·빈 Period 제외) ───
+-- ─── 1. SO 통합 (국내 + 해외, Cancelled·Hold·빈 Period 제외) ───
 so_combined AS (
     SELECT
         SO_ID,
@@ -28,7 +28,7 @@ so_combined AS (
         [Expected delivery date],
         '국내' AS 구분
     FROM so_domestic
-    WHERE COALESCE(Status, '') != 'Cancelled'
+    WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
 
     UNION ALL
@@ -51,7 +51,7 @@ so_combined AS (
         [Expected delivery date],
         '해외'
     FROM so_export
-    WHERE COALESCE(Status, '') != 'Cancelled'
+    WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
 ),
 

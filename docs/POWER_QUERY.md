@@ -1385,7 +1385,7 @@ SO_ID = SOD-0001
        └────────┬─────────┘
                 ▼
         ┌──────────────┐
-        │  SO_Filtered  │  Cancelled 제외, #N/A 치환
+        │  SO_Filtered  │  Cancelled·Hold 제외, #N/A 치환
         │  (전체 수주)   │  Period 빈 행 제외
         └──────┬───────┘
                │
@@ -1585,9 +1585,9 @@ let
     SO_CleanErrors = Table.ReplaceErrorValues(SO_Combined,
         List.Transform(Table.ColumnNames(SO_Combined), each {_, null})
     ),
-    // Cancelled 제외, Period 비어있는 행 제외
+    // Cancelled, Hold 제외, Period 비어있는 행 제외
     SO_Filtered = Table.SelectRows(SO_CleanErrors, each
-        ([Status] = null or [Status] <> "Cancelled") and
+        ([Status] = null or not List.Contains({"Cancelled", "Hold"}, [Status])) and
         [Period] <> null and Text.Trim(Text.From([Period])) <> ""
     ),
 
