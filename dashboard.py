@@ -324,6 +324,49 @@ def load_po_detail() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
+def load_po_line_status() -> pd.DataFrame:
+    """(SO_ID, Line item) 단위 PO 상태 매핑 — 미발주 현황 라인별 표시·필터링용.
+
+    같은 (SO_ID, Line item)에 PO 행이 여러 개일 수 있어 GROUP_CONCAT(DISTINCT)로 묶음.
+    Cancelled 행은 집계 제외.
+    """
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        df = pd.read_sql_query("""
+            SELECT SO_ID,
+                   CAST([Line item] AS INTEGER) AS line_item,
+                   GROUP_CONCAT(DISTINCT PO_ID) AS po_id,
+                   GROUP_CONCAT(DISTINCT COALESCE(Status, '')) AS po_status,
+                   MIN(NULLIF([공장 발주 날짜], '')) AS factory_order_date
+            FROM po_domestic
+            WHERE COALESCE(Status, '') != 'Cancelled'
+            GROUP BY SO_ID, CAST([Line item] AS INTEGER)
+            UNION ALL
+            SELECT SO_ID,
+                   CAST([Line item] AS INTEGER),
+                   GROUP_CONCAT(DISTINCT PO_ID),
+                   GROUP_CONCAT(DISTINCT COALESCE(Status, '')),
+                   MIN(NULLIF([공장 발주 날짜], ''))
+            FROM po_export
+            WHERE COALESCE(Status, '') != 'Cancelled'
+            GROUP BY SO_ID, CAST([Line item] AS INTEGER)
+        """, conn)
+    except Exception as e:
+        logger.warning("PO line status 로드 실패: %s", e)
+        _record_load_error("PO Line Status", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    if not df.empty:
+        df["po_id"] = df["po_id"].fillna("")
+        df["po_status"] = df["po_status"].fillna("")
+        df["factory_order_date"] = pd.to_datetime(df["factory_order_date"], errors="coerce")
+    return df
+
+
+@st.cache_data(ttl=300)
 def load_po_sent_pending() -> pd.DataFrame:
     """PO Status='Sent' (확정 대기) 건 — 공장 발주 날짜 포함."""
     conn = _conn()
@@ -1631,24 +1674,33 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
                 if "customer_po" in day_exw.columns:
                     agg["고객PO"] = ("customer_po", "first")
                 g = day_exw.groupby("SO_ID").agg(**agg).reset_index()
-                items = []
-                for _, r in g.iterrows():
-                    icon = _status_icon(r["Status"], False)
-                    mkt_tag = "🇰🇷" if r["마켓"] == "국내" else "🌏"
-                    po_info = f" · PO: {r['고객PO']}" if r.get("고객PO") else ""
-                    req = fmt_date(r["요청납기"]) if pd.notna(r["요청납기"]) else "ASAP"
-                    lines = [
-                        f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
-                        f"📅 납기 {req}",
-                    ]
-                    if pd.notna(r["납품예정일"]):
-                        lines.append(f"📦 납품 예정일 {fmt_date(r['납품예정일'])}")
-                    sec_tag = f" · {r['섹터']}" if r["섹터"] else ""
-                    items.append({
-                        "title": f"{icon} {mkt_tag} **{r['SO_ID']}**  {r['고객명']}{sec_tag}",
-                        "lines": lines,
-                    })
-                _render_cards(items, cols_per_row=2)
+
+                def _build_exw_items(df_grp):
+                    items = []
+                    for _, r in df_grp.iterrows():
+                        icon = _status_icon(r["Status"], False)
+                        po_info = f" · PO: {r['고객PO']}" if r.get("고객PO") else ""
+                        req = fmt_date(r["요청납기"]) if pd.notna(r["요청납기"]) else "ASAP"
+                        lines = [
+                            f"품목 {r['품목수']}건 · 수량 {int(r['총수량']):,} · {fmt_krw(r['총금액'])}{po_info}",
+                            f"📅 납기 {req}",
+                        ]
+                        if pd.notna(r["납품예정일"]):
+                            lines.append(f"📦 납품 예정일 {fmt_date(r['납품예정일'])}")
+                        sec_tag = f" · {r['섹터']}" if r["섹터"] else ""
+                        items.append({
+                            "title": f"{icon} **{r['SO_ID']}**  {r['고객명']}{sec_tag}",
+                            "lines": lines,
+                        })
+                    return items
+
+                for mkt, label, icon in [("국내", "국내", "🇰🇷"), ("해외", "해외", "🌏")]:
+                    grp = g[g["마켓"] == mkt]
+                    st.markdown(f"{icon} **{label}** ({len(grp)}건)")
+                    if grp.empty:
+                        st.caption(f"{label} EXW 출고 예정 건 없음")
+                    else:
+                        _render_cards(_build_exw_items(grp), cols_per_row=2)
             else:
                 st.info("EXW 출고 예정 건 없음")
 
@@ -1997,9 +2049,24 @@ def pg_today(market, sectors, customers, **_):
     st.subheader("📋 미발주 현황")
     po_detail = load_po_detail()
     po_all_status = load_po_status()
+    po_line_status = load_po_line_status()
     # 출고 완료 제외
     so_active = so[so["status"] != "출고 완료"] if not so.empty else pd.DataFrame()
     cov = calc_coverage(so_active, po_detail, po_all_status=po_all_status)
+    # 이미 발주(Sent/Confirmed/Invoiced)된 (SO_ID, line_item) 키 — detail에서 제외
+    ordered_line_keys: set[tuple] = set()
+    if not po_line_status.empty:
+        is_ordered = po_line_status["po_status"].apply(
+            lambda s: any(
+                x.strip().startswith(("Sent", "Confirmed", "Invoiced"))
+                for x in str(s).split(",")
+            )
+        )
+        ordered_df = po_line_status[is_ordered]
+        ordered_line_keys = {
+            (sid, int(li)) for sid, li in zip(ordered_df["SO_ID"], ordered_df["line_item"])
+            if pd.notna(li)
+        }
     if not cov.empty:
         unordered = cov[cov["coverage_status"].isin(["PO 미등록", "미발주", "부분 발주"])].copy()
     else:
@@ -2071,18 +2138,46 @@ def pg_today(market, sectors, customers, **_):
                         )
                         with st.expander(header):
                             detail = so_active[so_active["SO_ID"] == so_id][
-                                ["SO_ID", "line_item", "item_name", "os_name", "qty", "amount_krw", "po_receipt_date", "delivery_date", "status"]
+                                ["SO_ID", "line_item", "item_name", "os_name", "qty", "amount_krw", "po_receipt_date", "delivery_date"]
                             ].drop_duplicates(subset=["SO_ID", "line_item"]).copy()
-                            detail.columns = ["SO_ID", "Line", "품목명", "OS name", "수량", "매출금액", "수주일", "납기일", "Status"]
-                            detail["PO_ID"] = po_ids_val
-                            detail["공장발주일"] = ""
-                            detail = detail[["SO_ID", "Line", "PO_ID", "품목명", "OS name", "수량", "매출금액", "수주일", "공장발주일", "납기일", "Status"]]
-                            detail = detail.sort_values("Line").reset_index(drop=True)
-                            detail["수량"] = detail["수량"].apply(fmt_qty)
-                            detail["매출금액"] = detail["매출금액"].apply(fmt_num)
-                            detail["수주일"] = detail["수주일"].apply(fmt_date)
-                            detail["납기일"] = detail["납기일"].apply(fmt_date)
-                            st.dataframe(detail, use_container_width=True, hide_index=True)
+                            # 라인 단위 PO 매칭 키와 타입 맞춤
+                            detail["line_item"] = pd.to_numeric(detail["line_item"], errors="coerce").astype("Int64")
+                            # 이미 발주(Sent/Confirmed/Invoiced)된 라인 제외 — 미발주 현황은 미등록/Open만
+                            if ordered_line_keys:
+                                detail = detail[detail.apply(
+                                    lambda r: pd.notna(r["line_item"]) and
+                                              (r["SO_ID"], int(r["line_item"])) not in ordered_line_keys,
+                                    axis=1,
+                                )]
+                            if detail.empty:
+                                st.info("이 SO의 모든 라인이 발주됨 — SO 단위 분류로만 잡힌 건")
+                            else:
+                                # 라인별 PO_ID/Status/공장발주일 조인
+                                if not po_line_status.empty:
+                                    sub = po_line_status[po_line_status["SO_ID"] == so_id][
+                                        ["SO_ID", "line_item", "po_id", "po_status", "factory_order_date"]
+                                    ].copy()
+                                    sub["line_item"] = sub["line_item"].astype("Int64")
+                                    detail = detail.merge(sub, on=["SO_ID", "line_item"], how="left")
+                                else:
+                                    detail["po_id"] = ""
+                                    detail["po_status"] = ""
+                                    detail["factory_order_date"] = pd.NaT
+                                detail["PO_ID"] = detail["po_id"].fillna("").replace("", "(미등록)")
+                                detail["공장발주일"] = detail["factory_order_date"].apply(fmt_date)
+                                detail["Status"] = detail["po_status"].fillna("").replace("", "(미등록)")
+                                detail = detail.rename(columns={
+                                    "line_item": "Line", "item_name": "품목명", "os_name": "OS name",
+                                    "qty": "수량", "amount_krw": "매출금액",
+                                    "po_receipt_date": "수주일", "delivery_date": "납기일",
+                                })
+                                detail = detail[["SO_ID", "Line", "PO_ID", "품목명", "OS name", "수량", "매출금액", "수주일", "공장발주일", "납기일", "Status"]]
+                                detail = detail.sort_values("Line").reset_index(drop=True)
+                                detail["수량"] = detail["수량"].apply(fmt_qty)
+                                detail["매출금액"] = detail["매출금액"].apply(fmt_num)
+                                detail["수주일"] = detail["수주일"].apply(fmt_date)
+                                detail["납기일"] = detail["납기일"].apply(fmt_date)
+                                st.dataframe(detail, use_container_width=True, hide_index=True)
     else:
         st.success("미발주 건 없음")
 
