@@ -62,7 +62,10 @@ dn_combined AS (
         CAST([Line item] AS INTEGER) AS [Line item],
         CAST(Qty AS REAL)            AS Qty,
         ROUND(CAST([Total Sales] AS REAL)) AS 출고금액,
-        SUBSTR([출고일], 1, 7)        AS 출고월
+        SUBSTR([출고일], 1, 7)        AS 출고월,
+        [Customer name] AS dn_cust, [Item] AS dn_item,
+        [Customer PO] AS dn_po, [Business registration number] AS dn_brn,
+        '국내' AS dn_market
     FROM dn_domestic
     WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
 
@@ -73,7 +76,8 @@ dn_combined AS (
         CAST([Line item] AS INTEGER),
         CAST(Qty AS REAL),
         ROUND(CAST([Total Sales KRW] AS REAL)),
-        SUBSTR([선적일], 1, 7)
+        SUBSTR([선적일], 1, 7),
+        [Customer name], [Item], [Customer PO], '', '해외'
     FROM dn_export
     WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''
 ),
@@ -82,7 +86,9 @@ dn_combined AS (
 dn_by_month AS (
     SELECT SO_ID, [Line item], 출고월,
            SUM(Qty)    AS Output_qty,
-           SUM(출고금액) AS Output_amount
+           SUM(출고금액) AS Output_amount,
+           MIN(dn_cust) AS dn_cust, MIN(dn_item) AS dn_item,
+           MIN(dn_po) AS dn_po, MIN(dn_brn) AS dn_brn, MIN(dn_market) AS dn_market
     FROM dn_combined
     WHERE 출고월 IS NOT NULL AND 출고월 != ''
     GROUP BY SO_ID, [Line item], 출고월
@@ -109,10 +115,10 @@ events_line_item AS (
     -- Output: DN 출고 이벤트 (LEFT JOIN — 취소/누락 SO의 DN도 보존)
     SELECT
         dm.SO_ID,
-        COALESCE(s.[Customer name], 'UNKNOWN') AS [Customer name],
-        COALESCE(s.[Customer PO], '')           AS [Customer PO],
-        COALESCE(s.[Item name], '')             AS [Item name],
-        COALESCE(s.[OS name], 'UNKNOWN')        AS [OS name],
+        COALESCE(s.[Customer name], NULLIF(dm.dn_cust, '0'), 'UNKNOWN') AS [Customer name],
+        COALESCE(s.[Customer PO], NULLIF(dm.dn_po, '0'), '')    AS [Customer PO],
+        COALESCE(s.[Item name], dm.dn_item, '')                 AS [Item name],
+        COALESCE(s.[OS name], dm.dn_item, 'UNKNOWN')            AS [OS name],
         dm.[Line item],
         COALESCE(s.[Item qty], 0)               AS [Item qty],
         COALESCE(s.[Sales amount KRW], 0)       AS [Sales amount KRW],
@@ -120,10 +126,10 @@ events_line_item AS (
         COALESCE(s.[AX Period], '')             AS [AX Period],
         COALESCE(s.[Model code], '')            AS [Model code],
         COALESCE(s.Sector, '')                  AS Sector,
-        COALESCE(s.[Business registration number], '') AS [Business registration number],
+        COALESCE(s.[Business registration number], NULLIF(dm.dn_brn, '0'), '') AS [Business registration number],
         COALESCE(s.[Industry code], '')         AS [Industry code],
         COALESCE(s.[Expected delivery date], '') AS [Expected delivery date],
-        COALESCE(s.구분, '')                    AS 구분,
+        COALESCE(s.구분, dm.dn_market, '')      AS 구분,
         dm.출고월 AS event_period,
         0, 0,
         dm.Output_qty,

@@ -30,6 +30,7 @@
   - `Sales amount`/`Sales amount KRW`(SO 국내/해외), `Total Sales`/`Total Sales KRW`(DN 국내/해외)
 - **기존 스냅샷 제자리 ROUND 마이그레이션** (`migrate_snapshot_round.py`, 멱등) — 전체 재마감 대신 `ob_snapshot` 금액 5컬럼(start/input/output/variance/ending)만 정수화. **전체 재마감은 마감 간 소급변경 이력(Variance)을 0으로 소실시키므로 채택하지 않음** — `closed_at`이 실제 월별 마감(3/13·4/1·5/1·6/1)이고 Variance 대부분이 납기변경 상쇄쌍·가격변경 등 진짜 감사 이력이라 보존 필요. 드롭된 잔량은 전부 < 0.5원 → `round`=0 → `Σ Start = Σ 전월 Ending` 정확히 성립
 - **`order_book_snapshot.sql` 임의 월 조회 파라미터화** — `params(period)` CTE 한 줄로 마감월/미마감월 모두 조회. 마감월 → `ob_snapshot` 동결값(무활동 그룹 포함 전 그룹, `--list` 총계와 일치), 미마감월 → 라이브 롤링. 기존 "open period만 표시"의 한계(마감월은 못 봄) 해소. `fallback_periods`는 `closed_periods`로 대체(미마감·스냅샷 없음 케이스는 `open_periods`가 흡수). ⚠️ 단순 `Period` group 합산은 이벤트 기반이라 활동월 그룹만 잡혀 과소집계 — 월말 총 백로그는 이 SQL(또는 `--list`/대시보드 ffill)로 조회
+- **미매칭 출고(orphaned DN) 라벨을 DN 자체 값으로 표시** — SO 라인과 매칭 안 되는 DN(출고) 이벤트의 `Customer name`/`OS name` 등이 `'UNKNOWN'`으로만 떴음(예: SO에 없는 "시운전 SETTING" 라인 출고). `events_line_item` 출력 branch가 `dn_combined`로 전파한 DN 필드를 폴백으로 사용: `Customer name`·`Customer PO`·`Item name`·`OS name`(=DN Item)·`구분`(국내/해외)·사업자번호를 DN 값으로 채움(`NULLIF(...,'0')`로 placeholder 처리). SO 고유 필드(Sector/AX Period/Model code/Industry code/EDD)는 DN에 없어 공란 유지. 매칭되는 정상 출고는 기존과 동일(SO 값 우선) — 회귀 없음. 음수 Ending이 미매칭 신호 역할 유지. 기존 동결 스냅샷의 `UNKNOWN`은 재마감 전까지 그대로(해당 1건은 이미 Ending=0 해결)
 
 ### 검증 (실데이터, 2026-01~05)
 - `--list` 경고 사라짐 / Start − 전월 Ending 전 구간 `+0.0000` / 비정수 ending 225행 → **0**
@@ -39,9 +40,9 @@
 ### 파일 변경
 | 파일 | 변경 |
 |------|------|
-| `po_generator/snapshot.py` | `_ORDER_BOOK_BASE_SQL`의 so/dn 금액 4컬럼 `ROUND` |
-| `sql/order_book.sql` | so/dn 금액 4컬럼 `ROUND` (대시보드 Order Book 페이지도 정수 표시) |
-| `sql/order_book_snapshot.sql` | so/dn 금액 4컬럼 `ROUND` + `params(period)` CTE로 임의 월(마감/미마감) 조회 파라미터화 (`fallback_periods`→`closed_periods`) |
+| `po_generator/snapshot.py` | `_ORDER_BOOK_BASE_SQL`의 so/dn 금액 4컬럼 `ROUND` + orphaned DN 라벨 DN 폴백 |
+| `sql/order_book.sql` | so/dn 금액 4컬럼 `ROUND` (대시보드 Order Book 페이지도 정수 표시) + orphaned DN 라벨 DN 폴백 |
+| `sql/order_book_snapshot.sql` | so/dn 금액 4컬럼 `ROUND` + `params(period)` CTE로 임의 월(마감/미마감) 조회 파라미터화 (`fallback_periods`→`closed_periods`) + orphaned DN 라벨 DN 폴백 |
 | `migrate_snapshot_round.py` | 신규 — 기존 `ob_snapshot` 금액 원 단위 ROUND (1회성·멱등, `--dry-run` 지원) |
 
 ---
