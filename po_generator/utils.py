@@ -352,13 +352,16 @@ def format_currency(value: float, currency: str = 'KRW') -> str:
 # === DN (납품) 데이터 로드 ===
 
 def load_dn_data() -> pd.DataFrame:
-    """DN_국내 데이터 로드 (SO 정보 포함)
+    """DN_국내 데이터 로드 (SO 정보 보강)
 
-    DN 시트의 DN_ID/SO_ID를 기준으로 SO 시트에서 품목/금액 정보를 가져옵니다.
-    Single Source of Truth: Item 정보는 SO_국내에서만 관리.
+    DN 시트의 DN_ID/SO_ID + Line item을 기준으로 SO 시트와 병합합니다.
+    단, 수량/단가/품목(Item qty·Sales Unit Price·Item name)은 '주문' 값이 아니라
+    '실제 납품' 값이 거래명세표의 정답이므로 DN_국내 자체 컬럼(Qty·Unit Price·Item)을
+    우선 사용하고, DN 값이 비어 있을 때만 SO 값으로 보강합니다.
+    (부분 납품·SO 한 라인을 여러 번에 나눠 출고하는 분할 납품 시 SO 주문 수량과 달라짐)
 
     Returns:
-        DN 데이터 DataFrame (SO 정보 포함)
+        DN 데이터 DataFrame (SO 정보 보강)
 
     Raises:
         FileNotFoundError: 소스 파일이 없는 경우
@@ -398,6 +401,21 @@ def load_dn_data() -> pd.DataFrame:
         df_so_subset = df_so_subset.drop_duplicates(subset='SO_ID', keep='first')
 
     df_merged = df_dn.merge(df_so_subset, on=join_keys, how='left', suffixes=('', '_SO'))
+
+    # DN_국내가 '실제 납품' 라인(부분·분할 납품 반영)의 정답이다.
+    # SO_국내의 Item qty/Sales Unit Price/Item name 은 '주문' 값이라,
+    # 한 SO 라인을 여러 번에 나눠 출고하거나 일부만 납품하면 실제 납품량과 어긋난다
+    # (예: SO line 9 주문 576 → DN 8 + 212 분할 납품, SO line 4 주문 70 → DN 36 부분 납품).
+    # 따라서 DN 자체 컬럼을 우선하고, DN 값이 비어 있을 때만 SO 값으로 보강한다.
+    _dn_priority = {
+        'Item qty': 'Qty',                 # 수량
+        'Sales Unit Price': 'Unit Price',  # 단가
+        'Item name': 'Item',               # 품목명
+    }
+    for canonical_col, dn_col in _dn_priority.items():
+        if dn_col in df_merged.columns and canonical_col in df_merged.columns:
+            df_merged[canonical_col] = df_merged[dn_col].combine_first(df_merged[canonical_col])
+
     df_merged['_시트구분'] = '국내'
     df_merged['_문서유형'] = 'DN'
 
