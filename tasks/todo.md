@@ -1,7 +1,52 @@
 # Current Tasks
 
-## In Progress
-<!-- - [ ] Task description -->
+## Completed — 감사 수정 (High 1 + Medium 12) [2026-06-22]
+멀티에이전트 감사(101 발견→53 확정) 중 High 1 + Medium 12 수정. pytest 281 passed.
+- [x] #1  dashboard.py: 날짜 1900 더미 정화 중앙화 (_sanitize_date) — load_so 4컬럼 + load_backlog
+- [x] #2  utils.py: _load_and_merge_sheets / load_dn_data 복합키 머지 참조측 dedup + 경고
+- [x] #3  utils.py: resolve_column 캐시 키 id(columns) → tuple(columns)
+- [x] #4  create_ts.py: --merge 중복 DN_ID dedup + 경고
+- [x] #5  ts_generator.py: 수량 파싱 int(raw_qty) → int(float(raw_qty))
+- [x] #6  db_sync.py: prune 2곳 rowid 기준 삭제 + rowcount 확인
+- [x] #7  reconcile_so.py: FX 월매칭 연도 인식 (연도폴더 → 정확매칭)
+- [x] #8  reconcile_so.py: 매출일 결측 월필터 누락 경고
+- [x] #9  reconcile_ind.py: ind_code 정규화 헬퍼 공유 (마스터/SO 양측)
+- [x] #10 dashboard.py: 납기현황 SO 합계 전체 라인 기준으로 수정 (+PO EXW fan-out 방지)
+- [x] #11 order_book_variance.sql: 납기변경 상쇄쌍(net≈0) 매칭
+- [x] #12 migrate_sync_log.py: v1 마이그레이터 → _sync_log_legacy_v1 전용 테이블
+- [x] #13 create_ts.py: 월합 출력 파일명 충돌 안전장치
+- [x] 검증: pytest 281 passed + 순수로직/prune sqlite 시뮬 검증
+
+## Completed — 2차 감사 수정 (재심복구 + 신규 + 회귀) [2026-06-22]
+2차 워크플로우: 기각48 재심→7 진짜버그 복구, 신규17 확정, 회귀3. pytest 281 passed.
+수정 적용분:
+- [x] 회귀#10 dashboard 납기현황: 라인별 잔여 음수(과출고) clamp(>=0) — 부족분 상계 방지
+- [x] 회귀#6  sync_db: 삭제 감사로그를 pruned_snapshots 1:1 순회 (중복/스냅샷유실 제거)
+- [x] sync_db: 롤백(total_errors>0)시 _sync_log 유령기록 방지 게이팅 (HIGH)
+- [x] qty int(raw_qty)→int(float()) — fi/ci/oc/pi/pl 5개 생성기 (HIGH, TS와 동일클래스)
+- [x] reconcile_so: AX Project 정규화 헬퍼 양측 적용 (.0 업캐스트 매칭불가→매출누락) (HIGH)
+- [x] reconcile_so: 해외 'Total Sales KRW' 결측 경고 (KRW 0집계→불일치 오표시) (HIGH)
+- [x] create_pi: 비숫자 단가 :.2f 가드 (배치 전체 중단 방지)
+
+### Completed — 2차 MEDIUM 6건 [2026-06-22]
+- [x] reconcile_po: 1:N AX PO 이중계상 → _line_id로 계산서금액 분배 (_agg_delivery, .copy로 격리)
+- [x] reconcile_po: ax_service 국내/해외 키 disjoint(이중계상 방지) + 미분류 Product GRN 경고
+- [x] snapshot.py: 마감 시 출하·KRW 공란 해외 DN 경고 (phantom backlog 동결 전 surface)
+- [x] create_fi: 복수 RCK PO 분리 시 공란 RCK PO 라인 누락 경고
+- [x] document_service --po FI: 복수 DN 통합 시 Invoice No 대표DN 경고
+- [x] dashboard load_backlog + order_book_backlog/_snapshot_backlog.sql: ROUND 통일 (order_book/snapshot과 tie-out)
+- [x] 검증: pytest 281 passed + reconcile_po 분배/disjoint 시뮬 + 라이브DB SQL 실행확인
+
+### 미적용 (2차 LOW — 추후)
+- dashboard Order Book 마감 스냅샷 미사용 — 마감월도 라이브값 (LOW, 캡션 보강 권장)
+- fi/ci 0단가 fallback이 무상라인을 SO가로 청구 (LOW)
+- snapshot EDD-move Start=0 attribution / 과거기간 소급편집 귀속 (LOW, variance.sql이 중화)
+
+### 미적용 (1차 LOW 39건)
+대표: create_po --force 검증오류 동반묵살, FI 모델 prefix 누락, margin basis mismatch,
+sync-log 부분문자열 매칭, OTD drop_duplicates fan-out 등
+
+## Pending
 
 ## Pending
 - [ ] Power Query → SQL 쿼리 세트 구현 (DB 활용)
