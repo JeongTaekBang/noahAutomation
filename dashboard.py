@@ -732,7 +732,7 @@ def load_backlog() -> pd.DataFrame:
                SUM(in_amt  - out_amt) AS ending_amount
         FROM events
         GROUP BY SO_ID, os_name, delivery_date
-        HAVING SUM(in_amt - out_amt) > 0
+        HAVING ABS(SUM(in_qty - out_qty)) > 0.001 OR SUM(in_amt - out_amt) > 0.5
         ORDER BY market, SO_ID, os_name
         """, conn)
     except Exception as e:
@@ -2569,9 +2569,9 @@ def pg_today(market, sectors, customers, **_):
                     if d <= 7:
                         return "① 7일 이내"
                     if d <= 14:
-                        return "② 7~14일"
+                        return "② 8~14일"
                     if d <= 30:
-                        return "③ 14~30일"
+                        return "③ 15~30일"
                     return "④ 30일+"
 
                 tax_pending["aging"] = tax_pending["경과일"].apply(_tax_aging)
@@ -2618,8 +2618,8 @@ def pg_today(market, sectors, customers, **_):
                         금액=("amount_krw", "sum"),
                     ).reset_index().sort_values("aging")
                     aging_colors = {
-                        "① 7일 이내": C_ENDING, "② 7~14일": "#ff9800",
-                        "③ 14~30일": C_PURPLE, "④ 30일+": C_DANGER,
+                        "① 7일 이내": C_ENDING, "② 8~14일": "#ff9800",
+                        "③ 15~30일": C_PURPLE, "④ 30일+": C_DANGER,
                     }
                     fig_ta = px.bar(aging_agg, x="aging", y="금액", color="aging",
                                     labels={"aging": "출고 후 경과", "금액": "미발행 금액"},
@@ -3226,7 +3226,8 @@ def pg_product(market, sectors, customers, year, month):
     dn_raw = load_dn()
     dn_ej = enrich_dn(dn_raw, load_so())
     dn_f = filt(dn_ej, market, sectors, customers, period_col=None)
-    so_del = so[["SO_ID", "line_item", "delivery_date"]].drop_duplicates()
+    # SO 라인당 납기 1건으로 축소 — 납기 불일치 시 DN 행 fan-out 방지
+    so_del = so.groupby(["SO_ID", "line_item"], as_index=False)["delivery_date"].min()
     if not dn_f.empty and not so_del.empty:
         otd_raw = dn_f.merge(so_del, on=["SO_ID", "line_item"], how="left")
         otd_raw = otd_raw[otd_raw["delivery_date"].notna() & otd_raw["dispatch_date"].notna()]
@@ -3858,7 +3859,8 @@ def pg_customer(market, sectors, customers, year, month):
     dn_raw = load_dn()
     dn_ej = enrich_dn(dn_raw, load_so())
     dn_f = filt(dn_ej, market, sectors, customers, period_col=None)
-    so_del = so[["SO_ID", "line_item", "delivery_date"]].drop_duplicates()
+    # SO 라인당 납기 1건으로 축소 — 납기 불일치 시 DN 행 fan-out 방지
+    so_del = so.groupby(["SO_ID", "line_item"], as_index=False)["delivery_date"].min()
     if not dn_f.empty and not so_del.empty:
         otd_raw = dn_f.merge(so_del, on=["SO_ID", "line_item"], how="left")
         otd_raw = otd_raw[otd_raw["delivery_date"].notna() & otd_raw["dispatch_date"].notna()]
@@ -4332,7 +4334,9 @@ def pg_margin(market, sectors, customers, year, month):
         ).reset_index()
         merged = merged.merge(dn_agg, on="SO_ID", how="left")
     merged["dn_amount"] = merged["dn_amount"].fillna(0) if "dn_amount" in merged.columns else 0
-    merged["unbilled_amount"] = merged["amount_krw"] - merged["dn_amount"]
+    # DN은 기간 필터 없이(전체) 로드되므로 SO만 기간 필터 시 음수가 될 수 있음 → 차트 왜곡 방지 위해 0 하한
+    merged["unbilled_amount"] = (merged["amount_krw"] - merged["dn_amount"]).clip(lower=0)
+    st.caption("미출고금액은 기간 필터 적용 시 부정확할 수 있음 (전체 기간 기준 권장)")
 
     # 원가 확정 건만 마진 계산
     costed = merged[merged["has_cost"]]
@@ -4518,6 +4522,7 @@ def pg_orderbook(market, sectors, customers, **_):
         c2.metric("Backlog 건수", "0건")
         c3.metric("납기 지연", "0건")
         c4.metric("납기 임박", "0건")
+    st.caption("라이브 값 — 마감 확정치 아님 (close_period --list 와 다를 수 있음)")
 
     # ── OB 데이터 로드 (탭 공용) ──
     ob = load_order_book()
@@ -5221,7 +5226,9 @@ def _render_order_timeline() -> None:
         st.info("동기화 로그가 비어 있습니다.")
         return
 
-    mask = log_df["pk"].apply(lambda pk: any(rid in pk for rid in related))
+    # pk_display 첫 토큰(주문 ID)만 정확 매칭 — 부분일치로 인한 오매칭 방지
+    rel = set(related)
+    mask = log_df["pk_json"].apply(lambda j: (json.loads(j)[0] if j else None) in rel)
     events = log_df[mask].copy()
 
     if events.empty:
@@ -5381,8 +5388,10 @@ def _render_sync_log_explore() -> None:
         related = resolve_related_ids(order_query)
         if related:
             st.caption(f"연관 ID {len(related)}개: `{'`, `'.join(related)}`")
-            mask = filtered["pk"].apply(
-                lambda pk: any(rid in pk for rid in related)
+            # pk_display 첫 토큰(주문 ID)만 정확 매칭 — 부분일치로 인한 오매칭 방지
+            rel = set(related)
+            mask = filtered["pk_json"].apply(
+                lambda j: (json.loads(j)[0] if j else None) in rel
             )
             filtered = filtered[mask]
         else:
