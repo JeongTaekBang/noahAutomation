@@ -140,6 +140,11 @@ def build_mapping() -> tuple[dict[str, tuple[str, object, str | None]], set[str]
             "SO 중복 SO_ID %d건 (첫 번째만 사용): %s",
             len(so_dups), so_dups,
         )
+    # 값 있는 행이 우선되도록 정렬 — 빈값-먼저/값-나중 중복에서 keep='first'가
+    # 빈값을 남기지 않도록 (NaN을 뒤로 보냄). stable 정렬로 원래 순서 보존.
+    so_map = so_map.sort_values(
+        by=[SO_IND_COL, SO_SECTOR_COL], na_position='last', kind='stable',
+    )
     so_map = so_map.drop_duplicates(subset=[PO_SO_ID_COL])
 
     # Join & build dict
@@ -201,6 +206,23 @@ def fill_industry_code(
         else:
             result.at[idx, '매핑상태'] = 'PO에 발주번호 없음'
             po_missing += 1
+
+    # 리포트 전용: 기존(값 있는) Industry code가 PO→SO 매핑과 다른 건수만 집계.
+    # 데이터는 절대 수정하지 않고 점검 필요 건수만 경고로 노출.
+    mismatch_existing = 0
+    for idx in result[~null_mask].index:
+        order_no = result.at[idx, '발주번호']
+        if pd.isna(order_no):
+            continue
+        order_no = str(order_no).strip()
+        if order_no in mapping:
+            _, ind_code, _ = mapping[order_no]
+            if ind_code is not None and ind_code != result.at[idx, ind_col]:
+                mismatch_existing += 1
+    if mismatch_existing > 0:
+        logger.warning(
+            "기존 Industry code가 매핑과 불일치 %d건 — 점검 필요", mismatch_existing,
+        )
 
     return result, total_null, filled, so_missing, po_missing, dup_review
 

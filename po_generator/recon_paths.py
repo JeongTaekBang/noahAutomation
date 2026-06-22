@@ -25,18 +25,27 @@ def resolve_period_dir(recon_dir: Path, period_code: str) -> Path | None:
     """
     period = period_code.upper()
     direct = recon_dir / period
-    if direct.is_dir():
-        return direct
+    # 플랫 폴더는 실제로 파일이 있을 때만 우선 — 빈 폴더가 연도 중첩 폴더를
+    # 가리지 않도록 (빈 플랫 폴더면 아래 연도 스캔으로 폴백).
+    direct_populated = direct.is_dir() and any(direct.glob('*.xlsx'))
     if not recon_dir.exists():
-        return None
+        return direct if direct_populated else None
     matches: list[Path] = []
     for sub in sorted(recon_dir.iterdir(), key=lambda p: p.name, reverse=True):
         if sub.is_dir() and _YEAR_RE.match(sub.name):
             cand = sub / period
             if cand.is_dir():
                 matches.append(cand)
+    if direct_populated:
+        if matches:
+            logger.warning(
+                "[경고] %s/%s 플랫 폴더와 연도 폴더(%s) 양쪽에 존재 — 플랫 폴더 우선 사용",
+                recon_dir.name, period, ", ".join(m.parent.name for m in matches),
+            )
+        return direct
     if not matches:
-        return None
+        # 연도 매치는 없지만 빈 플랫 폴더라도 존재하면 그 경로 반환 (기존 동작 유지).
+        return direct if direct.is_dir() else None
     chosen = matches[0]
     if len(matches) > 1:
         others = ", ".join(m.parent.name for m in matches[1:])

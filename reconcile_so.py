@@ -296,9 +296,11 @@ def build_reconciliation(
 
     merged['매칭상태'] = merged.apply(_status, axis=1)
 
-    # Customer: AX 파일 우선
+    # Customer: AX 파일 우선 (빈 문자열도 NOAH 측으로 백필 — fillna는 NaN만 채움)
     if 'Customer_x' in merged.columns:
-        merged['Customer'] = merged['Customer_x'].fillna(merged['Customer_y'])
+        merged['Customer'] = (merged['Customer_x']
+                              .replace('', np.nan)
+                              .fillna(merged['Customer_y']))
     else:
         merged['Customer'] = merged.get('Customer', '')
 
@@ -328,7 +330,10 @@ def build_reconciliation(
             merged.at[idx, '재계산_KRW'] = recalc
 
             ax_amt = row['AX_금액']
-            if abs(recalc - ax_amt) < FX_DIFF_THRESHOLD:
+            # 상대 허용오차(0.5%) + 절대 하한 — 대형 외화매출에서 100원 고정 임계값이
+            # 비현실적으로 빡빡해지는 문제 방지. 라벨에만 영향, 차이 컬럼은 불변.
+            tol = max(FX_DIFF_THRESHOLD, abs(ax_amt) * 0.005)
+            if abs(recalc - ax_amt) < tol:
                 merged.at[idx, '매칭상태'] = '일치(환율차이)'
 
     # Summary
@@ -367,10 +372,12 @@ def write_output(
     ], columns=['매칭상태', '설명'])
 
     # 상세 시트용 컬럼 정리
+    # 매출일(= 국내 출고일 / 해외 선적일)은 월 필터 기준이므로 포함 —
+    # 해외 라인의 기준일이 추적 가능하도록 선적일/구분도 함께 노출.
     detail_cols = [c for c in [
         AX_PROJECT_COL, 'DN_ID', 'SO_ID', 'Line item', 'Customer name',
         'Item', 'Qty', 'Unit Price', 'Total Sales',
-        'Currency', 'Total Sales KRW', '출고일', '구분',
+        'Currency', 'Total Sales KRW', '출고일', '선적일', '매출일', '구분',
     ] if c in detail.columns]
     detail_out = detail[detail_cols].copy()
 
