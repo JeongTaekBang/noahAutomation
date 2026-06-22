@@ -20,6 +20,35 @@
 
 ---
 
+## 2026-06-22: Sync 이력 로깅 개선 — 버그·UX·직관성 (멀티에이전트 리뷰 후속)
+
+### 배경
+sync 이력(`_sync_log`/`_sync_runs`) 기능을 멀티에이전트 + 적대적 검증으로 재리뷰(37건 확정). 데이터 무결성을 깨는 버그는 없었고, 이력의 "조회·견고성·의미 표현"에 집중된 항목을 수정.
+
+### 변경
+**sync_db.py**
+- 로그 기록(`write_sync_log_to_db`)을 try/except로 격리 — 로그 저장 실패가 이미 commit된 동기화 요약 출력/정상 종료코드를 가리던 문제 해소(스케줄러 오판 방지).
+- PK를 `_normalize_pk`로 일괄 정규화 — 동일 레코드의 신규/수정/삭제 이벤트가 `1.0` vs `1`로 다른 키로 남던 비대칭 제거.
+- 변경 0건도 `_sync_runs` 실행 이력 1행 기록(누가/언제 동기화 감사) + 변경 이력 조회 안내 출력.
+- `--log [N]`(최근 세션 이력)·`--note`(세션 메모) 신규. `PRAGMA foreign_keys=ON`. 콘솔 표 전각(한글) 정렬 보정. `--changes` 롤백 시 '미적용' 경고 헤더.
+
+**db_schema.py / db_sync.py**
+- `create_sync_run(started_at=...)`로 `_sync_runs.started_at`을 실제 동기화 시작시각으로 기록(기존엔 '로그쓰기 시점'이라 시작/종료가 거의 동일했음).
+- prune 삭제 스냅샷을 Excel 헤더가 아닌 **전체 DB 컬럼 기준**으로 통일(`_prune_snapshot_columns`) — 빈시트/정상 경로 완전성 일치, 시트에서 사라진 잔류 컬럼도 보존.
+
+**dashboard.py**
+- 주문검색 매칭을 첫 토큰 → **PK 전체 토큰 대조**(`_pk_tokens`) — 삭제(prune)된 DN을 SO_ID로 검색 시 누락 + 빈 PK/깨진 JSON 페이지 크래시 동시 해결(타임라인·탐색 2곳).
+- 세션 요약에 실제 소요(초) 추가 + 항상 공백이던 dry_run 컬럼 제거, 추이 차트 `errors='coerce'`, ack 성공/실패 반환+`st.error`, 관여자 빈값 `(unknown)` 정규화, `resolve_related_ids` 2→6 pass, `_so_change_ack` 연결 FK 강제.
+
+**문서/마이그레이션**
+- `DB_SYNC_GUIDE.md` 기록규칙을 폐기된 v1 → v2로 정정(존재하지 않는 `old_value`/`new_value`/`column_name` 설명 제거), started_at/dry_run 설명·`--log`/`--note` 추가.
+- `migrate_sync_log.py` `input()`에 비대화형(`isatty`) 가드.
+
+### 검증
+py_compile 6파일 OK, `pytest tests/` 281 passed/2 skipped, 스모크(write 경로 pk정규화·0건 run·note·started_at / prune 정상+빈시트 / 대시보드 변환 실DB 1000행) 전부 통과.
+
+---
+
 ## 2026-06-22: 전면 코드 감사 — 정합성 버그 일괄 수정 (High 1 + Medium 18 + LOW 30)
 
 ### 배경

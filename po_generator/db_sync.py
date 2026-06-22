@@ -64,6 +64,10 @@ class SyncSummary:
     elapsed_seconds: float = 0.0
     source_file: str = ''
     db_file: str = ''
+    # 실제 동기화 시작시각('YYYY-MM-DD HH:MM:SS') — _sync_runs.started_at에 사용.
+    # 로그 적재(write_sync_log_to_db)는 sync 종료 직후라, 이 값을 넘기지 않으면
+    # 세션 시작/종료가 '로그쓰기 구간'으로 왜곡된다.
+    started_at: str = ''
 
     @property
     def total_rows(self) -> int:
@@ -157,6 +161,16 @@ def _normalize_pk(pk: tuple) -> tuple:
     return tuple(out)
 
 
+def _prune_snapshot_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
+    """삭제(prune) 스냅샷에 담을 컬럼 목록 — _sync_updated_at 제외 전체 DB 컬럼.
+
+    빈시트 prune과 정상 prune이 동일한 스냅샷 완전성을 갖도록 단일 출처로 통일.
+    (Excel 헤더만 쓰면 과거에 추가됐다가 시트에서 사라진 잔류 컬럼이 누락된다.)
+    """
+    info = conn.execute(f'PRAGMA table_info([{table_name}])').fetchall()
+    return [c[1] for c in info if c[1] != '_sync_updated_at']
+
+
 class SyncEngine:
     """Excel → SQLite 동기화 엔진"""
 
@@ -179,6 +193,7 @@ class SyncEngine:
         summary = SyncSummary(
             source_file=self.excel_path.name,
             db_file=self.db_path.name,
+            started_at=start.strftime("%Y-%m-%d %H:%M:%S"),
         )
 
         if not self.excel_path.exists():
@@ -271,12 +286,8 @@ class SyncEngine:
                 except Exception:
                     row_count = 0
                 if row_count > 0:
-                    safe_pk_cols = [f'[{c}]' for c in config.pk_columns]
-                    # 전체 컬럼 + PK 함께 조회해서 스냅샷 확보
-                    all_cols_info = conn.execute(
-                        f'PRAGMA table_info([{config.table_name}])'
-                    ).fetchall()
-                    snapshot_cols = [c[1] for c in all_cols_info if c[1] != '_sync_updated_at']
+                    # 전체 DB 컬럼(_sync_updated_at 제외) 기준 스냅샷 — 정상 prune과 동일 규칙
+                    snapshot_cols = _prune_snapshot_columns(conn, config.table_name)
                     safe_snap_cols = [f'[{c}]' for c in snapshot_cols]
                     # rowid 포함 조회 → 삭제는 rowid 기준 (정규화-원본 불일치로
                     # DELETE가 0행 매칭하면서 pruned가 과대 집계되는 문제 방지)
@@ -447,13 +458,17 @@ class SyncEngine:
                     logger.warning("%s - %s", config.sheet_name, msg)
 
             # 8. Prune: Excel에서 삭제된 행 제거 (스냅샷 캡처 후 DELETE)
-            # rowid와 전체 컬럼을 함께 조회 — 정규화 PK는 비교용으로만 쓰고
+            # rowid와 전체 DB 컬럼을 함께 조회 — 정규화 PK는 비교용으로만 쓰고
             # 삭제는 rowid 기준으로 수행해 정규화('42')-원본('42.0'/NULL) 불일치로
             # DELETE가 0행 매칭하면서 pruned가 과대 집계되는 문제를 방지한다.
+            # 스냅샷은 Excel 헤더가 아닌 전체 DB 컬럼 기준 → 시트에서 사라진 잔류 컬럼도 보존
+            # (빈시트 prune 경로와 동일 규칙).
+            snapshot_cols = _prune_snapshot_columns(conn, config.table_name)
+            safe_snap_cols = [f'[{c}]' for c in snapshot_cols]
             db_rows = conn.execute(
-                f'SELECT rowid, {", ".join(safe_cols)} FROM [{config.table_name}]'
+                f'SELECT rowid, {", ".join(safe_snap_cols)} FROM [{config.table_name}]'
             ).fetchall()
-            pk_pos = [columns.index(c) for c in pk_cols if c in columns]
+            pk_pos = [snapshot_cols.index(c) for c in pk_cols if c in snapshot_cols]
             norm_to_rows: dict[tuple, list] = {}
             for r in db_rows:
                 rid, data = r[0], r[1:]
@@ -466,7 +481,7 @@ class SyncEngine:
                 for stale_pk in stale_pks:
                     for rid, data in norm_to_rows[stale_pk]:
                         # 삭제 직전 행 스냅샷 캡처 (감사/복구용)
-                        snap = {col: data[i] for i, col in enumerate(columns)
+                        snap = {col: data[i] for i, col in enumerate(snapshot_cols)
                                 if data[i] is not None and str(data[i]) != ''}
                         result.pruned_snapshots.append({'pk': stale_pk, 'snapshot': snap})
                         cur = conn.execute(

@@ -289,9 +289,18 @@ def _resolve_actor() -> str | None:
 
 
 def create_sync_run(conn: sqlite3.Connection, dry_run: bool = False,
-                    note: str | None = None) -> int:
-    """동기화 세션 시작 → _sync_runs 행 INSERT 후 sync_id 반환."""
-    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    note: str | None = None,
+                    started_at: str | None = None) -> int:
+    """동기화 세션 시작 → _sync_runs 행 INSERT 후 sync_id 반환.
+
+    started_at: 실제 동기화 시작시각(SyncSummary.started_at)을 넘기면 그대로 기록.
+        None이면 호출 시각으로 대체. 로그 적재가 sync 종료 직후 일어나므로,
+        넘기지 않으면 '로그쓰기 시점'이 기록되어 세션 시작/종료 구간이 왜곡된다.
+    dry_run: 운영 경로에서는 항상 False — dry-run 동기화는 롤백되므로
+        _sync_log/_sync_runs에 기록하지 않는다(유령 변경 방지). 컬럼은 과거
+        마이그레이션 데이터 호환 목적으로만 유지된다.
+    """
+    started_at = started_at or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     actor = _resolve_actor()
     host = socket.gethostname()
     cur = conn.execute(

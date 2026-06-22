@@ -18,6 +18,9 @@ python sync_db.py --changes                 # 동기화 + 변경 내역 표시
 python sync_db.py --sheets SO_국내 PO_국내  # 특정 시트만
 python sync_db.py --dry-run                 # 시뮬레이션 (DB 변경 안 함)
 python sync_db.py --info                    # DB 현황 조회
+python sync_db.py --log                     # 최근 20개 동기화 세션 이력 조회
+python sync_db.py --log 50                  # 최근 50개 세션
+python sync_db.py --note "3월 마감 반영"    # 세션 메모 남기기 (_sync_runs.note)
 python sync_db.py -v                        # 상세 로그
 ```
 
@@ -64,13 +67,13 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 | 컬럼 | 설명 |
 |------|------|
 | `sync_id` | AUTOINCREMENT PK — 모든 `_sync_log` 행의 FK |
-| `started_at` | 세션 시작 (`YYYY-MM-DD HH:MM:SS`) |
-| `ended_at` | 세션 종료 (변경 0건이면 NULL 가능) |
+| `started_at` | 실제 동기화 시작시각 (`YYYY-MM-DD HH:MM:SS`) — sync 실행 시점 |
+| `ended_at` | 로그 적재 완료 시각. 대시보드 소요(초) = `ended_at − started_at` |
 | `actor` | 실행 사용자 (`USERNAME` env, fallback `os.getlogin()`) |
 | `host` | 실행 호스트 (`socket.gethostname()`) |
-| `dry_run` | 0=실제 commit, 1=dry-run (현재 dry-run은 _sync_log 안 씀) |
-| `total_changes` | 이번 세션 record 수 |
-| `note` | `migrated from v1` 등 주석 |
+| `dry_run` | 운영상 항상 0 — dry-run은 롤백되어 `_sync_log`/`_sync_runs`에 기록 안 함. 컬럼은 마이그레이션 데이터 호환용 |
+| `total_changes` | 이번 세션 record 수 (0이면 변경 없는 실행 이력) |
+| `note` | `--note` 인자로 남긴 메모 또는 `migrated from v1` 등 주석 |
 
 ### 변경 이력 테이블 `_sync_log` (v2)
 
@@ -145,10 +148,13 @@ python migrate_sync_log_v2.py --drop-legacy  # 검증 끝나면 _sync_log_legacy
 
 동기화할 때마다 변경 내역이 `noah_data.db`의 `_sync_log` 테이블에 자동 누적됨. Streamlit 대시보드의 **동기화 로그** 페이지에서 필터·검색·CSV 내보내기 가능.
 
-**기록 규칙:**
-- **신규**: 비어있지 않은 필드마다 1행씩 기록 (`old_value` = NULL)
-- **수정**: 변경된 필드마다 1행씩 기록 (`old_value` / `new_value` 모두 채움)
-- **삭제**: PK만 기록 (`column_name` / `old_value` / `new_value` 모두 NULL)
+**기록 규칙 (v2 — record당 1행):**
+- **신규**: `changes_json = {컬럼: 값, ...}` (비어있지 않은 값만), `row_snapshot_json` = NULL
+- **수정**: `changes_json = {컬럼: {old, new}, ...}` (변경된 컬럼만), `row_snapshot_json` = NULL
+- **삭제**: `row_snapshot_json = {컬럼: 값, ...}` (삭제 직전 행 스냅샷), `changes_json` = NULL
+- **변경 0건**: `_sync_log` 행은 없어도 `_sync_runs`에 실행 이력 1행은 남김 (누가/언제 동기화했는지 감사)
+
+> 과거 v1(필드당 1행, `column_name`/`old_value`/`new_value` 컬럼)은 폐기됨. 현행 v2 `_sync_log`에는 그 컬럼들이 **존재하지 않으므로**, SQL 작성 시 `changes_json` / `row_snapshot_json`(JSON)을 사용한다. PK는 신규/수정/삭제 모두 동일 정규화 규칙으로 기록되어 한 레코드의 생애주기를 같은 `pk_display`로 추적 가능. 마이그레이션된 과거 삭제 이벤트는 스냅샷이 없어 대시보드에 "(스냅샷 없음)"으로 표시된다.
 
 **조회 방법:**
 

@@ -110,7 +110,17 @@ def main() -> int:
         existing = conn.execute(f"SELECT COUNT(*) FROM {LEGACY_TABLE}").fetchone()[0]
         if existing > 0:
             print(f"\n경고: {LEGACY_TABLE}에 이미 {existing:,}행 존재")
-            ans = input("계속하면 중복 가능. 진행? [y/N]: ").strip().lower()
+            # 비대화형(CI/리다이렉트/파이프) 환경에서 input()이 EOFError로 죽거나
+            # hang되는 것을 방지 — stdin이 tty가 아니면 중복 삽입을 막기 위해 취소.
+            if not sys.stdin.isatty():
+                print("비대화형 실행 감지 — 중복 삽입 방지를 위해 취소. "
+                      "(의도적이면 대화형 터미널에서 재실행)")
+                return 0
+            try:
+                ans = input("계속하면 중복 가능. 진행? [y/N]: ").strip().lower()
+            except EOFError:
+                print("입력 없음 — 취소됨")
+                return 0
             if ans != 'y':
                 print("취소됨")
                 return 0

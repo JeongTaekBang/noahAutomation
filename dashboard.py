@@ -804,7 +804,9 @@ def resolve_related_ids(input_id: str) -> list[str]:
     """입력 ID(SO/PO/DN 중 하나)와 연관된 모든 ID 집합 반환.
 
     po_domestic/po_export로 SO_ID ↔ PO_ID 매핑, dn_domestic/dn_export로
-    SO_ID ↔ DN_ID 매핑을 따라가며 관련 ID를 확장. 2-pass로 수렴.
+    SO_ID ↔ DN_ID 매핑을 따라가며 관련 ID를 확장. 수렴할 때까지 반복하되
+    안전 상한 6회 (한 PO가 여러 SO를 묶고 그 SO들이 또 다른 DN으로 퍼지는
+    다단 매핑에서 2회로는 미수렴 가능 — break로 조기 종료).
     """
     input_id = input_id.strip()
     if not input_id:
@@ -814,7 +816,7 @@ def resolve_related_ids(input_id: str) -> list[str]:
         return [input_id]
     try:
         ids: set[str] = {input_id}
-        for _ in range(2):
+        for _ in range(6):
             before = len(ids)
             placeholders = ",".join("?" for _ in ids)
             params = tuple(ids)
@@ -853,6 +855,25 @@ def resolve_related_ids(input_id: str) -> list[str]:
         conn.close()
     # 빈 값 제거 + 정렬 (UI 표시 일관성)
     return sorted(i for i in ids if i)
+
+
+def _pk_tokens(pk_json) -> list[str]:
+    """pk_json 문자열 → 토큰 리스트(전부 str). 빈값/깨진 JSON은 빈 리스트.
+
+    주문검색 매칭은 첫 토큰만이 아니라 모든 PK 토큰과 대조해야 한다 — DN PK는
+    (DN_ID, SO_ID, Line item)이라 SO_ID가 index 1에 있고, 삭제(prune)된 DN은
+    dn 테이블에서 사라져 resolve_related_ids가 DN_ID를 못 주므로, SO_ID 토큰으로
+    잡지 못하면 삭제 이력이 통째로 누락된다. ('[]'/None에서 IndexError 크래시도 방지)
+    """
+    if not pk_json:
+        return []
+    try:
+        arr = json.loads(pk_json)
+    except Exception:
+        return []
+    if not isinstance(arr, list):
+        return []
+    return [str(t) for t in arr]
 
 
 @st.cache_data(ttl=60)
@@ -1024,12 +1045,13 @@ def load_so_unauth_changes() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _ack_so_change(sync_log_id: int, note: str | None = None) -> None:
-    """미확인 SO 변경을 ack 처리. 캐시 무효화는 호출자 책임."""
+def _ack_so_change(sync_log_id: int, note: str | None = None) -> bool:
+    """미확인 SO 변경을 ack 처리. 성공 True / 실패 False. 캐시 무효화는 호출자 책임."""
     conn = _conn()
     if not conn:
-        return
+        return False
     try:
+        conn.execute("PRAGMA foreign_keys=ON")  # _so_change_ack.sync_log_id → _sync_log FK 강제
         ensure_so_change_ack_table(conn)
         acked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         acked_by = os.environ.get("USERNAME") or os.environ.get("USER") or ""
@@ -1039,8 +1061,10 @@ def _ack_so_change(sync_log_id: int, note: str | None = None) -> None:
             (sync_log_id, acked_at, acked_by, note),
         )
         conn.commit()
+        return True
     except Exception as e:
         logger.warning("SO 변경 ack 실패 (id=%s): %s", sync_log_id, e)
+        return False
     finally:
         conn.close()
 
@@ -1466,9 +1490,11 @@ def _render_so_unauth_changes(market: str):
                 st.caption(f"sync_id={row['sync_id']}  ·  변경자: {row['actor'] or '-'}  ·  {row['sync_time']}")
             with c2:
                 if st.button("✅ 확인 완료", key=f"ack_so_{log_id}", width='stretch'):
-                    _ack_so_change(log_id)
-                    load_so_unauth_changes.clear()
-                    st.rerun()
+                    if _ack_so_change(log_id):
+                        load_so_unauth_changes.clear()
+                        st.rerun()
+                    else:
+                        st.error("확인 처리 실패 — 잠시 후 다시 시도하세요.")
 
 
 def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
@@ -5226,9 +5252,10 @@ def _render_order_timeline() -> None:
         st.info("동기화 로그가 비어 있습니다.")
         return
 
-    # pk_display 첫 토큰(주문 ID)만 정확 매칭 — 부분일치로 인한 오매칭 방지
+    # PK 전체 토큰을 연관 ID 집합과 대조 — 첫 토큰만 보면 DN의 SO_ID(index 1)나
+    # 삭제(prune)된 DN 이력을 놓친다. _pk_tokens가 빈값/깨진 JSON도 안전 처리.
     rel = set(related)
-    mask = log_df["pk_json"].apply(lambda j: (json.loads(j)[0] if j else None) in rel)
+    mask = log_df["pk_json"].apply(lambda j: any(t in rel for t in _pk_tokens(j)))
     events = log_df[mask].copy()
 
     if events.empty:
@@ -5252,7 +5279,12 @@ def _render_order_timeline() -> None:
     n_d = int((events["change_type"] == "삭제").sum())
     first_evt = events["sync_time_dt"].min()
     last_evt = events["sync_time_dt"].max()
-    actors = events["actor"].dropna().unique()
+    # 빈 문자열/NULL actor는 '(unknown)'으로 통일 — 카드 단위 표기(actor or '(unknown)')와 일관,
+    # dropna만으로는 거르지 못하는 ''가 'a, , b'처럼 dangling separator를 만드는 문제 방지.
+    actors = sorted(
+        events["actor"].fillna("").astype(str).str.strip()
+        .replace("", "(unknown)").unique()
+    )
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("총 이벤트", f"{n_evt:,}")
@@ -5261,8 +5293,8 @@ def _render_order_timeline() -> None:
         k3.metric("최초 기록", first_evt.strftime("%Y-%m-%d %H:%M"))
     if pd.notna(last_evt):
         k4.metric("최근 변경", last_evt.strftime("%Y-%m-%d %H:%M"))
-    if len(actors) > 0:
-        st.caption(f"관여자: {', '.join(sorted(actors))}")
+    if actors:
+        st.caption(f"관여자: {', '.join(actors)}")
 
     # 카드 렌더링 상한 — 너무 많을 때 페이지 과부하 방지
     max_cards = 200
@@ -5388,10 +5420,10 @@ def _render_sync_log_explore() -> None:
         related = resolve_related_ids(order_query)
         if related:
             st.caption(f"연관 ID {len(related)}개: `{'`, `'.join(related)}`")
-            # pk_display 첫 토큰(주문 ID)만 정확 매칭 — 부분일치로 인한 오매칭 방지
+            # PK 전체 토큰을 연관 ID 집합과 대조 (삭제된 DN의 SO_ID 토큰까지 매칭)
             rel = set(related)
             mask = filtered["pk_json"].apply(
-                lambda j: (json.loads(j)[0] if j else None) in rel
+                lambda j: any(t in rel for t in _pk_tokens(j))
             )
             filtered = filtered[mask]
         else:
@@ -5418,6 +5450,11 @@ def _render_sync_log_explore() -> None:
         # 필터된 sync_id만 표시
         active_sids = set(filtered["sync_id"].unique())
         runs_view = runs_df[runs_df["sync_id"].isin(active_sids)].copy()
+        # 실제 소요(초) = 종료 - 시작. started_at은 실제 sync 시작시각으로 기록되므로
+        # 둘의 차이가 세션 소요시간을 나타낸다('시작/종료'가 거의 동일하던 문제 해소).
+        _start = pd.to_datetime(runs_view["started_at"], errors="coerce")
+        _end = pd.to_datetime(runs_view["ended_at"], errors="coerce")
+        runs_view["소요(초)"] = (_end - _start).dt.total_seconds()
         # 필터된 결과의 시트별 카운트도 합쳐서 보여주기
         per_run = filtered.groupby("sync_id").agg(
             필터된_변경=("id", "count"),
@@ -5428,25 +5465,28 @@ def _render_sync_log_explore() -> None:
             삭제=("change_type", lambda s: (s == "삭제").sum()),
         ).reset_index()
         runs_view = runs_view.merge(per_run, on="sync_id", how="left")
+        # dry_run 컬럼은 제거 — 이 뷰는 _sync_log와 조인되어 항상 0(dry-run은 로그 미기록).
         runs_view = runs_view[[
-            "sync_id", "started_at", "ended_at", "actor", "host", "dry_run",
+            "sync_id", "started_at", "소요(초)", "actor", "host",
             "필터된_변경", "시트수", "영향PK수", "신규", "수정", "삭제", "note",
         ]]
         runs_view.columns = [
-            "sync_id", "시작", "종료", "사용자", "호스트", "dry_run",
+            "sync_id", "시작", "소요(초)", "사용자", "호스트",
             "변경수(필터)", "시트수", "PK수", "신규", "수정", "삭제", "비고",
         ]
-        runs_view["dry_run"] = runs_view["dry_run"].apply(lambda v: "Y" if v else "")
+        runs_view["소요(초)"] = runs_view["소요(초)"].apply(
+            lambda v: "" if pd.isna(v) else f"{int(round(v))}"
+        )
         runs_view["비고"] = runs_view["비고"].fillna("")
         runs_view["사용자"] = runs_view["사용자"].fillna("")
         runs_view["호스트"] = runs_view["호스트"].fillna("")
-        runs_view["종료"] = runs_view["종료"].fillna("")
         st.dataframe(runs_view.head(50), width='stretch', hide_index=True)
 
     # ── 시트별 변경 추이 차트 ──
     st.subheader("시트별 변경 추이")
     trend = filtered.copy()
-    trend["date"] = pd.to_datetime(trend["sync_time"]).dt.date
+    trend["date"] = pd.to_datetime(trend["sync_time"], errors="coerce").dt.date
+    trend = trend.dropna(subset=["date"])
     trend_g = trend.groupby(["date", "sheet_name"]).size().reset_index(name="건수")
     if not trend_g.empty:
         fig = px.bar(

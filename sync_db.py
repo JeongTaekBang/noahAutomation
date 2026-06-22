@@ -20,6 +20,7 @@ import argparse
 import json
 import sqlite3
 import sys
+import unicodedata
 import warnings
 from datetime import datetime
 from pathlib import Path
@@ -31,34 +32,71 @@ from po_generator.db_schema import (
     SYNC_SHEETS, get_sync_metadata, get_table_row_count,
     ensure_sync_log_tables, create_sync_run, finalize_sync_run,
 )
-from po_generator.db_sync import SyncEngine, SyncSummary
+from po_generator.db_sync import SyncEngine, SyncSummary, _normalize_pk
 from po_generator.logging_config import setup_logging
 
 
+def _disp_width(s: str) -> int:
+    """문자열의 터미널 표시폭 — 전각(W/F) 문자는 2칸으로 계산."""
+    return sum(2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1 for ch in str(s))
+
+
+def _ljust_w(s, width: int) -> str:
+    """표시폭 기준 좌측 정렬(우측 공백 패딩)."""
+    s = str(s)
+    return s + ' ' * max(0, width - _disp_width(s))
+
+
+def _rjust_w(s, width: int) -> str:
+    """표시폭 기준 우측 정렬(좌측 공백 패딩)."""
+    s = str(s)
+    return ' ' * max(0, width - _disp_width(s)) + s
+
+
+def _elapsed_str(started: str | None, ended: str | None) -> str:
+    """started/ended('YYYY-MM-DD HH:MM:SS') 차이를 '12s' 형태로. 계산 불가 시 '-'."""
+    if not started or not ended:
+        return "-"
+    try:
+        fmt = "%Y-%m-%d %H:%M:%S"
+        d = (datetime.strptime(ended, fmt) - datetime.strptime(started, fmt)).total_seconds()
+        return f"{int(round(d))}s" if d >= 0 else "-"
+    except Exception:
+        return "-"
+
+
 def print_summary(summary: SyncSummary, dry_run: bool = False) -> None:
-    """동기화 결과를 테이블 형태로 출력"""
+    """동기화 결과를 테이블 형태로 출력 (전각/한글 표시폭 보정)"""
     mode = " (DRY-RUN)" if dry_run else ""
+
+    # 컬럼: (헤더, 표시폭, 정렬 l=좌/r=우)
+    cols = [("시트", 16, "l"), ("행수", 7, "r"), ("신규", 8, "r"),
+            ("수정", 8, "r"), ("삭제", 8, "r"), ("에러", 7, "r")]
+    table_w = sum(w for _, w, _ in cols) + (len(cols) - 1)
+
+    def _row(values) -> str:
+        parts = []
+        for (_, w, align), v in zip(cols, values):
+            parts.append(_ljust_w(v, w) if align == "l" else _rjust_w(v, w))
+        return " ".join(parts)
+
     print(f"\nNOAH Excel → SQLite 동기화{mode}")
-    print("=" * 56)
+    print("=" * table_w)
     print(f"소스: {summary.source_file}")
     print(f"DB:   {summary.db_file}")
 
-    # 테이블 헤더
     print()
-    print(f"{'시트':<14} {'행수':>6} {'신규':>8} {'수정':>8} {'삭제':>8} {'에러':>6}")
-    print("-" * 64)
+    print(_row([h for h, _, _ in cols]))
+    print("-" * table_w)
 
     for r in summary.results:
-        err_mark = f"  *{r.errors}" if r.errors > 0 else f"  {r.errors}"
-        print(f"{r.sheet_name:<14} {r.total_rows:>6} {r.inserted:>8} {r.updated:>8} {r.pruned:>8} {err_mark:>6}")
+        err_mark = f"*{r.errors}" if r.errors > 0 else f"{r.errors}"
+        print(_row([r.sheet_name, r.total_rows, r.inserted, r.updated, r.pruned, err_mark]))
 
-    print("-" * 64)
-    print(
-        f"{'합계':<14} {summary.total_rows:>6} "
-        f"{summary.total_inserted:>8} {summary.total_updated:>8} "
-        f"{summary.total_pruned:>8} "
-        f"{'  *' + str(summary.total_errors) if summary.total_errors > 0 else '  ' + str(summary.total_errors):>6}"
-    )
+    print("-" * table_w)
+    total_err = f"*{summary.total_errors}" if summary.total_errors > 0 else f"{summary.total_errors}"
+    print(_row(["합계", summary.total_rows, summary.total_inserted,
+                summary.total_updated, summary.total_pruned, total_err]))
 
     print(f"\n소요시간: {summary.elapsed_seconds:.1f}초")
 
@@ -83,12 +121,22 @@ def _format_val(val) -> str:
     return s[:40] + '...' if len(s) > 40 else s
 
 
-def print_changes(summary: SyncSummary) -> None:
-    """신규/수정/삭제된 레코드 상세 출력"""
+def print_changes(summary: SyncSummary, rolled_back: bool = False) -> None:
+    """신규/수정/삭제된 레코드 상세 출력.
+
+    rolled_back=True면 에러로 트랜잭션이 ROLLBACK되어 아래 변경이 실제 DB에
+    반영되지 않았음을 경고 헤더로 명시한다(콘솔 출력만 보고 적용된 것으로 오인 방지).
+    """
     has_changes = any(r.inserted_details or r.updated_details or r.pruned_pks for r in summary.results)
     if not has_changes:
         print("\n변경 사항 없음")
         return
+
+    if rolled_back:
+        print("\n" + "!" * 60)
+        print("[주의] 에러로 동기화가 ROLLBACK됨 — 아래 변경은 DB에 적용되지 않았습니다.")
+        print("       데이터 수정 후 재실행하세요. (아래는 참고용 상세)")
+        print("!" * 60)
 
     for r in summary.results:
         if not r.inserted_details and not r.updated_details and not r.pruned_pks:
@@ -133,7 +181,8 @@ def _jdump(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
 
 
-def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
+def write_sync_log_to_db(summary: SyncSummary, note: str | None = None,
+                         db_path: Path = DB_FILE) -> None:
     """동기화 변경 내역을 _sync_log v2 스키마에 기록.
 
     record(레코드)당 1행으로 압축 저장:
@@ -141,19 +190,17 @@ def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
     - 수정: changes_json = {col: {old, new}, ...}, row_snapshot_json = NULL
     - 삭제: changes_json = NULL, row_snapshot_json = {col: value, ...}
 
-    sync 트랜잭션과 분리된 별도 트랜잭션으로 기록 — 로그 기록 실패가
-    이미 commit된 sync 결과를 해치지 않도록.
+    변경이 0건이어도 _sync_runs 실행 이력은 1행 남긴다(누가/언제 동기화했는지 감사).
+    PK는 _normalize_pk로 통일 — 동일 레코드의 신규/수정/삭제 이벤트가 같은 키로 남도록
+    ('1.0' vs '1' 비대칭 방지). sync 트랜잭션과 분리된 별도 트랜잭션으로 기록하며,
+    호출부(main)가 예외를 격리하므로 로그 실패가 이미 commit된 sync 결과를 해치지 않는다.
     """
-    has_changes = any(r.inserted_details or r.updated_details or r.pruned_pks for r in summary.results)
-    if not has_changes:
-        return
-
     rows: list[tuple] = []
     # placeholder sync_id — INSERT 시점에 채움
     for r in summary.results:
         # 신규
         for detail in r.inserted_details:
-            pk_tuple = tuple(detail['pk'])
+            pk_tuple = _normalize_pk(tuple(detail['pk']))
             pk_json = _jdump(list(pk_tuple))
             pk_disp = _format_pk(pk_tuple)
             changes = {col: _to_text(val) for col, val in detail['values'].items()
@@ -163,7 +210,7 @@ def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
 
         # 수정
         for detail in r.updated_details:
-            pk_tuple = tuple(detail['pk'])
+            pk_tuple = _normalize_pk(tuple(detail['pk']))
             pk_json = _jdump(list(pk_tuple))
             pk_disp = _format_pk(pk_tuple)
             changes = {col: {'old': _to_text(old), 'new': _to_text(new)}
@@ -175,7 +222,7 @@ def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
         # 재키잉하면 동일 정규화 pk가 여러 물리행을 가질 때 스냅샷이 유실/중복되므로
         # pruned_snapshots를 직접 순회해 행:스냅샷을 1:1로 보존한다.
         for s in r.pruned_snapshots:
-            pk_tuple = tuple(s['pk'])
+            pk_tuple = _normalize_pk(tuple(s['pk']))
             pk_json = _jdump(list(pk_tuple))
             pk_disp = _format_pk(pk_tuple)
             snap = s.get('snapshot', {})
@@ -183,28 +230,31 @@ def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
             rows.append((r.sheet_name, '삭제', pk_json, pk_disp,
                          None, _jdump(snap_clean) if snap_clean else None))
 
-    if not rows:
-        return
-
     conn = sqlite3.connect(str(db_path))
     try:
+        conn.execute('PRAGMA foreign_keys=ON')  # _sync_log.sync_id → _sync_runs FK 강제
         ensure_sync_log_tables(conn)
-        sync_id = create_sync_run(conn, dry_run=False)
-        # sync_id를 각 행 앞에 prepend
-        rows_with_id = [(sync_id, *r) for r in rows]
-        conn.executemany(
-            "INSERT INTO _sync_log "
-            "(sync_id, sheet_name, change_type, pk_json, pk_display, "
-            " changes_json, row_snapshot_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            rows_with_id,
-        )
+        sync_id = create_sync_run(conn, dry_run=False, note=note,
+                                  started_at=summary.started_at or None)
+        if rows:
+            rows_with_id = [(sync_id, *r) for r in rows]
+            conn.executemany(
+                "INSERT INTO _sync_log "
+                "(sync_id, sheet_name, change_type, pk_json, pk_display, "
+                " changes_json, row_snapshot_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows_with_id,
+            )
         finalize_sync_run(conn, sync_id, len(rows))
         conn.commit()
     finally:
         conn.close()
 
-    print(f"\n동기화 로그 저장: _sync_log {len(rows):,}행 (sync_id={sync_id})")
+    if rows:
+        print(f"\n동기화 로그 저장: _sync_log {len(rows):,}행 (sync_id={sync_id})")
+    else:
+        print(f"\n동기화 로그: 변경 없음 — 실행 이력만 기록 (sync_id={sync_id})")
+    print("  변경 이력 조회: python sync_db.py --log   또는  대시보드 '동기화 로그' 페이지")
 
 
 def show_info() -> int:
@@ -246,6 +296,57 @@ def show_info() -> int:
     return 0
 
 
+def show_log(limit: int = 20) -> int:
+    """최근 동기화 세션 이력 조회 (_sync_runs 기준, 최신순)."""
+    if not DB_FILE.exists():
+        print(f"DB 파일이 없습니다: {DB_FILE}")
+        print("sync_db.py를 먼저 실행하세요.")
+        return 1
+
+    conn = sqlite3.connect(str(DB_FILE))
+    try:
+        try:
+            runs = conn.execute(
+                "SELECT sync_id, started_at, ended_at, actor, host, total_changes, note "
+                "FROM _sync_runs ORDER BY sync_id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            print("동기화 세션 이력이 없습니다 (_sync_runs 테이블 없음 — 먼저 동기화 실행).")
+            return 0
+
+        if not runs:
+            print("동기화 세션 이력이 없습니다.")
+            return 0
+
+        cols = [("sync_id", 8, "r"), ("시작", 21, "l"), ("소요", 6, "r"),
+                ("변경", 6, "r"), ("사용자", 14, "l"), ("호스트", 16, "l"), ("메모", 20, "l")]
+        table_w = sum(w for _, w, _ in cols) + (len(cols) - 1)
+
+        def _row(values) -> str:
+            parts = []
+            for (_, w, align), v in zip(cols, values):
+                parts.append(_ljust_w(v, w) if align == "l" else _rjust_w(v, w))
+            return " ".join(parts)
+
+        print(f"\n최근 동기화 세션 (최대 {limit}개, 최신순)")
+        print("=" * table_w)
+        print(_row([h for h, _, _ in cols]))
+        print("-" * table_w)
+        for sync_id, started, ended, actor, host, total, note in runs:
+            print(_row([
+                sync_id, started or "-", _elapsed_str(started, ended),
+                total if total is not None else 0,
+                actor or "-", host or "-", (note or "")[:20],
+            ]))
+        print("-" * table_w)
+        print("\n변경 상세는 대시보드 '동기화 로그' 페이지에서 조회하세요.")
+    finally:
+        conn.close()
+
+    return 0
+
+
 def create_argument_parser() -> argparse.ArgumentParser:
     """CLI 인자 파서 생성"""
     parser = argparse.ArgumentParser(
@@ -281,6 +382,21 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        '--log',
+        nargs='?',
+        const=20,
+        type=int,
+        metavar='N',
+        help='최근 N개 동기화 세션 이력 조회 (기본 20, 동기화 수행 안 함)',
+    )
+
+    parser.add_argument(
+        '--note',
+        metavar='TEXT',
+        help='이 동기화 세션에 남길 메모 (_sync_runs.note에 기록)',
+    )
+
+    parser.add_argument(
         '-v', '--verbose',
         action='store_true',
         help='상세 로그 출력',
@@ -299,6 +415,10 @@ def main() -> int:
     # DB 현황 조회
     if args.info:
         return show_info()
+
+    # 동기화 세션 이력 조회 (동기화 수행 안 함)
+    if args.log is not None:
+        return show_log(args.log)
 
     # Excel 파일 존재 확인
     if not NOAH_SO_PO_DN_FILE.exists():
@@ -320,13 +440,18 @@ def main() -> int:
         return 1
 
     if args.changes:
-        print_changes(summary)
+        # 에러로 ROLLBACK된 경우 '미적용' 경고를 함께 출력 (적용된 것으로 오인 방지)
+        print_changes(summary, rolled_back=summary.total_errors > 0)
 
     # 실제 commit된 동기화에 한해서만 _sync_log 기록 — db_sync.sync_all은
     # total_errors>0이면 전체 트랜잭션을 ROLLBACK 하므로, 그 경우 변경기록을 남기면
     # 적용되지 않은 유령 변경이 감사로그/대시보드 변경이력에 노출된다.
+    # 로그 기록 실패가 이미 commit된 sync 결과/요약 출력을 가리지 않도록 예외 격리.
     if not args.dry_run and summary.total_errors == 0:
-        write_sync_log_to_db(summary)
+        try:
+            write_sync_log_to_db(summary, note=args.note)
+        except Exception as e:
+            print(f"[경고] 동기화 로그 저장 실패 (데이터는 정상 반영됨): {e}")
 
     print_summary(summary, dry_run=args.dry_run)
 
