@@ -89,7 +89,9 @@ backlog AS (
         SUM(Value_Input_amount - Value_Output_amount) AS Value_Ending_amount
     FROM events_line_item
     GROUP BY SO_ID, [OS name], [Expected delivery date]
-    HAVING SUM(Value_Input_amount - Value_Output_amount) > 0
+    -- 잔여수량 또는 잔여금액 중 하나라도 남으면 open (수량 양수/금액 0 라인 보존)
+    HAVING ABS(SUM(Value_Input_qty - Value_Output_qty)) > 0.001
+        OR SUM(Value_Input_amount - Value_Output_amount) > 0.5
 )
 
 -- ═══ Backlog 현황: Ending > 0 ═══
@@ -99,7 +101,7 @@ SELECT
     [Customer name],
     [OS name],
     [Expected delivery date] AS 납기일,
-    CAST(Value_Ending_qty AS INTEGER) AS 잔여수량,
+    CAST(ROUND(Value_Ending_qty) AS INTEGER) AS 잔여수량,
     PRINTF('%,.0f', Value_Ending_amount) AS 잔여금액,
     [Model code],
     Sector,

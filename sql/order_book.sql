@@ -25,7 +25,7 @@ so_combined AS (
         Sector,
         [Business registration number],
         [Industry code],
-        [Expected delivery date],
+        COALESCE([Expected delivery date], '') AS [Expected delivery date],
         '국내' AS 구분
     FROM so_domestic
     WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
@@ -48,7 +48,7 @@ so_combined AS (
         Sector,
         [Business registration number],
         [Industry code],
-        [Expected delivery date],
+        COALESCE([Expected delivery date], '') AS [Expected delivery date],
         '해외'
     FROM so_export
     WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')

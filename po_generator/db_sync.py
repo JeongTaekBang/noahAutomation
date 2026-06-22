@@ -308,6 +308,9 @@ class SyncEngine:
                             "%s: %d행 삭제(prune) — 시트 전체 비어있음",
                             config.sheet_name, result.pruned,
                         )
+                # 메타 갱신: 시트가 0행이 된 상태(row_count=0, 갱신시각)를 기록
+                # — step-9 메타 업데이트 전에 early return하므로 여기서 수동 갱신
+                update_sync_metadata(conn, config.table_name, datetime.now().isoformat(), 0)
                 return result
 
             # 3. _row_seq 생성 (필요한 시트만)

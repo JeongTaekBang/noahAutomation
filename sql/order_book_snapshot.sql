@@ -20,7 +20,7 @@ so_combined AS (
         ROUND(CAST([Sales amount] AS REAL)) AS [Sales amount KRW],
         Period, [AX Period], [Model code], Sector,
         [Business registration number], [Industry code],
-        [Expected delivery date], '국내' AS 구분
+        COALESCE([Expected delivery date], '') AS [Expected delivery date], '국내' AS 구분
     FROM so_domestic
     WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
@@ -32,7 +32,7 @@ so_combined AS (
         ROUND(CAST([Sales amount KRW] AS REAL)),
         Period, [AX Period], [Model code], Sector,
         [Business registration number], [Industry code],
-        [Expected delivery date], '해외'
+        COALESCE([Expected delivery date], '') AS [Expected delivery date], '해외'
     FROM so_export
     WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
