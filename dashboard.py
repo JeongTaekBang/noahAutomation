@@ -73,6 +73,18 @@ def fmt_date(v) -> str:
     return v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else str(v)[:10]
 
 
+def _sanitize_date(series) -> pd.Series:
+    """날짜 파싱 + Excel 1899/1900 zero-date 더미값(공란)을 NaT로 정화.
+
+    빈 날짜가 D365 export에서 1899-12-30/1900-01-01로 들어오면 '경과일',
+    납기지연, OTD(dispatch <= delivery) 등 날짜 기반 KPI를 오염시키므로
+    연도 <= 1900 인 값은 결측으로 처리한다.
+    """
+    d = pd.to_datetime(series, errors="coerce")
+    d = d.mask(d.dt.year <= 1900)
+    return d
+
+
 # ═══════════════════════════════════════════════════════════════
 # DB 연결
 # ═══════════════════════════════════════════════════════════════
@@ -161,12 +173,8 @@ def load_so() -> pd.DataFrame:
         return pd.DataFrame()
     finally:
         conn.close()
-    df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
-    df["requested_date"] = pd.to_datetime(df["requested_date"], errors="coerce")
-    df.loc[df["requested_date"].dt.year <= 1900, "requested_date"] = pd.NaT
-    df["exw_noah"] = pd.to_datetime(df["exw_noah"], errors="coerce")
-    df.loc[df["exw_noah"].dt.year <= 1900, "exw_noah"] = pd.NaT
-    df["po_receipt_date"] = pd.to_datetime(df["po_receipt_date"], errors="coerce")
+    for _c in ("delivery_date", "requested_date", "exw_noah", "po_receipt_date"):
+        df[_c] = _sanitize_date(df[_c])
     for c in ("os_name", "sector", "customer_name"):
         df[c] = df[c].fillna("")
     return df
@@ -667,7 +675,7 @@ def load_backlog() -> pd.DataFrame:
                    [OS name] AS os_name,
                    CAST([Line item] AS INTEGER) AS line_item,
                    CAST([Item qty] AS REAL) AS qty,
-                   CAST([Sales amount] AS REAL) AS amount,
+                   ROUND(CAST([Sales amount] AS REAL)) AS amount,
                    [Model code] AS model_code, Sector AS sector,
                    [Expected delivery date] AS delivery_date, '국내' AS market
             FROM so_domestic
@@ -677,7 +685,7 @@ def load_backlog() -> pd.DataFrame:
             SELECT SO_ID, [Customer name], [OS name],
                    CAST([Line item] AS INTEGER),
                    CAST([Item qty] AS REAL),
-                   CAST([Sales amount KRW] AS REAL),
+                   ROUND(CAST([Sales amount KRW] AS REAL)),
                    [Model code], Sector, [Expected delivery date], '해외'
             FROM so_export
             WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
@@ -686,12 +694,12 @@ def load_backlog() -> pd.DataFrame:
         dn_combined AS (
             SELECT SO_ID, CAST([Line item] AS INTEGER) AS line_item,
                    CAST(Qty AS REAL) AS out_qty,
-                   CAST([Total Sales] AS REAL) AS out_amt
+                   ROUND(CAST([Total Sales] AS REAL)) AS out_amt
             FROM dn_domestic
             WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
             UNION ALL
             SELECT SO_ID, CAST([Line item] AS INTEGER),
-                   CAST(Qty AS REAL), CAST([Total Sales KRW] AS REAL)
+                   CAST(Qty AS REAL), ROUND(CAST([Total Sales KRW] AS REAL))
             FROM dn_export
             WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''
         ),
@@ -733,7 +741,7 @@ def load_backlog() -> pd.DataFrame:
         return pd.DataFrame()
     finally:
         conn.close()
-    df["delivery_date"] = pd.to_datetime(df["delivery_date"], errors="coerce")
+    df["delivery_date"] = _sanitize_date(df["delivery_date"])
     return df
 
 
@@ -1454,10 +1462,10 @@ def _render_so_unauth_changes(market: str):
                       "변경값": "" if n_ is None else str(n_)}
                      for f, o, n_ in row["changes"]]
                 )
-                st.dataframe(detail, use_container_width=True, hide_index=True)
+                st.dataframe(detail, width='stretch', hide_index=True)
                 st.caption(f"sync_id={row['sync_id']}  ·  변경자: {row['actor'] or '-'}  ·  {row['sync_time']}")
             with c2:
-                if st.button("✅ 확인 완료", key=f"ack_so_{log_id}", use_container_width=True):
+                if st.button("✅ 확인 완료", key=f"ack_so_{log_id}", width='stretch'):
                     _ack_so_change(log_id)
                     load_so_unauth_changes.clear()
                     st.rerun()
@@ -1601,7 +1609,7 @@ def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
         plot_bgcolor="white",
     )
 
-    st.plotly_chart(fig_cal, key="cal_heatmap", use_container_width=True)
+    st.plotly_chart(fig_cal, key="cal_heatmap", width='stretch')
 
     # 날짜 선택 → 상세
     # 현재 달이면 오늘 날짜 기본 선택, 다른 달이면 1일
@@ -2039,7 +2047,7 @@ def pg_today(market, sectors, customers, **_):
                                 detail["발주일"] = detail["발주일"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
                                 detail["공장 EXW"] = detail["공장 EXW"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
                                 detail = detail.sort_values("Line").reset_index(drop=True)
-                                st.dataframe(detail, use_container_width=True, hide_index=True)
+                                st.dataframe(detail, width='stretch', hide_index=True)
         else:
             st.success("PO 확정 지연 건 없음")
     else:
@@ -2177,7 +2185,7 @@ def pg_today(market, sectors, customers, **_):
                                 detail["매출금액"] = detail["매출금액"].apply(fmt_num)
                                 detail["수주일"] = detail["수주일"].apply(fmt_date)
                                 detail["납기일"] = detail["납기일"].apply(fmt_date)
-                                st.dataframe(detail, use_container_width=True, hide_index=True)
+                                st.dataframe(detail, width='stretch', hide_index=True)
     else:
         st.success("미발주 건 없음")
 
@@ -2275,7 +2283,7 @@ def pg_today(market, sectors, customers, **_):
                             detail["ICO 금액"] = detail["ICO 금액"].apply(lambda v: f"{int(v):,}" if pd.notna(v) else "")
                             detail["공장 EXW"] = detail["공장 EXW"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
                             detail = detail.sort_values("Line").reset_index(drop=True)
-                            st.dataframe(detail, use_container_width=True, hide_index=True)
+                            st.dataframe(detail, width='stretch', hide_index=True)
     else:
         st.success("EXW 미출고 건 없음")
 
@@ -2301,26 +2309,41 @@ def pg_today(market, sectors, customers, **_):
         else:
             dn_agg = pd.DataFrame(columns=["SO_ID", "line_item", "dn_qty", "dn_amount"])
 
-        # Step 2: 납기 경과 라인에 DN 매칭 → 잔여 있는 SO_ID만, 납기 경과 라인만
-        due_check = _so_due_lines.merge(dn_agg, on=["SO_ID", "line_item"], how="left")
-        due_check["dn_qty"] = due_check["dn_qty"].fillna(0)
-        due_check["dn_amount"] = due_check["dn_amount"].fillna(0)
-        due_check["remaining_qty"] = due_check["qty"] - due_check["dn_qty"]
-        due_check["remaining_amount"] = due_check["amount_krw"] - due_check["dn_amount"]
+        # Step 2: 납기 경과 라인에 DN 매칭 → 경과 라인에 잔여가 남은 SO_ID 식별
+        _due_late = _so_due_lines.merge(dn_agg, on=["SO_ID", "line_item"], how="left")
+        _due_late["dn_qty"] = _due_late["dn_qty"].fillna(0)
+        so_ids_with_remaining = set(
+            _due_late.loc[(_due_late["qty"] - _due_late["dn_qty"]) > 0, "SO_ID"]
+        )
 
-        # Step 2a: SO exw_noah 누락 시 PO factory_exw로 보충
-        # (PO 라인이 SO 라인과 1:1 대응 안 되는 경우 SO_ID 단위로 매칭)
-        if not po_detail.empty and "factory_exw" in po_detail.columns:
-            _po_exw = po_detail[["SO_ID", "factory_exw"]].dropna(subset=["factory_exw"])
-            if not _po_exw.empty:
-                due_check = due_check.merge(_po_exw, on="SO_ID", how="left")
-                _mask = due_check["exw_noah"].isna() & due_check["factory_exw"].notna()
-                due_check.loc[_mask, "exw_noah"] = due_check.loc[_mask, "factory_exw"]
-                due_check.drop(columns=["factory_exw"], inplace=True)
-        so_ids_with_remaining = set(due_check.loc[due_check["remaining_qty"] > 0, "SO_ID"])
+        # Step 3: 해당 SO의 **전체 라인**을 집계 (경과 라인만이 아니라 주문 전체 기준)
+        if so_ids_with_remaining:
+            due_pending = so[so["SO_ID"].isin(so_ids_with_remaining)].merge(
+                dn_agg, on=["SO_ID", "line_item"], how="left"
+            )
+            due_pending["dn_qty"] = due_pending["dn_qty"].fillna(0)
+            due_pending["dn_amount"] = due_pending["dn_amount"].fillna(0)
+            due_pending["remaining_qty"] = due_pending["qty"] - due_pending["dn_qty"]
+            due_pending["remaining_amount"] = due_pending["amount_krw"] - due_pending["dn_amount"]
+            # SO 합계용 잔여는 라인별 음수(과출고)를 0으로 클램프 — 한 라인의 과출고가
+            # 다른 라인의 실제 미출고분을 상계해 잔여를 과소표시하지 않도록.
+            due_pending["remaining_qty_pos"] = due_pending["remaining_qty"].clip(lower=0)
+            due_pending["remaining_amount_pos"] = due_pending["remaining_amount"].clip(lower=0)
 
-        # 납기 경과 라인 중 잔여 있는 SO만 (미래 납기 라인 제외)
-        due_pending = due_check[due_check["SO_ID"].isin(so_ids_with_remaining)].copy() if so_ids_with_remaining else pd.DataFrame()
+            # Step 3a: SO exw_noah 누락 시 PO factory_exw로 보충 (SO_ID 단위, 라인 fan-out 방지 위해 dedup)
+            if not po_detail.empty and "factory_exw" in po_detail.columns:
+                _po_exw = (
+                    po_detail[["SO_ID", "factory_exw"]]
+                    .dropna(subset=["factory_exw"])
+                    .groupby("SO_ID", as_index=False)["factory_exw"].min()
+                )
+                if not _po_exw.empty:
+                    due_pending = due_pending.merge(_po_exw, on="SO_ID", how="left")
+                    _mask = due_pending["exw_noah"].isna() & due_pending["factory_exw"].notna()
+                    due_pending.loc[_mask, "exw_noah"] = due_pending.loc[_mask, "factory_exw"]
+                    due_pending.drop(columns=["factory_exw"], inplace=True)
+        else:
+            due_pending = pd.DataFrame()
 
         if not due_pending.empty:
             _n_so = due_pending["SO_ID"].nunique()
@@ -2342,9 +2365,9 @@ def pg_today(market, sectors, customers, **_):
                         품목수=("line_item", "nunique"),
                         총수량=("qty", "sum"),
                         출고수량=("dn_qty", "sum"),
-                        잔여수량=("remaining_qty", "sum"),
+                        잔여수량=("remaining_qty_pos", "sum"),
                         총금액=("amount_krw", "sum"),
-                        잔여금액=("remaining_amount", "sum"),
+                        잔여금액=("remaining_amount_pos", "sum"),
                         납기일=("delivery_date", "min"),
                         공장출고일=("exw_noah", "min"),
                         Status=("status", "first"),
@@ -2408,7 +2431,7 @@ def pg_today(market, sectors, customers, **_):
                                 detail["납기"] = detail["납기"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
                                 detail["EXW"] = detail["EXW"].apply(lambda v: fmt_date(v) if pd.notna(v) else "")
                                 detail = detail.sort_values("Line").reset_index(drop=True)
-                                st.dataframe(detail, use_container_width=True, hide_index=True)
+                                st.dataframe(detail, width='stretch', hide_index=True)
         else:
             st.success("납기 지연 건 없음")
     else:
@@ -2490,7 +2513,7 @@ def pg_today(market, sectors, customers, **_):
                         row["최대경과일"] = f"{int(cg['경과일'].max())}일"
                         cust_rows.append(row)
                     cust_tbl = pd.DataFrame(cust_rows).sort_values("DN건수", ascending=False)
-                    st.dataframe(cust_tbl, use_container_width=True, hide_index=True)
+                    st.dataframe(cust_tbl, width='stretch', hide_index=True)
 
                 with tab_ship:
                     ship_method_rows = []
@@ -2505,7 +2528,7 @@ def pg_today(market, sectors, customers, **_):
                         row["최대경과일"] = f"{int(mg['경과일'].max())}일"
                         ship_method_rows.append(row)
                     ship_tbl = pd.DataFrame(ship_method_rows).sort_values("DN건수", ascending=False)
-                    st.dataframe(ship_tbl, use_container_width=True, hide_index=True)
+                    st.dataframe(ship_tbl, width='stretch', hide_index=True)
 
                 # ── (3) DN 상세 테이블 (접기) ──
                 with st.expander(f"📋 DN 상세 ({len(ps)}건)", expanded=False):
@@ -2522,7 +2545,7 @@ def pg_today(market, sectors, customers, **_):
                     detail["운송업체"] = detail["운송업체"].replace("", "-")
                     detail["Incoterms"] = detail["Incoterms"].replace("", "-")
                     detail["운송방식"] = detail["운송방식"].replace("", "-")
-                    st.dataframe(detail, use_container_width=True, hide_index=True)
+                    st.dataframe(detail, width='stretch', hide_index=True)
             else:
                 st.success("선적 대기 건 없음")
 
@@ -2607,7 +2630,7 @@ def pg_today(market, sectors, customers, **_):
                         hovertemplate="<b>%{x}</b><br>₩%{y:,.0f} (%{text}건)<extra></extra>",
                     )
                     fig_ta.update_layout(height=350, margin=dict(t=30, b=30), showlegend=False)
-                    st.plotly_chart(fig_ta, use_container_width=True)
+                    st.plotly_chart(fig_ta, width='stretch')
 
                 with tax_col2:
                     cust_agg = dn_agg.groupby("customer_name").agg(
@@ -2623,7 +2646,7 @@ def pg_today(market, sectors, customers, **_):
                     )
                     fig_tc.update_layout(height=350, margin=dict(t=30, l=150),
                                          yaxis=dict(autorange="reversed"), showlegend=False)
-                    st.plotly_chart(fig_tc, use_container_width=True)
+                    st.plotly_chart(fig_tc, width='stretch')
 
                 # 상세 (expander)
                 with st.expander(f"미발행 상세 {total_pending}건"):
@@ -2633,7 +2656,7 @@ def pg_today(market, sectors, customers, **_):
                     detail["출고일"] = detail["출고일"].apply(fmt_date)
                     detail["금액"] = detail["금액"].apply(fmt_num)
                     detail["경과일"] = detail["경과일"].apply(lambda d: f"{d}일")
-                    st.dataframe(detail, use_container_width=True, hide_index=True)
+                    st.dataframe(detail, width='stretch', hide_index=True)
             else:
                 st.success("세금계산서 미발행 건 없음 (필터 기준)")
         else:
@@ -2770,7 +2793,7 @@ def pg_today(market, sectors, customers, **_):
                                     detail["차이"] = detail["차이"].apply(
                                         lambda v: f"{v:+,.2f}" if pd.notna(v) else ""
                                     )
-                                st.dataframe(detail, use_container_width=True, hide_index=True)
+                                st.dataframe(detail, width='stretch', hide_index=True)
     else:
         st.success("SO/DN 일치 — 과다출고·단가 불일치 없음")
 
@@ -2886,7 +2909,7 @@ def pg_orders(market, sectors, customers, year, month):
             xaxis=dict(type="category", dtick=1, rangeslider=dict(visible=True)),
             yaxis2=dict(title="누적매출", overlaying="y", side="right"),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
     else:
         st.info("데이터 없음")
 
@@ -2908,7 +2931,7 @@ def pg_orders(market, sectors, customers, year, month):
             xaxis=dict(type="category"),
             yaxis=dict(title="수주/출고 비율"),
         )
-        st.plotly_chart(fig_btb, use_container_width=True)
+        st.plotly_chart(fig_btb, width='stretch')
 
     # ── 일별 수주/출고 현황 ──
     st.subheader("일별 수주/출고 현황")
@@ -2948,7 +2971,7 @@ def pg_orders(market, sectors, customers, year, month):
                     fig_so_d.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
                     fig_so_d.update_layout(height=300, margin=dict(t=10, b=30),
                                            xaxis=dict(type="category"))
-                    st.plotly_chart(fig_so_d, use_container_width=True)
+                    st.plotly_chart(fig_so_d, width='stretch')
                 else:
                     st.info("수주 데이터 없음")
 
@@ -2968,7 +2991,7 @@ def pg_orders(market, sectors, customers, year, month):
                     fig_dn_d.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
                     fig_dn_d.update_layout(height=300, margin=dict(t=10, b=30),
                                            xaxis=dict(type="category"))
-                    st.plotly_chart(fig_dn_d, use_container_width=True)
+                    st.plotly_chart(fig_dn_d, width='stretch')
                 else:
                     st.info("출고 데이터 없음")
 
@@ -3004,7 +3027,7 @@ def pg_product(market, sectors, customers, year, month):
         margin=dict(t=30, l=200),
         yaxis=dict(autorange="reversed"),
     )
-    event_prod = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="product_top15")
+    event_prod = st.plotly_chart(fig, width='stretch', on_select="rerun", key="product_top15")
     selected_product = None
     if event_prod and event_prod.selection and event_prod.selection.points:
         selected_product = event_prod.selection.points[0]["y"]
@@ -3021,14 +3044,14 @@ def pg_product(market, sectors, customers, year, month):
             fig_pm.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
             fig_pm.update_layout(height=300, margin=dict(t=30, b=30),
                                  xaxis=dict(type="category"))
-            st.plotly_chart(fig_pm, use_container_width=True)
+            st.plotly_chart(fig_pm, width='stretch')
         with dc2:
             st.markdown("**섹터별 비중**")
             ps = sub_p.groupby("sector")["amount_krw"].sum().reset_index()
             fig_ps = px.pie(ps, names="sector", values="amount_krw", hole=0.4)
             fig_ps.update_traces(hovertemplate="<b>%{label}</b><br>₩%{value:,.0f} (%{percent})<extra></extra>")
             fig_ps.update_layout(height=300, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_ps, use_container_width=True)
+            st.plotly_chart(fig_ps, width='stretch')
         st.markdown("**주요 고객 Top 5**")
         pc = sub_p.groupby("customer_name")["amount_krw"].sum().nlargest(5).reset_index()
         pc.columns = ["고객", "매출"]
@@ -3037,7 +3060,7 @@ def pg_product(market, sectors, customers, year, month):
         fig_pc.update_traces(hovertemplate="<b>%{y}</b><br>₩%{x:,.0f}<extra></extra>")
         fig_pc.update_layout(height=250, margin=dict(t=30, l=150),
                              yaxis=dict(autorange="reversed"))
-        st.plotly_chart(fig_pc, use_container_width=True)
+        st.plotly_chart(fig_pc, width='stretch')
 
     # 구성비 + 월별 추이
     col1, col2 = st.columns(2)
@@ -3049,7 +3072,7 @@ def pg_product(market, sectors, customers, year, month):
         fig2 = px.pie(values=parts.values, names=parts.index, hole=0.4)
         fig2.update_traces(hovertemplate="<b>%{label}</b><br>₩%{value:,.0f} (%{percent})<extra></extra>")
         fig2.update_layout(height=400, margin=dict(t=30, b=30))
-        st.plotly_chart(fig2, use_container_width=True)
+        st.plotly_chart(fig2, width='stretch')
 
     with col2:
         st.subheader("제품별 월별 추이 (Top 5)")
@@ -3062,7 +3085,7 @@ def pg_product(market, sectors, customers, year, month):
             fig3.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
             fig3.update_layout(height=400, margin=dict(t=30, b=30),
                                xaxis=dict(type="category"))
-            st.plotly_chart(fig3, use_container_width=True)
+            st.plotly_chart(fig3, width='stretch')
 
     # ── 제품별 평균 단가 ──
     st.subheader("제품별 평균 단가 (Top 15)")
@@ -3081,7 +3104,7 @@ def pg_product(market, sectors, customers, year, month):
         yaxis=dict(autorange="reversed"),
         xaxis=dict(tickformat=",.0f"),
     )
-    st.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig4, width='stretch')
 
     # ── 제품별 Backlog ──
     backlog = filt(load_backlog(), market, sectors, customers, period_col=None)
@@ -3096,7 +3119,7 @@ def pg_product(market, sectors, customers, year, month):
             height=max(300, len(bl_prod) * 28), margin=dict(t=30, l=200),
             yaxis=dict(autorange="reversed"),
         )
-        st.plotly_chart(fig5, use_container_width=True)
+        st.plotly_chart(fig5, width='stretch')
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 제품 심층 분석
@@ -3125,7 +3148,7 @@ def pg_product(market, sectors, customers, year, month):
             fig_pabc.update_traces(texttemplate="%{text}종", textposition="outside",
                                    hovertemplate="<b>%{x}등급</b><br>%{y}종<extra></extra>")
             fig_pabc.update_layout(height=300, margin=dict(t=30, b=30), showlegend=False)
-            st.plotly_chart(fig_pabc, use_container_width=True)
+            st.plotly_chart(fig_pabc, width='stretch')
         with pc2:
             for _, r in grade_p.iterrows():
                 st.metric(f"{r['등급']}등급", f"{r['제품수']}종 · 매출 {r['매출비중']}%")
@@ -3154,7 +3177,7 @@ def pg_product(market, sectors, customers, year, month):
                 fig_gp.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f}%<extra></extra>")
                 fig_gp.update_layout(height=250, margin=dict(t=10, l=150),
                                      yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_gp, use_container_width=True)
+                st.plotly_chart(fig_gp, width='stretch')
         with gp2:
             st.markdown(f"**감소 Top 5** ({prev_p} → {latest_p})")
             bot_gp = growth_p.dropna(subset=["성장률"]).nsmallest(5, "성장률")
@@ -3165,7 +3188,7 @@ def pg_product(market, sectors, customers, year, month):
                 fig_gpd.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f}%<extra></extra>")
                 fig_gpd.update_layout(height=250, margin=dict(t=10, l=150),
                                       yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_gpd, use_container_width=True)
+                st.plotly_chart(fig_gpd, width='stretch')
             else:
                 st.info("감소 제품 없음")
 
@@ -3195,7 +3218,7 @@ def pg_product(market, sectors, customers, year, month):
             xaxis=dict(title="제품", side="top"),
             yaxis=dict(title="고객", autorange="reversed"),
         )
-        st.plotly_chart(fig_hm, use_container_width=True)
+        st.plotly_chart(fig_hm, width='stretch')
         st.caption("빈 칸(0원) = Cross-sell 기회 — 해당 고객에 해당 제품을 제안해 볼 수 있습니다")
 
     # ── 4. 제품별 납기 준수율 (OTD) ──
@@ -3226,7 +3249,7 @@ def pg_product(market, sectors, customers, year, month):
                 fig_otd_p.update_layout(height=max(300, len(otd_prod.head(15)) * 28),
                                         margin=dict(t=30, l=150),
                                         yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_otd_p, use_container_width=True)
+                st.plotly_chart(fig_otd_p, width='stretch')
                 st.caption("OTD 낮은 제품 = 생산 병목 가능성 — 공정 리드타임 점검 필요")
 
     # ── 5. 제품별 수익성 ──
@@ -3257,7 +3280,7 @@ def pg_product(market, sectors, customers, year, month):
                     fig_lmp.update_traces(hovertemplate="<b>%{y}</b><br>마진율: %{x:.1f}%<extra></extra>")
                     fig_lmp.update_layout(height=300, margin=dict(t=10, l=150),
                                           yaxis=dict(autorange="reversed"))
-                    st.plotly_chart(fig_lmp, use_container_width=True)
+                    st.plotly_chart(fig_lmp, width='stretch')
                 else:
                     st.success("저마진 제품 없음")
             with pm2:
@@ -3268,7 +3291,7 @@ def pg_product(market, sectors, customers, year, month):
                 fig_tmp.update_traces(hovertemplate="<b>%{y}</b><br>마진: ₩%{x:,.0f}<extra></extra>")
                 fig_tmp.update_layout(height=300, margin=dict(t=10, l=150),
                                       yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_tmp, use_container_width=True)
+                st.plotly_chart(fig_tmp, width='stretch')
 
     # ── 6. 제품 집중도 ──
     st.subheader("제품 집중도")
@@ -3310,7 +3333,7 @@ def pg_product(market, sectors, customers, year, month):
         fig_np.update_layout(height=300, margin=dict(t=30, b=30),
                              xaxis=dict(type="category", title="월"),
                              yaxis=dict(title="제품 수"))
-        st.plotly_chart(fig_np, use_container_width=True)
+        st.plotly_chart(fig_np, width='stretch')
 
     # ── 8. 제품별 고객 수 ──
     st.subheader("제품별 고객 수")
@@ -3331,7 +3354,7 @@ def pg_product(market, sectors, customers, year, month):
                     고객=("customer_name", "first"), 매출=("amount_krw", "sum"),
                 ).reset_index().rename(columns={"os_name": "제품"}).sort_values("매출", ascending=False)
                 sc_detail["매출"] = sc_detail["매출"].apply(fmt_krw)
-                st.dataframe(sc_detail.head(10), use_container_width=True, hide_index=True)
+                st.dataframe(sc_detail.head(10), width='stretch', hide_index=True)
         with pc2:
             top_spread = prod_cust.nlargest(15, "고객수")
             fig_pcs = px.bar(top_spread, y="제품", x="고객수", orientation="h",
@@ -3340,7 +3363,7 @@ def pg_product(market, sectors, customers, year, month):
             fig_pcs.update_layout(height=max(300, len(top_spread) * 28),
                                   margin=dict(t=30, l=150),
                                   yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_pcs, use_container_width=True)
+            st.plotly_chart(fig_pcs, width='stretch')
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3370,7 +3393,7 @@ def pg_sector(market, sectors, customers, year, month):
         fig = px.pie(values=by_sector.values, names=by_sector.index)
         fig.update_traces(hovertemplate="<b>%{label}</b><br>₩%{value:,.0f} (%{percent})<extra></extra>")
         fig.update_layout(height=400, margin=dict(t=30, b=30))
-        event_sec = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="sector_pie")
+        event_sec = st.plotly_chart(fig, width='stretch', on_select="rerun", key="sector_pie")
 
     with col2:
         st.subheader("섹터별 월별 추이")
@@ -3382,7 +3405,7 @@ def pg_sector(market, sectors, customers, year, month):
             fig2.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
             fig2.update_layout(height=400, margin=dict(t=30, b=30),
                                xaxis=dict(type="category"))
-            st.plotly_chart(fig2, use_container_width=True)
+            st.plotly_chart(fig2, width='stretch')
 
     # 섹터 드릴다운
     selected_sector = None
@@ -3401,7 +3424,7 @@ def pg_sector(market, sectors, customers, year, month):
             fig_sp.update_traces(hovertemplate="<b>%{y}</b><br>₩%{x:,.0f}<extra></extra>")
             fig_sp.update_layout(height=350, margin=dict(t=30, l=150),
                                  yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_sp, use_container_width=True)
+            st.plotly_chart(fig_sp, width='stretch')
         with dc2:
             st.markdown("**월별 추이**")
             sm = sub_sec.groupby("period")["amount_krw"].sum().reset_index()
@@ -3411,7 +3434,7 @@ def pg_sector(market, sectors, customers, year, month):
             fig_sm.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
             fig_sm.update_layout(height=350, margin=dict(t=30, b=30),
                                  xaxis=dict(type="category"))
-            st.plotly_chart(fig_sm, use_container_width=True)
+            st.plotly_chart(fig_sm, width='stretch')
         st.markdown("**주요 고객**")
         sc = sub_sec.groupby("customer_name")["amount_krw"].sum().nlargest(5).reset_index()
         sc.columns = ["고객", "매출"]
@@ -3420,7 +3443,7 @@ def pg_sector(market, sectors, customers, year, month):
         fig_sc.update_traces(hovertemplate="<b>%{y}</b><br>₩%{x:,.0f}<extra></extra>")
         fig_sc.update_layout(height=250, margin=dict(t=30, l=150),
                              yaxis=dict(autorange="reversed"))
-        st.plotly_chart(fig_sc, use_container_width=True)
+        st.plotly_chart(fig_sc, width='stretch')
 
     # 섹터별 제품 믹스
     st.subheader("섹터별 제품 믹스")
@@ -3432,7 +3455,7 @@ def pg_sector(market, sectors, customers, year, month):
                       barmode="group", labels={"amount_krw": "매출"})
         fig3.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
         fig3.update_layout(height=400, margin=dict(t=30, b=30))
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width='stretch')
 
     # ── 섹터별 Backlog ──
     backlog = filt(load_backlog(), market, sectors, customers, period_col=None)
@@ -3445,7 +3468,7 @@ def pg_sector(market, sectors, customers, year, month):
         bl_sec["비중"] = (bl_sec["금액"] / bl_sec["금액"].sum() * 100).round(1).astype(str) + "%"
         bl_sec["금액"] = bl_sec["금액"].apply(fmt_krw)
         bl_sec.rename(columns={"sector": "섹터"}, inplace=True)
-        st.dataframe(bl_sec, use_container_width=True, hide_index=True)
+        st.dataframe(bl_sec, width='stretch', hide_index=True)
 
     # ── 섹터별 평균 주문 규모 ──
     st.subheader("섹터별 평균 주문 규모")
@@ -3459,7 +3482,7 @@ def pg_sector(market, sectors, customers, year, month):
                   color_discrete_sequence=[C_PURPLE])
     fig4.update_traces(hovertemplate="<b>%{x}</b><br>평균주문액: ₩%{y:,.0f}<extra></extra>")
     fig4.update_layout(height=350, margin=dict(t=30, b=30))
-    st.plotly_chart(fig4, use_container_width=True)
+    st.plotly_chart(fig4, width='stretch')
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3505,7 +3528,7 @@ def pg_customer(market, sectors, customers, year, month):
         margin=dict(t=30, l=200),
         yaxis=dict(autorange="reversed"),
     )
-    event_cust = st.plotly_chart(fig, use_container_width=True, on_select="rerun", key="customer_top15")
+    event_cust = st.plotly_chart(fig, width='stretch', on_select="rerun", key="customer_top15")
     selected_customer = None
     if event_cust and event_cust.selection and event_cust.selection.points:
         selected_customer = event_cust.selection.points[0]["y"]
@@ -3522,14 +3545,14 @@ def pg_customer(market, sectors, customers, year, month):
             fig_cm.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
             fig_cm.update_layout(height=300, margin=dict(t=30, b=30),
                                  xaxis=dict(type="category"))
-            st.plotly_chart(fig_cm, use_container_width=True)
+            st.plotly_chart(fig_cm, width='stretch')
         with dc2:
             st.markdown("**제품 믹스**")
             cp = sub_cust.groupby("os_name")["amount_krw"].sum().nlargest(8).reset_index()
             fig_cp = px.pie(cp, names="os_name", values="amount_krw", hole=0.4)
             fig_cp.update_traces(hovertemplate="<b>%{label}</b><br>₩%{value:,.0f} (%{percent})<extra></extra>")
             fig_cp.update_layout(height=300, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_cp, use_container_width=True)
+            st.plotly_chart(fig_cp, width='stretch')
         # 백로그 현황
         backlog_c = filt(load_backlog(), market, sectors, customers, period_col=None)
         cust_bl = backlog_c[backlog_c["customer_name"] == selected_customer] if not backlog_c.empty else pd.DataFrame()
@@ -3540,7 +3563,7 @@ def pg_customer(market, sectors, customers, year, month):
             bl_t["납기일"] = bl_t["납기일"].apply(fmt_date)
             bl_t["잔여수량"] = bl_t["잔여수량"].apply(lambda x: f"{int(x):,}")
             bl_t["잔여금액"] = bl_t["잔여금액"].apply(fmt_num)
-            st.dataframe(bl_t, use_container_width=True, hide_index=True)
+            st.dataframe(bl_t, width='stretch', hide_index=True)
 
     # Pareto (상위 20)
     st.subheader("고객 집중도 (Pareto)")
@@ -3561,7 +3584,7 @@ def pg_customer(market, sectors, customers, year, month):
         yaxis2=dict(title="누적 %", overlaying="y", side="right", range=[0, 105]),
         height=400, margin=dict(t=30, b=30),
     )
-    st.plotly_chart(fig2, use_container_width=True)
+    st.plotly_chart(fig2, width='stretch')
 
     # 고객 상세 + Backlog
     st.subheader("고객 상세")
@@ -3587,7 +3610,7 @@ def pg_customer(market, sectors, customers, year, month):
     detail["총금액"] = detail["총금액"].apply(fmt_krw)
     detail["평균주문액"] = detail["평균주문액"].apply(fmt_krw)
     detail["총수량"] = detail["총수량"].apply(lambda x: f"{int(x):,}")
-    st.dataframe(detail, use_container_width=True, hide_index=True)
+    st.dataframe(detail, width='stretch', hide_index=True)
 
     # ── 고객별 월별 매출 추이 (Top 5) ──
     st.subheader("고객별 월별 매출 추이 (Top 5)")
@@ -3600,7 +3623,7 @@ def pg_customer(market, sectors, customers, year, month):
         fig3.update_traces(hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>")
         fig3.update_layout(height=400, margin=dict(t=30, b=30),
                            xaxis=dict(type="category"))
-        st.plotly_chart(fig3, use_container_width=True)
+        st.plotly_chart(fig3, width='stretch')
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 고객 심층 분석
@@ -3629,7 +3652,7 @@ def pg_customer(market, sectors, customers, year, month):
             fig_abc.update_traces(texttemplate="%{text}개사", textposition="outside",
                                   hovertemplate="<b>%{x}등급</b><br>%{y}개사<extra></extra>")
             fig_abc.update_layout(height=300, margin=dict(t=30, b=30), showlegend=False)
-            st.plotly_chart(fig_abc, use_container_width=True)
+            st.plotly_chart(fig_abc, width='stretch')
         with gc2:
             for _, r in grade_summary.iterrows():
                 st.metric(f"{r['등급']}등급", f"{r['고객수']}개사 · 매출 {r['매출비중']}%")
@@ -3637,7 +3660,7 @@ def pg_customer(market, sectors, customers, year, month):
         with st.expander("ABC 상세"):
             abc_tbl = abc.copy()
             abc_tbl["매출"] = abc_tbl["매출"].apply(fmt_krw)
-            st.dataframe(abc_tbl[["고객", "매출", "등급"]], use_container_width=True, hide_index=True)
+            st.dataframe(abc_tbl[["고객", "매출", "등급"]], width='stretch', hide_index=True)
 
     # ── 2. 고객 성장률 ──
     st.subheader("고객 성장률")
@@ -3665,7 +3688,7 @@ def pg_customer(market, sectors, customers, year, month):
                     fig_gr.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f}%<extra></extra>")
                     fig_gr.update_layout(height=250, margin=dict(t=10, l=150),
                                          yaxis=dict(autorange="reversed"))
-                    st.plotly_chart(fig_gr, use_container_width=True)
+                    st.plotly_chart(fig_gr, width='stretch')
             with gr2:
                 st.markdown(f"**감소 Top 5** ({prev_p} → {latest_p})")
                 bot_growth = growth.dropna(subset=["성장률"]).nsmallest(5, "성장률")
@@ -3676,7 +3699,7 @@ def pg_customer(market, sectors, customers, year, month):
                     fig_gd.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f}%<extra></extra>")
                     fig_gd.update_layout(height=250, margin=dict(t=10, l=150),
                                          yaxis=dict(autorange="reversed"))
-                    st.plotly_chart(fig_gd, use_container_width=True)
+                    st.plotly_chart(fig_gd, width='stretch')
                 else:
                     st.info("감소 고객 없음")
 
@@ -3706,7 +3729,7 @@ def pg_customer(market, sectors, customers, year, month):
         fig_nc.update_layout(barmode="stack", height=300, margin=dict(t=30, b=30),
                              xaxis=dict(type="category", title="월"),
                              yaxis=dict(title="고객 수"))
-        st.plotly_chart(fig_nc, use_container_width=True)
+        st.plotly_chart(fig_nc, width='stretch')
 
     # ── 4. 고객 리텐션 ──
     st.subheader("고객 리텐션")
@@ -3738,7 +3761,7 @@ def pg_customer(market, sectors, customers, year, month):
                 fig_ret.update_layout(height=300, margin=dict(t=30, b=30),
                                       xaxis=dict(type="category"),
                                       yaxis=dict(title="리텐션율 (%)", range=[0, 105]))
-                st.plotly_chart(fig_ret, use_container_width=True)
+                st.plotly_chart(fig_ret, width='stretch')
                 st.caption("리텐션율 = 이전까지 수주 이력이 있는 고객 중 해당 월에도 수주한 비율")
 
     # ── 5. RFM 스코어 ──
@@ -3788,7 +3811,7 @@ def pg_customer(market, sectors, customers, year, month):
                                    hovertemplate="<b>%{x}</b><br>%{y}개사<extra></extra>")
             fig_rfm.update_layout(height=300, margin=dict(t=30, b=30), showlegend=False,
                                   xaxis=dict(title=""), yaxis=dict(title="고객 수"))
-            st.plotly_chart(fig_rfm, use_container_width=True)
+            st.plotly_chart(fig_rfm, width='stretch')
         with rc2:
             st.markdown(
                 f"**RFM 등급 기준** (만점 {_max}점)\n"
@@ -3802,7 +3825,7 @@ def pg_customer(market, sectors, customers, year, month):
             rfm_tbl = rfm_tbl.sort_values("RFM점수", ascending=False)
             rfm_tbl["Monetary"] = rfm_tbl["Monetary"].apply(fmt_krw)
             rfm_tbl.rename(columns={"Recency": "최근(개월)", "Frequency": "주문횟수"}, inplace=True)
-            st.dataframe(rfm_tbl, use_container_width=True, hide_index=True)
+            st.dataframe(rfm_tbl, width='stretch', hide_index=True)
 
     # ── 6. 고객별 제품 다양성 ──
     st.subheader("고객별 제품 다양성")
@@ -3828,7 +3851,7 @@ def pg_customer(market, sectors, customers, year, month):
             fig_dv.update_traces(textposition="top center", textfont_size=9,
                                   hovertemplate="<b>%{text}</b><br>매출: ₩%{x:,.0f}<br>제품: %{y}종<extra></extra>")
             fig_dv.update_layout(height=350, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_dv, use_container_width=True)
+            st.plotly_chart(fig_dv, width='stretch')
 
     # ── 7. 고객별 납기 준수율 ──
     st.subheader("고객별 납기 준수율 (OTD)")
@@ -3861,7 +3884,7 @@ def pg_customer(market, sectors, customers, year, month):
                 fig_otd.update_layout(height=max(300, len(otd_cust.head(20)) * 28),
                                       margin=dict(t=30, l=150),
                                       yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_otd, use_container_width=True)
+                st.plotly_chart(fig_otd, width='stretch')
             else:
                 st.info("OTD 분석 대상 없음")
         else:
@@ -3896,7 +3919,7 @@ def pg_customer(market, sectors, customers, year, month):
                     fig_lm.update_traces(hovertemplate="<b>%{y}</b><br>마진율: %{x:.1f}%<extra></extra>")
                     fig_lm.update_layout(height=300, margin=dict(t=10, l=150),
                                          yaxis=dict(autorange="reversed"))
-                    st.plotly_chart(fig_lm, use_container_width=True)
+                    st.plotly_chart(fig_lm, width='stretch')
                 else:
                     st.success("저마진 고객 없음")
             with cm2:
@@ -3907,7 +3930,7 @@ def pg_customer(market, sectors, customers, year, month):
                 fig_tm.update_traces(hovertemplate="<b>%{y}</b><br>마진: ₩%{x:,.0f}<extra></extra>")
                 fig_tm.update_layout(height=300, margin=dict(t=10, l=150),
                                      yaxis=dict(autorange="reversed"))
-                st.plotly_chart(fig_tm, use_container_width=True)
+                st.plotly_chart(fig_tm, width='stretch')
         else:
             st.info("원가 데이터 없음")
 
@@ -4125,7 +4148,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
         xaxis=dict(title="비율 (%)", range=[0, 100]),
         showlegend=True, legend=dict(orientation="h", y=-0.5),
     )
-    st.plotly_chart(fig_stack, use_container_width=True)
+    st.plotly_chart(fig_stack, width='stretch')
 
     # ── PO 미등록 상세 테이블 ──
     st.subheader("🔴 PO 미등록 상세")
@@ -4143,7 +4166,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
                     tbl["납기일"] = tbl["납기일"].apply(fmt_date)
                     tbl["수량"] = tbl["수량"].apply(fmt_qty)
                     tbl["매출금액"] = tbl["매출금액"].apply(fmt_num)
-                    st.dataframe(tbl, use_container_width=True, hide_index=True)
+                    st.dataframe(tbl, width='stretch', hide_index=True)
                 else:
                     st.success(f"{mkt} PO 미등록 건 없음")
     else:
@@ -4166,7 +4189,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
                     tbl["납기일"] = tbl["납기일"].apply(fmt_date)
                     tbl["수량"] = tbl["수량"].apply(fmt_qty)
                     tbl["매출금액"] = tbl["매출금액"].apply(fmt_num)
-                    st.dataframe(tbl, use_container_width=True, hide_index=True)
+                    st.dataframe(tbl, width='stretch', hide_index=True)
                 else:
                     st.success(f"{mkt} 미발주 건 없음")
     else:
@@ -4189,7 +4212,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
                     tbl["납기일"] = tbl["납기일"].apply(fmt_date)
                     tbl["수량"] = tbl["수량"].apply(fmt_qty)
                     tbl["매출금액"] = tbl["매출금액"].apply(fmt_num)
-                    st.dataframe(tbl, use_container_width=True, hide_index=True)
+                    st.dataframe(tbl, width='stretch', hide_index=True)
                 else:
                     st.success(f"{mkt} 부분 발주 건 없음")
     else:
@@ -4212,7 +4235,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
                     tbl["납기일"] = tbl["납기일"].apply(fmt_date)
                     tbl["수량"] = tbl["수량"].apply(fmt_qty)
                     tbl["매출금액"] = tbl["매출금액"].apply(fmt_num)
-                    st.dataframe(tbl, use_container_width=True, hide_index=True)
+                    st.dataframe(tbl, width='stretch', hide_index=True)
                 else:
                     st.success(f"{mkt} 발주 진행중 건 없음")
     else:
@@ -4230,7 +4253,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
             fig_cu.update_traces(hovertemplate="<b>%{y}</b><br>₩%{x:,.0f}<extra></extra>")
             fig_cu.update_layout(height=350, margin=dict(t=30, l=150),
                                  yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_cu, use_container_width=True)
+            st.plotly_chart(fig_cu, width='stretch')
         else:
             st.info("미발주 건 없음")
 
@@ -4249,7 +4272,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
         fig_sc.add_hline(y=100, line_dash="dash", line_color="gray",
                          annotation_text="100%")
         fig_sc.update_layout(height=350, margin=dict(t=30, b=30))
-        st.plotly_chart(fig_sc, use_container_width=True)
+        st.plotly_chart(fig_sc, width='stretch')
 
     # ── PO Status 파이프라인 ──
     st.subheader("PO Status 파이프라인")
@@ -4283,7 +4306,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
                           color_discrete_sequence=[C_PURPLE])
         fig_pipe.update_traces(hovertemplate="<b>%{x}</b><br>%{y}건<extra></extra>")
         fig_pipe.update_layout(height=300, margin=dict(t=30, b=30))
-        st.plotly_chart(fig_pipe, use_container_width=True)
+        st.plotly_chart(fig_pipe, width='stretch')
     else:
         st.info("PO 데이터 없음")
 
@@ -4373,7 +4396,7 @@ def pg_margin(market, sectors, customers, year, month):
             xaxis=dict(type="category"),
             yaxis2=dict(title="마진율(%)", overlaying="y", side="right"),
         )
-        st.plotly_chart(fig_mm, use_container_width=True)
+        st.plotly_chart(fig_mm, width='stretch')
     else:
         st.info("원가 확정 건 없음")
 
@@ -4407,7 +4430,7 @@ def pg_margin(market, sectors, customers, year, month):
             fig.update_layout(height=max(350, len(top15) * 28),
                               margin=dict(t=30, l=200),
                               yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
             # 상세 테이블
             tbl = grp.copy()
@@ -4416,7 +4439,7 @@ def pg_margin(market, sectors, customers, year, month):
             tbl["마진"] = tbl["마진"].apply(fmt_num)
             tbl["미출고금액"] = tbl["미출고금액"].apply(fmt_num)
             tbl.rename(columns={group_col: label}, inplace=True)
-            st.dataframe(tbl, use_container_width=True, hide_index=True)
+            st.dataframe(tbl, width='stretch', hide_index=True)
 
     _margin_analysis(merged[merged["has_cost"]], "customer_name", "고객", tab_cust)
     _margin_analysis(merged[merged["has_cost"]], "sector", "섹터", tab_sec)
@@ -4440,7 +4463,7 @@ def pg_margin(market, sectors, customers, year, month):
             lm["매출"] = lm["매출"].apply(fmt_num)
             lm["원가"] = lm["원가"].apply(fmt_num)
             lm["마진"] = lm["마진"].apply(fmt_num)
-            st.dataframe(lm, use_container_width=True, hide_index=True,
+            st.dataframe(lm, width='stretch', hide_index=True,
                          column_config={
                              "마진율": st.column_config.ProgressColumn(
                                  "마진율(%)", format="%.1f%%", min_value=0, max_value=100),
@@ -4458,7 +4481,7 @@ def pg_margin(market, sectors, customers, year, month):
         fig_ub.update_traces(hovertemplate="<b>%{y}</b><br>미출고: ₩%{x:,.0f}<extra></extra>")
         fig_ub.update_layout(height=350, margin=dict(t=30, l=150),
                              yaxis=dict(autorange="reversed"))
-        st.plotly_chart(fig_ub, use_container_width=True)
+        st.plotly_chart(fig_ub, width='stretch')
     else:
         st.info("미출고 건 없음")
 
@@ -4563,7 +4586,7 @@ def pg_orderbook(market, sectors, customers, **_):
                     yaxis=dict(title="금액 (KRW)"),
                     title=dict(text=f"기준 월: {wf_sel_period}", font=dict(size=14)),
                 )
-                st.plotly_chart(fig_wf, use_container_width=True)
+                st.plotly_chart(fig_wf, width='stretch')
 
             else:  # 누적
                 total_input = ob_monthly["Input"].sum()
@@ -4591,7 +4614,7 @@ def pg_orderbook(market, sectors, customers, **_):
                     yaxis=dict(title="금액 (KRW)"),
                     title=dict(text=f"누적 기간: {period_range}", font=dict(size=14)),
                 )
-                st.plotly_chart(fig_wf, use_container_width=True)
+                st.plotly_chart(fig_wf, width='stretch')
 
             latest_period = ob_monthly["Period"].max()
             latest = ob_monthly[ob_monthly["Period"] == latest_period].iloc[0]
@@ -4639,7 +4662,7 @@ def pg_orderbook(market, sectors, customers, **_):
                 xaxis=dict(type="category", title="Period", rangeslider=dict(visible=True)),
                 yaxis=dict(title="금액 (KRW)"),
             )
-            st.plotly_chart(fig_ob, use_container_width=True)
+            st.plotly_chart(fig_ob, width='stretch')
 
             # 섹터별 / 고객별 Backlog
             if not backlog.empty:
@@ -4651,7 +4674,7 @@ def pg_orderbook(market, sectors, customers, **_):
                     fig_s = px.bar(bl_sec, x="섹터", y="금액", color_discrete_sequence=[C_INPUT])
                     fig_s.update_traces(hovertemplate="<b>%{x}</b><br>Backlog: ₩%{y:,.0f}<extra></extra>")
                     fig_s.update_layout(height=350, margin=dict(t=30, b=30))
-                    st.plotly_chart(fig_s, use_container_width=True)
+                    st.plotly_chart(fig_s, width='stretch')
                 with col4:
                     st.subheader("고객별 Backlog Top 10")
                     bl_cust = backlog.groupby("customer_name")["ending_amount"].sum().nlargest(10).reset_index()
@@ -4661,7 +4684,7 @@ def pg_orderbook(market, sectors, customers, **_):
                     fig_c.update_traces(hovertemplate="<b>%{y}</b><br>Backlog: ₩%{x:,.0f}<extra></extra>")
                     fig_c.update_layout(height=350, margin=dict(t=30, l=150),
                                         yaxis=dict(autorange="reversed"))
-                    st.plotly_chart(fig_c, use_container_width=True)
+                    st.plotly_chart(fig_c, width='stretch')
         else:
             st.info("Order Book 데이터 없음")
 
@@ -4703,13 +4726,13 @@ def pg_orderbook(market, sectors, customers, **_):
                                color_discrete_sequence=px.colors.sequential.RdBu_r)
                 fig_a.update_traces(hovertemplate="<b>%{x}</b><br>Backlog: ₩%{y:,.0f}<extra></extra>")
                 fig_a.update_layout(height=350, margin=dict(t=30, b=30), showlegend=False)
-                event_aging = st.plotly_chart(fig_a, use_container_width=True,
+                event_aging = st.plotly_chart(fig_a, width='stretch',
                                               on_select="rerun", key="aging_bar")
             with col2:
                 fig_a2 = px.pie(aging_agg, names="aging", values="금액", hole=0.4)
                 fig_a2.update_traces(hovertemplate="<b>%{label}</b><br>₩%{value:,.0f} (%{percent})<extra></extra>")
                 fig_a2.update_layout(height=350, margin=dict(t=30, b=30))
-                st.plotly_chart(fig_a2, use_container_width=True)
+                st.plotly_chart(fig_a2, width='stretch')
 
             # Aging 드릴다운
             selected_aging = None
@@ -4724,7 +4747,7 @@ def pg_orderbook(market, sectors, customers, **_):
                 ad["납기일"] = ad["납기일"].apply(fmt_date)
                 ad["잔여수량"] = ad["잔여수량"].apply(lambda x: f"{int(x):,}")
                 ad["잔여금액"] = ad["잔여금액"].apply(fmt_num)
-                st.dataframe(ad, use_container_width=True, hide_index=True)
+                st.dataframe(ad, width='stretch', hide_index=True)
 
             # 고금액 위험건 Top 10
             st.subheader("고금액 위험건 Top 10")
@@ -4737,7 +4760,7 @@ def pg_orderbook(market, sectors, customers, **_):
                 risk["납기일"] = risk["납기일"].apply(fmt_date)
                 risk["잔여수량"] = risk["잔여수량"].apply(lambda x: f"{int(x):,}")
                 risk["잔여금액"] = risk["잔여금액"].apply(fmt_num)
-                st.dataframe(risk, use_container_width=True, hide_index=True)
+                st.dataframe(risk, width='stretch', hide_index=True)
             else:
                 st.success("납기 지연 건 없음")
 
@@ -4775,7 +4798,7 @@ def pg_orderbook(market, sectors, customers, **_):
                     xaxis=dict(type="category", title="납기월"),
                     yaxis=dict(title="섹터", autorange="reversed"),
                 )
-                st.plotly_chart(fig_hm, use_container_width=True)
+                st.plotly_chart(fig_hm, width='stretch')
             else:
                 st.info("연말까지 납기 예정 건 없음")
         else:
@@ -4811,7 +4834,7 @@ def pg_orderbook(market, sectors, customers, **_):
                 hovertemplate="<b>%{y}</b><br>%{x}건<extra></extra>",
             ))
             fig_funnel.update_layout(height=300, margin=dict(t=30, b=30))
-            st.plotly_chart(fig_funnel, use_container_width=True)
+            st.plotly_chart(fig_funnel, width='stretch')
 
             # 전환율 메트릭
             mc1, mc2 = st.columns(2)
@@ -4854,7 +4877,7 @@ def pg_orderbook(market, sectors, customers, **_):
                                      color_discrete_sequence=[C_INPUT])
                     fig_box.update_layout(height=350, margin=dict(t=30, b=30),
                                           title="수주→출고 리드타임 분포")
-                    st.plotly_chart(fig_box, use_container_width=True)
+                    st.plotly_chart(fig_box, width='stretch')
 
                 with col_lt2:
                     # 월별 평균 리드타임
@@ -4870,7 +4893,7 @@ def pg_orderbook(market, sectors, customers, **_):
                     fig_lt.update_layout(height=350, margin=dict(t=30, b=30),
                                          xaxis=dict(type="category"),
                                          title="월별 평균 리드타임 추이")
-                    st.plotly_chart(fig_lt, use_container_width=True)
+                    st.plotly_chart(fig_lt, width='stretch')
 
                 q1 = lt["lead_days"].quantile(0.25)
                 q3 = lt["lead_days"].quantile(0.75)
@@ -4905,7 +4928,7 @@ def pg_orderbook(market, sectors, customers, **_):
                         otbl.columns = ["SO_ID", "고객명", "수주월", "최초출고일", "리드타임(일)"]
                         otbl["최초출고일"] = otbl["최초출고일"].apply(fmt_date)
                         otbl["리드타임(일)"] = otbl["리드타임(일)"].apply(lambda x: f"{int(x)}일")
-                        st.dataframe(otbl, use_container_width=True, hide_index=True)
+                        st.dataframe(otbl, width='stretch', hide_index=True)
             else:
                 st.info("리드타임 분석 가능한 데이터 없음")
 
@@ -4952,7 +4975,7 @@ def pg_orderbook(market, sectors, customers, **_):
                                         color_discrete_sequence=[C_INPUT, C_OUTPUT])
                     fig_lt_box.update_layout(height=350, margin=dict(t=30, b=30),
                                               showlegend=False)
-                    st.plotly_chart(fig_lt_box, use_container_width=True)
+                    st.plotly_chart(fig_lt_box, width='stretch')
                     # 구간별 상세 통계 기반 동적 해석
                     seg_details = {}
                     for label, col in [("출고→픽업", "출고_픽업"), ("픽업→선적", "픽업_선적")]:
@@ -5021,7 +5044,7 @@ def pg_orderbook(market, sectors, customers, **_):
                                 for dc in ("공장출고일", "픽업일", "선적일"):
                                     disp[dc] = disp[dc].apply(fmt_date)
                                 disp["소요일"] = disp["소요일"].apply(lambda x: f"{int(x)}일")
-                                st.dataframe(disp, use_container_width=True, hide_index=True)
+                                st.dataframe(disp, width='stretch', hide_index=True)
                 else:
                     st.info("해외 물류 리드타임 데이터 없음")
 
@@ -5409,7 +5432,7 @@ def _render_sync_log_explore() -> None:
         runs_view["사용자"] = runs_view["사용자"].fillna("")
         runs_view["호스트"] = runs_view["호스트"].fillna("")
         runs_view["종료"] = runs_view["종료"].fillna("")
-        st.dataframe(runs_view.head(50), use_container_width=True, hide_index=True)
+        st.dataframe(runs_view.head(50), width='stretch', hide_index=True)
 
     # ── 시트별 변경 추이 차트 ──
     st.subheader("시트별 변경 추이")
@@ -5422,7 +5445,7 @@ def _render_sync_log_explore() -> None:
             labels={"date": "날짜", "건수": "변경 record 수", "sheet_name": "시트"},
         )
         fig.update_layout(height=360, margin=dict(t=30, b=30))
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     # ── 날짜 × 컬럼 히트맵 (어느 필드가 자주 바뀌나) ──
     st.subheader("날짜 × 컬럼 변경 히트맵")
@@ -5531,7 +5554,7 @@ def _render_sync_log_explore() -> None:
                 tickvals=list(pivot.columns),
                 ticktext=list(pivot.columns),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width='stretch')
 
             total_hits = int(hm_filt.shape[0])
             total_all = int(hm_flat.shape[0])
@@ -5553,7 +5576,7 @@ def _render_sync_log_explore() -> None:
         ]].copy()
         compact.columns = ["동기화시각", "sync_id", "사용자", "시트", "유형", "PK", "변경 요약"]
         compact["사용자"] = compact["사용자"].fillna("")
-        st.dataframe(compact, use_container_width=True, hide_index=True)
+        st.dataframe(compact, width='stretch', hide_index=True)
     else:
         exploded = _explode_changes(page)
         if exploded.empty:
@@ -5563,7 +5586,7 @@ def _render_sync_log_explore() -> None:
                 "동기화시각", "sync_id", "actor", "시트", "유형", "PK", "컬럼", "이전값", "변경값",
             ]]
             exploded.columns = ["동기화시각", "sync_id", "사용자", "시트", "유형", "PK", "컬럼", "이전값", "변경값"]
-            st.dataframe(exploded, use_container_width=True, hide_index=True)
+            st.dataframe(exploded, width='stretch', hide_index=True)
 
     # ── CSV 다운로드 (record 단위 raw + JSON) ──
     csv_bytes = filtered.to_csv(index=False).encode("utf-8-sig")
