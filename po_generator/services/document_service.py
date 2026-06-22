@@ -619,6 +619,18 @@ class DocumentService:
         if order_data is None:
             return DocumentResult.not_found_result(customer_po)
 
+        # 복수 DN 통합 시 Invoice No는 대표(첫) DN만 표기됨(헤더가 first_item 기준).
+        # 청구 라인이 여러 DN에 걸치면 송장번호와 실제 청구물품이 불일치할 수 있어 경고.
+        if order_data.items_df is not None and 'DN_ID' in order_data.items_df.columns:
+            _dn_ids = sorted(
+                order_data.items_df['DN_ID'].dropna().astype(str).str.strip().unique()
+            )
+            if len(_dn_ids) > 1:
+                logger.warning(
+                    "Customer PO %s가 복수 DN(%s)에 걸침 — Invoice No는 대표 DN만 표기됨, "
+                    "송장 검토 필요", customer_po, ', '.join(_dn_ids),
+                )
+
         # 출력 디렉토리 생성
         FI_OUTPUT_DIR.mkdir(exist_ok=True)
 

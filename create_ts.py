@@ -168,6 +168,7 @@ def generate_merged_ts(dn_ids: list[str]) -> bool:
     service = DocumentService()
     all_items = []
     first_order_data = None
+    first_dn_id = None
     customer_names = set()
     latest_dispatch_date = None
 
@@ -181,6 +182,7 @@ def generate_merged_ts(dn_ids: list[str]) -> bool:
         # 첫 번째 유효한 데이터 저장
         if first_order_data is None:
             first_order_data = order_data
+            first_dn_id = dn_id
 
         # 고객명 수집
         customer_name = order_data.get_value('customer_name', '')
@@ -224,13 +226,14 @@ def generate_merged_ts(dn_ids: list[str]) -> bool:
         first_order_data.first_item['출고일'] = latest_dispatch_date
         print(f"  출고일: {latest_dispatch_date.strftime('%Y-%m-%d')}")
 
-    # 5. 파일명 생성 (월합_고객명_날짜)
+    # 5. 파일명 생성 (월합_DN_고객명_날짜) — 충돌 시 _1,_2 자동 접미사 + 경로 검증
     customer_name = first_order_data.get_value('customer_name', 'Unknown')
-    customer_short = customer_name[:10].replace(' ', '_')
-    from datetime import datetime
-    date_str = datetime.now().strftime('%Y%m%d')
-    output_filename = f"월합_{customer_short}_{date_str}.xlsx"
-    output_path = TS_OUTPUT_DIR / output_filename
+    output_path = generate_output_filename(
+        "월합", first_dn_id or "merge", customer_name, TS_OUTPUT_DIR
+    )
+    if not validate_output_path(output_path, TS_OUTPUT_DIR):
+        return False
+    output_filename = output_path.name
 
     # 6. 거래명세표 생성
     try:
@@ -429,6 +432,13 @@ def main() -> int:
 
         if adv_ids:
             print(f"\n[경고] 선수금({len(adv_ids)}건)은 merge에서 제외됩니다: {adv_ids}")
+
+        # 중복 DN_ID 제거 (입력 순서 보존) — 같은 DN을 두 번 넘기면 금액 이중 합산되므로 차단
+        _deduped = list(dict.fromkeys(dn_ids))
+        if len(_deduped) != len(dn_ids):
+            _dups = [d for d in dict.fromkeys(dn_ids) if dn_ids.count(d) > 1]
+            print(f"\n[경고] 중복 DN_ID 제거됨: {_dups}")
+            dn_ids = _deduped
 
         if len(dn_ids) < 2:
             print("\n[오류] --merge 옵션은 2개 이상의 DN_ID가 필요합니다.")

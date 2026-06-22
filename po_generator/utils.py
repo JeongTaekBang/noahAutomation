@@ -93,7 +93,9 @@ get_safe_value = _get_safe_value
 
 
 _RESOLVE_SENTINEL = object()
-_resolve_cache: dict[tuple[int, str], str | None] = {}
+# 캐시 키는 컬럼 라벨 내용(tuple) 기반.
+# id(columns)는 GC 후 주소 재사용 시 다른 스키마의 매핑을 반환할 수 있어 사용하지 않는다.
+_resolve_cache: dict[tuple[tuple, str], str | None] = {}
 
 
 def resolve_column(
@@ -109,7 +111,7 @@ def resolve_column(
     Returns:
         실제 컬럼명 또는 None (찾지 못한 경우)
     """
-    cache_key = (id(columns), key)
+    cache_key = (tuple(columns), key)
     cached = _resolve_cache.get(cache_key, _RESOLVE_SENTINEL)
     if cached is not _RESOLVE_SENTINEL:
         return cached
@@ -210,6 +212,16 @@ def _load_and_merge_sheets(
     else:
         # Line item 없으면 기존 방식 (SO_ID별 첫 행)
         df_so_subset = df_so_subset.drop_duplicates(subset='SO_ID', keep='first')
+
+    # 참조측(SO) 중복 제거 — 손수 관리 Excel에 중복 (SO_ID, Line item)이 있으면
+    # left merge가 PO 라인을 fan-out시켜 수량/금액이 이중 집계됨. 첫 행만 사용하고 경고.
+    _dup = int(df_so_subset.duplicated(subset=join_keys).sum())
+    if _dup:
+        logger.warning(
+            "%s: 중복 %s건 발견 (%s) — 첫 행만 사용 (fan-out 방지)",
+            so_sheet, _dup, '+'.join(join_keys),
+        )
+        df_so_subset = df_so_subset.drop_duplicates(subset=join_keys, keep='first')
 
     # PO 기준으로 left join
     df_merged = df_po.merge(df_so_subset, on=join_keys, how='left', suffixes=('', '_SO'))
@@ -399,6 +411,16 @@ def load_dn_data() -> pd.DataFrame:
         # Line item 없으면 DN_ID 중복 제거 후 SO_ID만으로 join
         df_dn = df_dn.drop_duplicates(subset='DN_ID', keep='first')
         df_so_subset = df_so_subset.drop_duplicates(subset='SO_ID', keep='first')
+
+    # 참조측(SO) 중복 제거 — 중복 (SO_ID, Line item)이 있으면 left merge가
+    # DN 라인을 fan-out시켜 수량/금액이 이중 집계됨. 첫 행만 사용하고 경고.
+    _dup = int(df_so_subset.duplicated(subset=join_keys).sum())
+    if _dup:
+        logger.warning(
+            "%s: 중복 %s건 발견 (%s) — 첫 행만 사용 (fan-out 방지)",
+            SO_DOMESTIC_SHEET, _dup, '+'.join(join_keys),
+        )
+        df_so_subset = df_so_subset.drop_duplicates(subset=join_keys, keep='first')
 
     df_merged = df_dn.merge(df_so_subset, on=join_keys, how='left', suffixes=('', '_SO'))
 

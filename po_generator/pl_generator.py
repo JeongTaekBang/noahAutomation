@@ -323,7 +323,8 @@ def _fill_items_batch(
         if not raw_qty or (isinstance(raw_qty, str) and raw_qty == ''):
             raw_qty = item.get('Qty', 1) if 'Qty' in item.index else 1
         try:
-            qty = int(raw_qty) if pd.notna(raw_qty) else 1
+            # int(float(...)): '2.0' 같은 숫자형 문자열도 안전하게 파싱 (int('2.0')은 ValueError)
+            qty = int(float(raw_qty)) if pd.notna(raw_qty) else 1
         except (ValueError, TypeError):
             logger.warning(f"Item {item_idx+1}: 수량 변환 실패 '{raw_qty}' -> 기본값 1 사용")
             qty = 1

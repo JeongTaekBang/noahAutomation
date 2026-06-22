@@ -93,7 +93,11 @@ def generate_pi(so_id: str, df_so: pd.DataFrame) -> bool:
             item_name = get_value(item, 'item_name', 'N/A')
             item_qty = get_value(item, 'item_qty', 'N/A')
             unit_price = get_value(item, 'sales_unit_price', 0)
-            print(f"    {idx + 1}. {item_name} x {item_qty} @ {unit_price:,.2f}")
+            # 단가가 비숫자(예: 'TBD')여도 콘솔 출력에서 배치 전체가 중단되지 않도록 가드
+            try:
+                print(f"    {idx + 1}. {item_name} x {item_qty} @ {float(unit_price):,.2f}")
+            except (ValueError, TypeError):
+                print(f"    {idx + 1}. {item_name} x {item_qty} @ {unit_price}")
 
     print(f"  고객: {order_data.get_value('customer_name', 'N/A')}")
     if not order_data.is_multi_item:
@@ -101,7 +105,10 @@ def generate_pi(so_id: str, df_so: pd.DataFrame) -> bool:
         print(f"  수량: {order_data.get_value('item_qty', 'N/A')}")
         unit_price = order_data.get_value('sales_unit_price', 0)
         currency = order_data.get_value('currency', 'USD')
-        print(f"  단가: {currency} {unit_price:,.2f}")
+        try:
+            print(f"  단가: {currency} {float(unit_price):,.2f}")
+        except (ValueError, TypeError):
+            print(f"  단가: {currency} {unit_price}")
 
     # 3. 문서 생성 (서비스 사용)
     result = service.generate_pi(so_id)

@@ -241,6 +241,15 @@ def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
 
     # 5. 복수 PO → 발주번호별 분리 생성
     print(f"\n  [발주번호 분리] {len(rck_pos)}개 RCK PO 발견 → 발주번호별 FI 생성")
+    # RCK PO 공란 라인은 어떤 발주번호 필터(== po)에도 안 잡혀 모든 FI에서 누락됨 → 과소청구.
+    # 조용히 빠지지 않도록 경고 + 건수 정합성(분리합 vs 전체) 점검.
+    _blank_mask = (items_df[rck_po_col].isna()
+                   | (items_df[rck_po_col].astype(str).str.strip() == ''))
+    _n_blank = int(_blank_mask.sum())
+    if _n_blank:
+        print(f"  [경고] RCK PO 공란 라인 {_n_blank}건은 발주번호별 FI에서 누락됩니다 "
+              f"(과소청구 위험) — 해당 라인의 RCK PO 입력 후 재생성 필요")
+        logger.warning("FI 분리 생성: RCK PO 공란 %d건 누락 위험 (dn_id=%s)", _n_blank, dn_id)
     for po in sorted(rck_pos):
         po_items = items_df[items_df[rck_po_col] == po]
         print(f"    {po}: {len(po_items)}개 아이템")
