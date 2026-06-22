@@ -1,5 +1,21 @@
 # Current Tasks
 
+## Completed — LOW 30건 [2026-06-22]
+5개 파일그룹 병렬 에이전트로 처리. pytest 281 passed + 라이브DB SQL 실행확인.
+- [x] 생성기/CLI/core 9+5건: resolve_column 비문자열가드, escape_excel 선행제어문자, validators 0값,
+      to_text 승격+모델코드, get_column_letter(>Z/AA+), 미사용상수, 0단가 fallback, ci 중복블록,
+      create_fi --po충돌, create_po force분리, create_ts 고객명시, finder trim, history 정규식
+- [x] 대사 6건: FX 상대오차, Customer backfill, 상세 날짜컬럼, build_mapping 우선dedup,
+      fill 불일치경고, recon_paths 빈 플랫폴더
+- [x] 대시보드 6건: sync-log 정확매칭, OTD groupby, aging 라벨, 미출고 clip+캡션, backlog 캡션, HAVING
+- [x] DB/SQL 4건: _sync_meta 빈시트, NULL EDD COALESCE(3파일), backlog 라운딩/HAVING
+
+### 미적용 (의도적 제외 — 사유 명시)
+- ts_generator 라인별 VAT(sub-10원, 의도적), FI 모델 prefix(소유자 확인필요),
+  finder get_available_*(dead code), snapshot undo 이력테이블(스키마변경), theme CSS(시각회귀위험),
+  Book-to-Bill inf 라벨(미관), analyze_sheets(git-ignored), validate_delivery_date dayfirst(조직관례),
+  margin basis 재정의(대규모), dashboard 마감스냅샷 배선(설계), snapshot EDD-move/소급(by-design)
+
 ## Completed — 감사 수정 (High 1 + Medium 12) [2026-06-22]
 멀티에이전트 감사(101 발견→53 확정) 중 High 1 + Medium 12 수정. pytest 281 passed.
 - [x] #1  dashboard.py: 날짜 1900 더미 정화 중앙화 (_sanitize_date) — load_so 4컬럼 + load_backlog
