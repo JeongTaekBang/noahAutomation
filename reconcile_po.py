@@ -149,7 +149,13 @@ def build_po_mapping(df_po: pd.DataFrame) -> pd.DataFrame:
 
 
 def resolve_ax_po(delivery: pd.DataFrame, po_mapping: pd.DataFrame) -> pd.DataFrame:
-    """Delivery의 RCK ODER를 AX PO로 통일 (1:N → 행 복제)"""
+    """Delivery의 RCK ODER를 AX PO로 통일 (1:N → 행 복제)
+
+    1:N 복제 시 한 출고 라인의 계산서금액이 매핑된 AX PO마다 그대로 복제되므로,
+    집계(_agg_delivery)에서 금액을 분배할 수 있도록 원 출고 라인에 stable id를 부여한다.
+    """
+    delivery = delivery.copy()
+    delivery['_line_id'] = range(len(delivery))
     is_nd = delivery['RCK ODER'].str.startswith(('ND-', 'NO-'))
     df_nd = delivery[is_nd].merge(
         po_mapping, left_on='RCK ODER', right_on='PO_ID', how='left')
@@ -190,7 +196,7 @@ def export_delivery_ax_po(delivery: pd.DataFrame, output_file: Path,
 
     # --- 국내: Delivery + AX PO ---
     df = delivery.copy()
-    drop_cols = [c for c in ['PO_ID'] if c in df.columns]
+    drop_cols = [c for c in ['PO_ID', '_line_id'] if c in df.columns]
     if drop_cols:
         df = df.drop(columns=drop_cols)
 
@@ -234,6 +240,14 @@ def export_delivery_ax_po(delivery: pd.DataFrame, output_file: Path,
 
 def _agg_delivery(delivery: pd.DataFrame, name: str) -> pd.DataFrame:
     """출고 리스트를 AX PO별로 집계"""
+    delivery = delivery.copy()
+    # 1:N AX PO 복제 시 계산서금액을 매핑된 AX PO 수로 분배 — AX PO별 합이 원 출고금액을
+    # 보존하도록(이중계상 방지). _line_id가 같은 복제행 수 = fan-out 수.
+    if '_line_id' in delivery.columns and '계산서금액' in delivery.columns:
+        _fan = delivery.groupby('_line_id')['_line_id'].transform('size')
+        delivery['계산서금액'] = (
+            pd.to_numeric(delivery['계산서금액'], errors='coerce').fillna(0) / _fan
+        )
     agg = (delivery.groupby('AX PO')
            .agg(
                Type=('Type', 'first'),
@@ -819,9 +833,33 @@ def main() -> int:
 
     grn_pos = grn['Purchase order'].astype(str).str.strip()
     grn_amt = grn['Cost amount physical']
-    ax_dom = float(grn_amt[grn_pos.isin(po_dom_set | ytc_ax_set)].sum())
-    ax_exp = float(grn_amt[grn_pos.isin(po_exp_set)].sum())
+    _dom_keys = po_dom_set | ytc_ax_set
+    # 동일 AX PO가 국내/해외(또는 YTC) 양쪽 키에 존재하면 GRN이 두 버킷에 이중계상되어
+    # ax_service(잔차)가 음수로 왜곡됨 → 국내 우선으로 해외 키에서 제외.
+    _overlap = po_exp_set & _dom_keys
+    if _overlap:
+        logger.warning("AX PO가 국내/해외(또는 YTC) 양쪽에 존재 %d건 — 국내로 귀속: %s",
+                       len(_overlap), sorted(_overlap)[:5])
+    _exp_keys = po_exp_set - _dom_keys
+    ax_dom = float(grn_amt[grn_pos.isin(_dom_keys)].sum())
+    ax_exp = float(grn_amt[grn_pos.isin(_exp_keys)].sum())
     ax_service = float(grn_amt.sum()) - ax_dom - ax_exp
+
+    # Service는 잔차로 계산되므로 미분류 Product GRN(공란/오타 AX PO, 미Invoiced)이
+    # 조용히 Service로 흡수될 수 있음 → PO 전체(기간/Status 무관)에 존재하는 AX PO인데
+    # Product 키에 안 잡힌 GRN을 경고로 surface (Total은 항상 tie-out되어 가려짐).
+    _all_product_ax: set[str] = set()
+    if df_po_all is not None and 'AX PO' in df_po_all.columns:
+        _all_product_ax = (set(df_po_all['AX PO'].dropna().astype(str).str.strip())
+                           - {'', 'nan'})
+    _unclf_mask = grn_pos.isin(_all_product_ax) & ~grn_pos.isin(_dom_keys | _exp_keys)
+    if bool(_unclf_mask.any()):
+        logger.warning(
+            "Service 잔차에 미분류 Product GRN %d건(약 %s원) — AX PO 오타/미Invoiced "
+            "가능성, Product 분류 점검 필요",
+            int(grn_pos[_unclf_mask].nunique()),
+            f"{float(grn_amt[_unclf_mask].sum()):,.0f}",
+        )
 
     excel_total = excel_dom + excel_exp + excel_service
     ax_total = ax_dom + ax_exp + ax_service

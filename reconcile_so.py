@@ -52,6 +52,16 @@ FX_SHEET = 'FX'
 FX_DIFF_THRESHOLD = 100
 
 
+def _norm_project(s: 'pd.Series') -> 'pd.Series':
+    """AX Project 키 정규화 — astype(str).strip() + 정수형 '.0' 접미사 제거.
+
+    한쪽 소스에 빈 셀이 있어 컬럼이 float64로 업캐스트되면 26001 → '26001.0'이 되어
+    상대 소스의 '26001'과 매칭 실패 → 'NOAH에 없음' 오분류(매출 누락). 양측 동일
+    정규화로 방지. 순수 정수 문자열의 '.0'만 제거하고 영숫자 코드는 보존.
+    """
+    return s.astype(str).str.strip().str.replace(r'^(\d+)\.0$', r'\1', regex=True)
+
+
 def find_ax_sales_file(period_code: str) -> Path | None:
     """period 디렉터리(플랫 또는 연도 중첩)에서 AX_Sales 파일 찾기"""
     period_dir = resolve_period_dir(RECON_DIR, period_code)
@@ -87,7 +97,7 @@ def load_ax_sales(file_path: Path) -> pd.DataFrame:
         df['Customer'] = ''
 
     df = df[df['Project'].notna()].copy()
-    df['Project'] = df['Project'].astype(str).str.strip()
+    df['Project'] = _norm_project(df['Project'])
     df['AX'] = pd.to_numeric(df['AX'], errors='coerce').fillna(0)
 
     # NOAH_SO 컬럼은 무시 (자동 계산)
@@ -148,7 +158,17 @@ def load_noah_dn(year_month: str) -> pd.DataFrame:
     # AX Project number 있는 건만
     has_proj = df_all[AX_PROJECT_COL].notna() & (df_all[AX_PROJECT_COL] != '')
     df_all = df_all[has_proj].copy()
-    df_all[AX_PROJECT_COL] = df_all[AX_PROJECT_COL].astype(str).str.strip()
+    df_all[AX_PROJECT_COL] = _norm_project(df_all[AX_PROJECT_COL])
+
+    # 매출일(국내=출고일, 해외=선적일) 결측 행은 월 필터에서 제외됨 — 조용히 사라지지
+    # 않도록 구분별 건수를 경고. (해외 선적일 미입력 매출이 'NOAH에 없음'으로 오분류되는 것 방지)
+    _na = df_all['매출일'].isna()
+    if _na.any():
+        _by_gubun = df_all.loc[_na, '구분'].value_counts().to_dict()
+        logger.warning(
+            "매출일(출고일/선적일) 미입력 %d건 — 월 필터에서 제외됨: %s",
+            int(_na.sum()), _by_gubun,
+        )
 
     # 매출일 기준 해당 월 필터
     df_all['매출월'] = df_all['매출일'].dt.to_period('M').astype(str)
@@ -156,6 +176,17 @@ def load_noah_dn(year_month: str) -> pd.DataFrame:
     df_all = df_all[df_all['매출월'] == year_month].copy()
     logger.debug("NOAH DN 로드: %d건 → 매출일 %s 필터 → %d건",
                  before, year_month, len(df_all))
+
+    # 해외 매출의 KRW 금액(Total Sales KRW) 결측 경고 — 결측 시 NOAH_금액(KRW)이 0으로
+    # 집계되어 실제 매출이 'NOAH 0 / 불일치'로 오표시됨 (환율차이 폴백으로도 복구 안 됨).
+    if 'Total Sales KRW' in df_all.columns:
+        _krw_na = (df_all['구분'] == '해외') & df_all['Total Sales KRW'].isna()
+        if _krw_na.any():
+            logger.warning(
+                "해외 DN의 'Total Sales KRW' 미입력 %d건 — KRW 매출이 0으로 집계되어 "
+                "불일치로 오표시될 수 있음 (해당 Project 확인 필요)",
+                int(_krw_na.sum()),
+            )
 
     return df_all
 
@@ -172,15 +203,32 @@ def load_fx_rates() -> pd.DataFrame:
     return df
 
 
-def period_code_to_col(period_code: str, fx_cols: list[str]) -> str | None:
-    """P03 → FX 시트의 매칭 컬럼명 (예: '2026-03') 반환 — 다년 시 최신 연도"""
-    month = period_code.replace('P', '').zfill(2)  # P03 → '03'
+def period_code_to_col(
+    period_code: str,
+    fx_cols: list[str],
+    year_hint: str | None = None,
+) -> str | None:
+    """P03 → FX 시트의 매칭 컬럼명 (예: '2026-03') 반환.
+
+    year_hint(연도 폴더에서 추출)가 있으면 'YYYY-MM' 정확 매칭을 우선해
+    과거 연도 동월 재대사 시 엉뚱한 연도 환율이 적용되는 문제를 방지한다.
+    힌트가 없거나 정확 매칭이 없으면 월만 비교하며, 다년 충돌 시 최신 연도 + 경고.
+    """
+    month = period_code.replace('P', '').replace('p', '').zfill(2)  # P03 → '03'
+    if year_hint:
+        exact = f'{year_hint}-{month}'
+        for col in fx_cols:
+            if str(col) == exact:
+                return col
+        logger.warning("FX 시트에 %s 컬럼 없음 — 월(%s) 기준으로 폴백", exact, month)
     matches = [col for col in fx_cols if str(col).endswith(f'-{month}')]
     if not matches:
         return None
     if len(matches) > 1:
         logger.warning(
-            "FX 시트에 %s월 컬럼 %d개 — 최신 사용: %s", month, len(matches), matches,
+            "FX 시트에 %s월 컬럼 %d개 — 최신 사용: %s "
+            "(연도 폴더 so_reconciliation/{년}/%s 사용 시 자동 구분)",
+            month, len(matches), matches, period_code,
         )
     return max(matches, key=str)  # YYYY-MM 포맷은 사전순 = 연도순
 
@@ -447,11 +495,17 @@ def main() -> int:
     print(f"NOAH DN:   {NOAH_SO_PO_DN_FILE.name}")
 
     # 2. 데이터 로드
-    #    P03 → '2026-03' (FX 시트 컬럼에서 연도 파악)
+    #    P03 → '2026-03' (연도 폴더가 있으면 그 연도로 정확 매칭, 없으면 최신 연도)
+    _period_dir = resolve_period_dir(RECON_DIR, period)
+    _year_hint = None
+    if _period_dir is not None:
+        _pn = _period_dir.parent.name
+        if len(_pn) == 4 and _pn.isdigit():
+            _year_hint = _pn
     try:
         ax_sales = load_ax_sales(ax_file)
         fx_rates = load_fx_rates()
-        recon_period_col = period_code_to_col(period, list(fx_rates.columns))
+        recon_period_col = period_code_to_col(period, list(fx_rates.columns), _year_hint)
     except Exception as e:
         print(f"[오류] 데이터 로드 실패: {e}")
         return 1
@@ -483,7 +537,7 @@ def main() -> int:
     detail = detail.sort_values(sort_cols).reset_index(drop=True)
 
     # 6. Excel 출력
-    period_dir = resolve_period_dir(RECON_DIR, period) or (RECON_DIR / period)
+    period_dir = _period_dir or (RECON_DIR / period)
     output_file = period_dir / f"대사결과_SO_{period}.xlsx"
     write_output(summary, detail, output_file)
     print(f"\n출력: {output_file}")

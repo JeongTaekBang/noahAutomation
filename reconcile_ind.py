@@ -209,6 +209,23 @@ def fill_industry_code(
 # Sector 검증
 # ──────────────────────────────────────────────
 
+def _norm_ind_code(x) -> str:
+    """Industry code를 표준 문자열 키로 정규화.
+
+    int / float / np.float64 / 문자열 '12345.0' 을 모두 '12345'로 통일해
+    마스터 키와 SO 키가 .0 유무(특히 마스터 컬럼이 float64일 때)로 어긋나
+    교차검증이 통째로 '마스터 없음'으로 빠지는 문제를 방지한다. 비숫자 코드는 strip만.
+    """
+    s = str(x).strip()
+    try:
+        f = float(s)
+        if f == int(f):
+            return str(int(f))
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return s
+
+
 def load_industry_code_master(ob_file: Path) -> dict:
     """Orderbook의 'Industry code' 시트에서 마스터 로드
 
@@ -221,7 +238,7 @@ def load_industry_code_master(ob_file: Path) -> dict:
 
     result = {}
     for _, row in master.iterrows():
-        code = str(row['New Industry Code']).strip()
+        code = _norm_ind_code(row['New Industry Code'])
         category = str(row['Category']).strip()
         expected_sector = CATEGORY_TO_SECTOR.get(category)
         result[code] = (category, expected_sector)
@@ -254,10 +271,8 @@ def validate_so_sector(
     # SO_ID 기준 중복 제거 (라인아이템은 동일 Sector)
     so_all = so_all.drop_duplicates(subset=[PO_SO_ID_COL])
 
-    # 마스터 조인
-    so_all['ind_code_str'] = so_all[SO_IND_COL].apply(
-        lambda x: str(int(x)) if isinstance(x, float) and x == int(x) else str(x).strip()
-    )
+    # 마스터 조인 (양측 동일 정규화 — .0 유무로 키 어긋남 방지)
+    so_all['ind_code_str'] = so_all[SO_IND_COL].apply(_norm_ind_code)
     so_all['마스터 Category'] = so_all['ind_code_str'].map(
         lambda c: master[c][0] if c in master else None
     )
@@ -388,8 +403,7 @@ def print_sector_summary(
         print(f"    {'SO_ID':<18} {'구분':<5} {'Ind.Code':>8}  {'현재Sector':<8} {'기대Sector':<8}  Customer")
         print("    " + "-" * 80)
         for _, r in mismatches.head(20).iterrows():
-            ind = r[SO_IND_COL]
-            ind_str = str(int(ind)) if isinstance(ind, float) and ind == int(ind) else str(ind)
+            ind_str = _norm_ind_code(r[SO_IND_COL])
             print(f"    {r[PO_SO_ID_COL]:<18} {r['구분']:<5} {ind_str:>8}  "
                   f"{r[SO_SECTOR_COL]:<8} {r['기대 Sector']:<8}  {r['Customer name']}")
         if mismatch_count > 20:
