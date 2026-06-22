@@ -29,13 +29,18 @@ var_raw AS (
 ),
 
 -- ─── 2. 납기변경 감지용 윈도우 계산 ───
--- 같은 SO_ID + OS name에 음/양 Variance가 동시 존재 → EDD 변경 (제외 대상)
+-- EDD 이동(납기변경)은 한 EDD 버킷의 금액/수량이 다른 버킷으로 통째 이동 →
+-- 같은 SO_ID + OS name 그룹의 순변동(net)이 금액·수량 모두 0에 수렴한다.
+-- 단순히 '음/양 동시 존재'만으로 제외하면, 한 라인 판매가↑·다른 라인 환율↓ 처럼
+-- 상쇄되지 않는 실제 변동까지 통째로 사라지므로 net 상쇄 여부로 판정한다.
 var_with_flags AS (
     SELECT *,
         SUM(CASE WHEN variance_amount < -0.5 THEN 1 ELSE 0 END)
             OVER (PARTITION BY SO_ID, [OS name]) AS _neg_cnt,
         SUM(CASE WHEN variance_amount > 0.5 THEN 1 ELSE 0 END)
-            OVER (PARTITION BY SO_ID, [OS name]) AS _pos_cnt
+            OVER (PARTITION BY SO_ID, [OS name]) AS _pos_cnt,
+        SUM(variance_amount) OVER (PARTITION BY SO_ID, [OS name]) AS _net_amt,
+        SUM(variance_qty)    OVER (PARTITION BY SO_ID, [OS name]) AS _net_qty
     FROM var_raw
 ),
 
@@ -64,7 +69,10 @@ classified AS (
             ELSE '금액변경'
         END AS 변동이유
     FROM var_with_flags
-    WHERE NOT (_neg_cnt > 0 AND _pos_cnt > 0)  -- 납기변경 제외
+    -- 납기변경 제외: 음/양 동시 존재 + 그룹 순변동이 금액·수량 모두 상쇄(≈0)될 때만.
+    -- 상쇄되지 않는 잔여 변동(실제 환율/판매가/수량 변경)은 보존된다.
+    WHERE NOT (_neg_cnt > 0 AND _pos_cnt > 0
+               AND ABS(_net_amt) <= 1 AND ABS(_net_qty) <= 0.001)
 )
 
 -- ═══ 상세 내역 ═══
