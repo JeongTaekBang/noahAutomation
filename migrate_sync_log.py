@@ -1,9 +1,13 @@
 #!/usr/bin/env python
 """
-sync_log.csv → _sync_log 테이블 마이그레이션 (1회성)
-======================================================
+sync_log.csv → _sync_log_legacy_v1 테이블 마이그레이션 (1회성, 구 v1 형식)
+==========================================================================
 
-기존 CSV 로그를 SQLite `_sync_log` 테이블로 이관.
+기존 CSV 로그(v1 7컬럼)를 SQLite `_sync_log_legacy_v1` 테이블로 이관.
+
+주의: 현재 운영 `_sync_log`는 v2 스키마(record 단위 + JSON)다. v1 CSV는 컬럼 구성이
+달라 v2 테이블에 직접 넣을 수 없으므로, 충돌·오염을 막기 위해 전용 legacy 테이블에
+적재한다. 이후 v2로 합치려면 migrate_sync_log_v2.py 로 변환하라.
 실행 후 CSV 파일은 삭제해도 되지만, 안전을 위해 기본은 유지.
 
 사용법:
@@ -21,9 +25,27 @@ import sys
 from pathlib import Path
 
 from po_generator.config import DATA_DIR, DB_FILE
-from po_generator.db_schema import ensure_sync_log_table
 
 CSV_FILE: Path = DATA_DIR / "sync_log.csv"
+LEGACY_TABLE = "_sync_log_legacy_v1"
+
+
+def _ensure_legacy_table(conn: sqlite3.Connection) -> None:
+    """v1 CSV 전용 legacy 테이블 생성 (운영 v2 _sync_log와 분리)."""
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {LEGACY_TABLE} (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            sync_time   TEXT,
+            sheet_name  TEXT,
+            change_type TEXT,
+            pk          TEXT,
+            column_name TEXT,
+            old_value   TEXT,
+            new_value   TEXT
+        )
+        """
+    )
 
 
 def _parse_csv(path: Path) -> list[tuple]:
@@ -84,24 +106,25 @@ def main() -> int:
 
     conn = sqlite3.connect(str(DB_FILE))
     try:
-        ensure_sync_log_table(conn)
-        existing = conn.execute("SELECT COUNT(*) FROM _sync_log").fetchone()[0]
+        _ensure_legacy_table(conn)
+        existing = conn.execute(f"SELECT COUNT(*) FROM {LEGACY_TABLE}").fetchone()[0]
         if existing > 0:
-            print(f"\n경고: _sync_log에 이미 {existing:,}행 존재")
+            print(f"\n경고: {LEGACY_TABLE}에 이미 {existing:,}행 존재")
             ans = input("계속하면 중복 가능. 진행? [y/N]: ").strip().lower()
             if ans != 'y':
                 print("취소됨")
                 return 0
 
         conn.executemany(
-            "INSERT INTO _sync_log "
+            f"INSERT INTO {LEGACY_TABLE} "
             "(sync_time, sheet_name, change_type, pk, column_name, old_value, new_value) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
             rows,
         )
         conn.commit()
-        final = conn.execute("SELECT COUNT(*) FROM _sync_log").fetchone()[0]
-        print(f"\n완료: _sync_log 총 {final:,}행 (이번 삽입 {len(rows):,}행)")
+        final = conn.execute(f"SELECT COUNT(*) FROM {LEGACY_TABLE}").fetchone()[0]
+        print(f"\n완료: {LEGACY_TABLE} 총 {final:,}행 (이번 삽입 {len(rows):,}행)")
+        print("v2 _sync_log로 합치려면 migrate_sync_log_v2.py 로 변환하세요.")
     finally:
         conn.close()
 

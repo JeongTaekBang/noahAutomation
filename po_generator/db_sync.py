@@ -278,28 +278,29 @@ class SyncEngine:
                     ).fetchall()
                     snapshot_cols = [c[1] for c in all_cols_info if c[1] != '_sync_updated_at']
                     safe_snap_cols = [f'[{c}]' for c in snapshot_cols]
+                    # rowid 포함 조회 → 삭제는 rowid 기준 (정규화-원본 불일치로
+                    # DELETE가 0행 매칭하면서 pruned가 과대 집계되는 문제 방지)
                     db_rows = conn.execute(
-                        f'SELECT {", ".join(safe_snap_cols)} FROM [{config.table_name}]'
+                        f'SELECT rowid, {", ".join(safe_snap_cols)} FROM [{config.table_name}]'
                     ).fetchall()
                     stale_pks = []
                     snapshots = []
                     pk_idx = [snapshot_cols.index(c) for c in config.pk_columns if c in snapshot_cols]
+                    deleted = 0
                     for row in db_rows:
-                        pk_tuple = _normalize_pk(tuple(row[i] for i in pk_idx))
-                        stale_pks.append(pk_tuple)
-                        snap = {col: row[i] for i, col in enumerate(snapshot_cols)
-                                if row[i] is not None and str(row[i]) != ''}
-                        snapshots.append({'pk': pk_tuple, 'snapshot': snap})
-                    if stale_pks:
-                        pk_placeholders = ' AND '.join(
-                            f'[{c}] = ?' for c in config.pk_columns
+                        rid, data = row[0], row[1:]
+                        pk_tuple = _normalize_pk(tuple(data[i] for i in pk_idx))
+                        snap = {col: data[i] for i, col in enumerate(snapshot_cols)
+                                if data[i] is not None and str(data[i]) != ''}
+                        cur = conn.execute(
+                            f'DELETE FROM [{config.table_name}] WHERE rowid = ?',
+                            (rid,),
                         )
-                        for stale_pk in stale_pks:
-                            conn.execute(
-                                f'DELETE FROM [{config.table_name}] WHERE {pk_placeholders}',
-                                list(stale_pk),
-                            )
-                    result.pruned = len(stale_pks)
+                        if cur.rowcount:
+                            deleted += cur.rowcount
+                            stale_pks.append(pk_tuple)
+                            snapshots.append({'pk': pk_tuple, 'snapshot': snap})
+                    result.pruned = deleted
                     result.pruned_pks = stale_pks
                     result.pruned_snapshots = snapshots
                     if stale_pks:
@@ -443,33 +444,36 @@ class SyncEngine:
                     logger.warning("%s - %s", config.sheet_name, msg)
 
             # 8. Prune: Excel에서 삭제된 행 제거 (스냅샷 캡처 후 DELETE)
-            safe_pk_cols = [f'[{c}]' for c in pk_cols]
-            db_pks_cursor = conn.execute(
-                f'SELECT {", ".join(safe_pk_cols)} FROM [{config.table_name}]'
-            )
-            db_pks = {_normalize_pk(row) for row in db_pks_cursor.fetchall()}
-            stale_pks = db_pks - excel_pks
+            # rowid와 전체 컬럼을 함께 조회 — 정규화 PK는 비교용으로만 쓰고
+            # 삭제는 rowid 기준으로 수행해 정규화('42')-원본('42.0'/NULL) 불일치로
+            # DELETE가 0행 매칭하면서 pruned가 과대 집계되는 문제를 방지한다.
+            db_rows = conn.execute(
+                f'SELECT rowid, {", ".join(safe_cols)} FROM [{config.table_name}]'
+            ).fetchall()
+            pk_pos = [columns.index(c) for c in pk_cols if c in columns]
+            norm_to_rows: dict[tuple, list] = {}
+            for r in db_rows:
+                rid, data = r[0], r[1:]
+                norm = _normalize_pk(tuple(data[i] for i in pk_pos))
+                norm_to_rows.setdefault(norm, []).append((rid, data))
+            stale_pks = set(norm_to_rows.keys()) - excel_pks
             if stale_pks:
+                deleted = 0
+                pruned_list = []
                 for stale_pk in stale_pks:
-                    # 삭제 직전 행 스냅샷 캡처 (감사/복구용)
-                    snap_row = conn.execute(
-                        f'SELECT {", ".join(safe_cols)} FROM [{config.table_name}] '
-                        f'WHERE {pk_placeholders}',
-                        list(stale_pk),
-                    ).fetchone()
-                    if snap_row is not None:
-                        snap = {col: snap_row[i] for i, col in enumerate(columns)
-                                if snap_row[i] is not None and str(snap_row[i]) != ''}
-                    else:
-                        snap = {}
-                    result.pruned_snapshots.append({'pk': stale_pk, 'snapshot': snap})
-
-                    conn.execute(
-                        f'DELETE FROM [{config.table_name}] WHERE {pk_placeholders}',
-                        list(stale_pk),
-                    )
-                result.pruned = len(stale_pks)
-                result.pruned_pks = [pk for pk in stale_pks]
+                    for rid, data in norm_to_rows[stale_pk]:
+                        # 삭제 직전 행 스냅샷 캡처 (감사/복구용)
+                        snap = {col: data[i] for i, col in enumerate(columns)
+                                if data[i] is not None and str(data[i]) != ''}
+                        result.pruned_snapshots.append({'pk': stale_pk, 'snapshot': snap})
+                        cur = conn.execute(
+                            f'DELETE FROM [{config.table_name}] WHERE rowid = ?',
+                            (rid,),
+                        )
+                        deleted += cur.rowcount
+                        pruned_list.append(stale_pk)
+                result.pruned = deleted
+                result.pruned_pks = pruned_list
                 logger.info(
                     "%s: %d행 삭제(prune) — Excel에서 제거된 행",
                     config.sheet_name, result.pruned,

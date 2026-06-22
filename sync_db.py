@@ -171,13 +171,14 @@ def write_sync_log_to_db(summary: SyncSummary, db_path: Path = DB_FILE) -> None:
             rows.append((r.sheet_name, '수정', pk_json, pk_disp,
                          _jdump(changes) if changes else None, None))
 
-        # 삭제 (스냅샷 매핑)
-        snap_map = {tuple(s['pk']): s.get('snapshot', {}) for s in r.pruned_snapshots}
-        for pk in r.pruned_pks:
-            pk_tuple = tuple(pk)
+        # 삭제 — pruned_snapshots는 물리 행 단위(각자 pk+snapshot)다. pruned_pks를
+        # 재키잉하면 동일 정규화 pk가 여러 물리행을 가질 때 스냅샷이 유실/중복되므로
+        # pruned_snapshots를 직접 순회해 행:스냅샷을 1:1로 보존한다.
+        for s in r.pruned_snapshots:
+            pk_tuple = tuple(s['pk'])
             pk_json = _jdump(list(pk_tuple))
             pk_disp = _format_pk(pk_tuple)
-            snap = snap_map.get(pk_tuple, {})
+            snap = s.get('snapshot', {})
             snap_clean = {k: _to_text(v) for k, v in snap.items() if _to_text(v) is not None}
             rows.append((r.sheet_name, '삭제', pk_json, pk_disp,
                          None, _jdump(snap_clean) if snap_clean else None))
@@ -321,8 +322,10 @@ def main() -> int:
     if args.changes:
         print_changes(summary)
 
-    # dry-run이 아니면 _sync_log 테이블에 변경 내역 기록
-    if not args.dry_run:
+    # 실제 commit된 동기화에 한해서만 _sync_log 기록 — db_sync.sync_all은
+    # total_errors>0이면 전체 트랜잭션을 ROLLBACK 하므로, 그 경우 변경기록을 남기면
+    # 적용되지 않은 유령 변경이 감사로그/대시보드 변경이력에 노출된다.
+    if not args.dry_run and summary.total_errors == 0:
         write_sync_log_to_db(summary)
 
     print_summary(summary, dry_run=args.dry_run)

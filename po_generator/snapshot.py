@@ -200,6 +200,23 @@ class SnapshotEngine:
 
             now_iso = datetime.now().isoformat()
 
+            # 데이터 품질: 출하됐으나 KRW 금액(Total Sales KRW)이 공란인 해외 DN 라인은
+            # Output 금액이 0으로 잡혀 마감 스냅샷에 phantom backlog(수량0·금액잔존)로 동결됨.
+            # 마감 전 경고로 surface (금액 보정 없이 0 처리하지 않음).
+            try:
+                _dq = conn.execute(
+                    "SELECT COUNT(*) FROM dn_export "
+                    "WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != '' "
+                    "  AND TRIM(COALESCE([Total Sales KRW], '')) = ''"
+                ).fetchone()[0]
+                if _dq:
+                    logger.warning(
+                        "출하됐으나 'Total Sales KRW' 미입력인 해외 DN %d건 — 마감 시 출하금액이 "
+                        "0으로 동결되어 phantom backlog 발생 가능, 해당 라인 KRW 확인 필요", _dq,
+                    )
+            except sqlite3.Error:
+                pass
+
             # 이벤트 누적 계산으로 해당 period 시점 결과 추출
             rolling_sql = _ORDER_BOOK_BASE_SQL + """,
                 target(p) AS (SELECT ?)
