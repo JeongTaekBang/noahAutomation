@@ -356,8 +356,9 @@ def _fill_items_batch(
         qtys.append(qty)
 
         # 단가 (DN_해외는 'Unit Price' 컬럼)
-        raw_price = get_value(item, 'unit_price', '')
-        if not raw_price or (isinstance(raw_price, float) and raw_price == 0):
+        # 정상 0원 DN 단가를 누락으로 오인하지 않도록 부재/공백만 SO 판매가로 대체
+        raw_price = get_value(item, 'unit_price', None)
+        if raw_price is None or (isinstance(raw_price, str) and raw_price.strip() == ''):
             raw_price = get_value(item, 'sales_unit_price', 0)
         try:
             unit_price = float(raw_price) if pd.notna(raw_price) else 0

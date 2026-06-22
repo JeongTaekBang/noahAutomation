@@ -61,18 +61,14 @@ CELL_CONSIGNED_TO = 'A9'        # 수취인 주소
 CELL_CONSIGNED_COUNTRY = 'A10'  # 수취인 국가
 CELL_CONSIGNED_TEL = 'C10'      # 수취인 전화번호
 CELL_CONSIGNED_FAX = 'E10'      # 수취인 팩스번호
-CELL_VESSEL = 'A12'             # 선박명/항공편
 CELL_FROM = 'B13'               # 출발지
 CELL_DESTINATION = 'B14'        # 도착 국가
-CELL_DEPARTS = 'D15'            # 출발 예정일
 CELL_INVOICE_NO = 'G4'          # Invoice No
 CELL_LC_NO = 'G5'               # L/C No
 CELL_INVOICE_DATE = 'I4'        # Invoice 발행일
 CELL_LC_DATE = 'I5'             # L/C 발행일
-CELL_HS_CODE = 'I11'            # HS CODE
 CELL_PO_NO = 'G15'              # Customer PO No
 CELL_PO_DATE = 'I15'            # Customer PO Date
-CELL_CUSTOMER_PAGE2 = 'A53'     # 2페이지 헤더용 Customer name
 
 # 아이템 시작 행
 ITEM_START_ROW = 18
@@ -85,7 +81,6 @@ COL_AMOUNT = 'I'        # 금액 (수량 * 단가)
 
 # Incoterms / Currency 관련 셀
 CELL_INCOTERMS = 'G17'          # Incoterms (단가 헤더 옆)
-CELL_CURRENCY_TOTAL = 'H26'     # 합계 옆 통화 (템플릿 기준, 동적으로 조정됨)
 
 
 def create_pi_xlwings(

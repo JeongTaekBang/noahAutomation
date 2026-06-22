@@ -26,6 +26,7 @@ from po_generator.utils import (
     get_value,
     escape_excel_formula,
     get_spec_option_fields,
+    to_text,
 )
 from po_generator.excel_helpers import (
     XlConstants,
@@ -275,7 +276,7 @@ def _fill_items_batch_po(
         # Description
         item_name = get_value(item_data, 'item_name')
         if is_export:
-            model_number = get_value(item_data, 'model')
+            model_number = to_text(get_value(item_data, 'model'))
             if model_number and item_name:
                 description = f"{model_number} {item_name}"
             elif item_name:
@@ -285,7 +286,7 @@ def _fill_items_batch_po(
             else:
                 description = ''
         else:
-            model_number = get_value(item_data, 'model')
+            model_number = to_text(get_value(item_data, 'model'))
             if item_name:
                 description = item_name
             elif model_number:
@@ -360,12 +361,9 @@ def _apply_description_borders(
         num_items: 아이템(열) 수
         num_rows: 행 수 (레이블 포함)
     """
-    # 열 범위 계산 (B열부터)
-    end_col_num = ord('B') + num_items - 1
-    if end_col_num <= ord('Z'):
-        end_col = chr(end_col_num)
-    else:
-        end_col = 'A' + chr(ord('A') + (end_col_num - ord('Z') - 1))
+    # 열 범위 계산 (B열=인덱스 2부터, Z 이후 AA+ 다중 문자 지원)
+    from openpyxl.utils import get_column_letter
+    end_col = get_column_letter(2 + num_items - 1)
 
     # 전체 데이터 영역에 테두리 적용 (A1부터)
     data_range = ws.range(f'A1:{end_col}{num_rows}')
@@ -436,16 +434,9 @@ def _create_description_sheet(
     label_range.number_format = '@'  # 텍스트 형식 — '-40' 등 숫자형 문자열 보존
     label_range.value = labels_2d
 
-    # B열부터 값 쓰기
-    end_col = chr(ord('B') + num_items - 1) if num_items <= 24 else None
-    if num_items > 24:
-        # 26개 이상인 경우 Excel 열 문자 계산
-        end_col_num = ord('B') + num_items - 1
-        if end_col_num <= ord('Z'):
-            end_col = chr(end_col_num)
-        else:
-            # AA, AB, ... 처리
-            end_col = 'A' + chr(ord('A') + (end_col_num - ord('Z') - 1))
+    # B열부터 값 쓰기 (B열=인덱스 2, Z 이후 AA+ 다중 문자 지원)
+    from openpyxl.utils import get_column_letter
+    end_col = get_column_letter(2 + num_items - 1)
 
     # 헤더 배치 쓰기 (2회 COM 호출)
     ws.range(f'B1:{end_col}1').value = [header_row1]

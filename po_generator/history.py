@@ -257,28 +257,26 @@ def check_duplicate_order(order_no: str, check_all_months: bool = True) -> Dupli
 
         for history_file in month_dir.glob("*.xlsx"):
             # 파일명에서 주문번호 추출 (YYYYMMDD_주문번호_고객명.xlsx)
-            filename = history_file.stem
-            parts = filename.split('_', 2)  # 최대 3개로 분리
-            if len(parts) >= 2:
-                file_order_no = parts[1]
-                if file_order_no == safe_order_no:
-                    logger.warning(f"중복 발주 감지: {order_no}")
-                    # 파일에서 생성일시 읽기
-                    try:
-                        df = pd.read_excel(history_file)
-                        if not df.empty and '생성일시' in df.columns:
-                            return DuplicateInfo(
-                                생성일시=str(df.iloc[0]['생성일시']),
-                                생성파일=str(history_file)
-                            )
-                    except (InvalidFileException, BadZipFile, PermissionError, ValueError) as e:
-                        logger.debug(f"이력 파일 읽기 실패 (파일 시간으로 대체): {e}")
-                    # 파일 수정 시간으로 대체
-                    mtime = datetime.fromtimestamp(history_file.stat().st_mtime)
-                    return DuplicateInfo(
-                        생성일시=mtime.strftime("%Y-%m-%d %H:%M:%S"),
-                        생성파일=str(history_file)
-                    )
+            # 주문번호 자체에 '_'가 포함돼도 안전하도록 앵커 정규식 매칭
+            # (8자리 날짜 접두 + 정확한 주문번호 토큰 뒤에 '_' 또는 끝)
+            if re.match(rf"\d{{8}}_{re.escape(safe_order_no)}(_|$)", history_file.stem):
+                logger.warning(f"중복 발주 감지: {order_no}")
+                # 파일에서 생성일시 읽기
+                try:
+                    df = pd.read_excel(history_file)
+                    if not df.empty and '생성일시' in df.columns:
+                        return DuplicateInfo(
+                            생성일시=str(df.iloc[0]['생성일시']),
+                            생성파일=str(history_file)
+                        )
+                except (InvalidFileException, BadZipFile, PermissionError, ValueError) as e:
+                    logger.debug(f"이력 파일 읽기 실패 (파일 시간으로 대체): {e}")
+                # 파일 수정 시간으로 대체
+                mtime = datetime.fromtimestamp(history_file.stat().st_mtime)
+                return DuplicateInfo(
+                    생성일시=mtime.strftime("%Y-%m-%d %H:%M:%S"),
+                    생성파일=str(history_file)
+                )
 
     return None
 

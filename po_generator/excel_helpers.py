@@ -317,8 +317,9 @@ def batch_write_rows(
     col = ''.join(c for c in start_cell if c.isalpha())
     row = int(''.join(c for c in start_cell if c.isdigit()))
 
-    # 끝 열 계산
-    end_col = chr(ord(col) + num_cols - 1)
+    # 끝 열 계산 (Z 이후 AA+ 다중 문자 열 지원)
+    from openpyxl.utils import get_column_letter, column_index_from_string
+    end_col = get_column_letter(column_index_from_string(col) + num_cols - 1)
     end_row = row + num_rows - 1
 
     # 한 번에 쓰기

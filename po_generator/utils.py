@@ -53,9 +53,37 @@ def escape_excel_formula(value: Any) -> Any:
     Returns:
         이스케이프된 값 (문자열인 경우만 처리)
     """
-    if isinstance(value, str) and value and value[0] in FORMULA_ESCAPE_CHARS:
-        return "'" + value
+    # 선행 탭/개행/공백 뒤에 오는 수식 문자도 잡기 위해 제어문자를 제거 후 첫 문자 검사
+    if isinstance(value, str):
+        stripped = value.lstrip('\t\r\n ')
+        if stripped and stripped[0] in FORMULA_ESCAPE_CHARS:
+            # 표시 텍스트 보존을 위해 원본 값 앞에 따옴표만 추가
+            return "'" + value
     return value
+
+
+def to_text(value: Any) -> str:
+    """숫자를 문자열로 변환 (앞 0 보존, 뒤 .0 제거)
+
+    Excel에서 숫자로 읽힌 값을 원래 텍스트 형태로 복원합니다.
+    예: 12345.0 -> '12345', '0123' -> '0123'
+
+    각 generator(pi/ci/fi/oc/pl)에 중복 정의돼 있던 헬퍼를 공용으로 승격.
+    """
+    if pd.isna(value) or value == '':
+        return ''
+
+    # 이미 문자열이면 그대로 반환
+    if isinstance(value, str):
+        return value
+
+    # float인 경우 .0 제거 (정수로 변환 가능하면 정수로)
+    if isinstance(value, float):
+        if value == int(value):
+            return str(int(value))
+        return str(value)
+
+    return str(value)
 
 
 def _get_safe_value(
@@ -132,7 +160,7 @@ def resolve_column(
     # 3. 대소문자 무시 검색 (fallback)
     key_lower = key.lower()
     for col in columns:
-        if col.lower() == key_lower:
+        if isinstance(col, str) and col.lower() == key_lower:
             _resolve_cache[cache_key] = col
             return col
 

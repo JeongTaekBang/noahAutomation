@@ -51,18 +51,14 @@ def _to_text(value) -> str:
 CELL_BILL_TO_1 = 'A9'
 CELL_BILL_TO_2 = 'A10'
 CELL_BILL_TO_3 = 'A11'
-CELL_VESSEL = 'A12'
 CELL_FROM = 'B14'
 CELL_DESTINATION = 'B15'
-CELL_DEPARTS = 'D16'
 CELL_INVOICE_NO = 'G4'
 CELL_INCOTERMS = 'G5'
 CELL_INVOICE_DATE = 'I4'
 CELL_PAYMENT_TERMS = 'I5'
-CELL_HS_CODE = 'I12'
 CELL_PO_NO = 'G16'
 CELL_PO_DATE = 'I16'
-CELL_CUSTOMER_PAGE2 = 'A53'
 
 # CI 고유: 아이템 시작 행 (Row 19 = Electric Actuator 카테고리 라벨)
 ITEM_START_ROW = 20
@@ -183,12 +179,6 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series, items_df: pd.DataFrame | N
     incoterms = get_value(order_data, 'incoterms', '')
     if incoterms:
         ws.range(CELL_INCOTERMS).value = incoterms
-
-    # Shipping Mark 영역
-    bill_to_3 = get_value(order_data, 'bill_to_3', '')
-    ws.range(CELL_SHIPPING_MARK_NAME).value = customer_name
-    ws.range(CELL_SHIPPING_MARK_BILLTO3).value = bill_to_3
-    ws.range(CELL_SHIPPING_MARK_PO).value = customer_po
 
     # Payment terms (I5) - Customer_해외
     payment_terms = get_value(order_data, 'payment_terms', '')
@@ -344,8 +334,9 @@ def _fill_items_batch(
         qtys.append(qty)
 
         # 단가: unit_price 우선, fallback sales_unit_price
-        raw_price = get_value(item, 'unit_price', '')
-        if not raw_price or (isinstance(raw_price, float) and raw_price == 0):
+        # 정상 0원 DN 단가를 누락으로 오인하지 않도록 부재/공백만 SO 판매가로 대체
+        raw_price = get_value(item, 'unit_price', None)
+        if raw_price is None or (isinstance(raw_price, str) and raw_price.strip() == ''):
             raw_price = get_value(item, 'sales_unit_price', 0)
         try:
             unit_price = float(raw_price) if pd.notna(raw_price) else 0

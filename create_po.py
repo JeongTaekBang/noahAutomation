@@ -77,6 +77,8 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False, service: D
         service = DocumentService()
 
     # 1. 중복 발주 체크 (CLI에서 사용자 상호작용 필요)
+    # 중복 승인과 검증오류 승인은 별개로 관리 (중복 Y가 검증오류를 조용히 통과시키지 않도록)
+    dup_approved = False
     if not force:
         dup_info = check_duplicate_order(order_no)
         if dup_info:
@@ -88,7 +90,7 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False, service: D
             if response != 'Y':
                 print("  -> 발주 취소됨")
                 return False
-            force = True  # 사용자가 중복 확인 승인
+            dup_approved = True  # 사용자가 중복 확인만 승인 (검증오류는 별도 확인)
 
     # 2. 데이터 검색 및 정보 출력
     order_data = service.finder.find_po(order_no)
@@ -134,8 +136,8 @@ def generate_po(order_no: str, df: pd.DataFrame, force: bool = False, service: D
         else:
             print("  -> --force 옵션으로 오류 무시하고 진행")
 
-    # 5. 문서 생성 (force: --force 또는 사용자 상호작용 승인 시 True)
-    result = service.generate_po(order_no, force=force, skip_history=False)
+    # 5. 문서 생성 (force: --force / 중복 승인 / 검증오류 승인이 모두 통과한 최종 의도)
+    result = service.generate_po(order_no, force=(force or dup_approved), skip_history=False)
 
     # 6. 결과 처리
     if result.success:

@@ -214,8 +214,9 @@ def generate_merged_ts(dn_ids: list[str]) -> bool:
         return False
 
     if len(customer_names) > 1:
-        print(f"  [경고] 고객이 여러 명입니다: {customer_names}")
-        print("  -> 첫 번째 고객 기준으로 생성합니다.")
+        print(f"  [경고] 고객이 여러 명입니다: {sorted(customer_names)}")
+        actual = first_order_data.get_value('customer_name', 'Unknown')
+        print(f"  -> '{actual}' 기준으로 생성합니다.")
 
     # 3. 아이템 합치기
     merged_items_df = pd.concat(all_items, ignore_index=True)

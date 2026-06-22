@@ -252,7 +252,8 @@ class FinderService:
             logger.warning("Customer PO 컬럼을 찾을 수 없습니다.")
             return None
 
-        matched = df[df[cpo_col].astype(str) == customer_po]
+        # 마스터 셀의 앞뒤 공백으로 인한 무매칭 방지 위해 양쪽 trim
+        matched = df[df[cpo_col].astype(str).str.strip() == str(customer_po).strip()]
         if matched.empty:
             return None
 

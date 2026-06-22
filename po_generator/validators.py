@@ -59,8 +59,9 @@ def validate_required_fields(order_data: pd.Series) -> list[str]:
     """
     errors = []
     for field_key in REQUIRED_FIELDS:
-        value = get_value(order_data, field_key)
-        if not value:
+        # 숫자 0/0.0은 누락이 아니므로 None 센티넬로 부재/공백만 누락으로 판정
+        value = get_value(order_data, field_key, None)
+        if value is None or (isinstance(value, str) and not value.strip()):
             display_name = _get_display_name(field_key)
             errors.append(f"필수 필드 누락: {display_name}")
             logger.error(f"필수 필드 누락: {display_name}")

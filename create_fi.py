@@ -107,7 +107,7 @@ def print_available_customer_pos(df_dn: pd.DataFrame, limit: int = 20) -> None:
     print("-" * 55)
     for po in cpos[:limit]:
         # 해당 PO의 DN 목록과 고객명
-        po_rows = df_dn[df_dn[cpo_col].astype(str) == po]
+        po_rows = df_dn[df_dn[cpo_col].astype(str).str.strip() == str(po).strip()]
         dn_ids = po_rows['DN_ID'].dropna().unique().tolist()
         customer = po_rows['Customer name'].iloc[0] if len(po_rows) > 0 else ''
         customer_short = str(customer)[:20] if customer else ''
@@ -349,6 +349,10 @@ def main() -> int:
 
     # --po 모드: RCK PO 기준 생성
     if args.po is not None:
+        # DN_ID 위치 인자와 --po 동시 입력 방지 (positional이 조용히 무시되는 것 방지)
+        if args.dn_ids:
+            print("[오류] DN_ID와 --po는 동시에 사용할 수 없습니다. 둘 중 하나만 지정하세요.")
+            return 1
         if not args.po:
             # --po만 입력 (인자 없음) → 발주번호 목록 표시
             print_available_customer_pos(df_dn)
