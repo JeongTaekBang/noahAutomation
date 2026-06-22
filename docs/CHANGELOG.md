@@ -20,6 +20,56 @@
 
 ---
 
+## 2026-06-22: 전면 코드 감사 — 정합성 버그 일괄 수정 (High 1 + Medium 18 + LOW 30)
+
+### 배경
+멀티 에이전트 적대적 감사 2회 실시. 1차(모듈별 너비): 101건 발견 → 적대적 검증으로 53 확정.
+2차(교차/저커버리지 렌즈 + 1차 기각 48건 재심): **7건 false-negative 복구** + 신규 17 + 1차 수정 회귀 2건 검출.
+hand-maintained Excel(ERP 미연동) 특성상 중복·공란·이상타입 셀이 현실적이라 **금액/환율/날짜필터/조인 오류가 회계오류로 직결**되는 항목을 우선 수정.
+
+### 변경 — High/Medium (정합성·금액 직결)
+**대시보드**
+- 날짜 1900 더미값(Excel zero-date) 정화 중앙화(`_sanitize_date`) — `load_so` 4개 날짜컬럼 + `load_backlog`. 라이브 DB 확인 결과 `SOO-2026-0165`가 납기 `1900-01-01`로 **약 126년 지연 오집계**되던 것 제거(허위 납기지연/OTD 0%/경과일 폭주). (High)
+- 납기현황 SO 합계를 경과 라인만 → **주문 전체 라인 기준**으로(주석/라벨 일치). 회귀수정: 라인별 잔여 음수(과출고) `clip(0)`으로 부족분 상계 방지. PO EXW 보충 fan-out 방지.
+
+**문서 생성기**
+- 수량 파싱 `int(raw_qty)` → `int(float(raw_qty))` — `'2.0'` 문자열이 ValueError로 **수량 1 묵살** → Invoice 금액 손상. TS + fi/ci/oc/pi/pl 6개 생성기 전체(PO와 동일 패턴 통일).
+- `create_pi` 비숫자 단가 `:.2f` 가드(배치 전체 중단 방지), `create_fi` 복수 RCK PO 분리 시 공란 RCK PO 라인 누락 경고(과소청구), `--po` FI 복수 DN 통합 시 Invoice No 대표DN 경고, `create_ts` 월합 출력파일명 충돌 안전장치/중복 DN_ID dedup.
+
+**core**
+- `utils.resolve_column` 캐시 키 `id(columns)` → `tuple(columns)`(GC id 재사용 오매핑 방지). 복합키 머지(`_load_and_merge_sheets`/`load_dn_data`) 참조측 dedup + 경고(행 fan-out 이중집계 방지).
+
+**DB 동기화/감사로그**
+- `db_sync` prune 2경로 **rowid 기준 삭제 + rowcount 집계** — 정규화 PK(`'42'`)가 legacy 원본(`'42.0'`)과 불일치해 0행 삭제하면서 `pruned` 과대집계되던 것 수정.
+- `sync_db` 삭제 감사로그를 `pruned_snapshots` 1:1 순회(회귀수정: 중복/스냅샷 유실). **롤백(`total_errors>0`) 시 `_sync_log` 유령기록 방지 게이팅**.
+- `migrate_sync_log` 비작동 v1 마이그레이터를 전용 `_sync_log_legacy_v1` 테이블로(v2 오염/크래시 제거). `snapshot` 마감 시 출하·KRW 공란 해외 DN 경고(phantom backlog 동결 전 surface).
+
+**대사(reconcile)**
+- `reconcile_po` 1:N AX PO 계산서금액 **이중계상 제거**(`_line_id` 분배, `.copy`로 요약 격리), `ax_service` 국내/해외 키 disjoint + 미분류 Product GRN 경고.
+- `reconcile_so` AX Project 정규화 양측 적용(`.0` 업캐스트 매칭불가 → 매출누락 수정), 해외 `Total Sales KRW`/매출일 결측 경고, FX 월매칭 연도폴더 인식. `reconcile_ind` ind_code 정규화 헬퍼 공유.
+
+**Order Book SQL**
+- `order_book_variance`: 납기변경 제외를 '음/양 동시존재' → **그룹 순변동 상쇄(net≈0)**로(실제 환율/판매가 변동이 묻혀 사라지는 false-positive 방지).
+- `load_backlog`/`order_book_backlog`/`_snapshot_backlog`: 금액 4건 `ROUND` 통일(order_book/snapshot과 tie-out).
+
+### 변경 — LOW (견고화, 30건)
+- **생성기/CLI/core**: 컬럼 letter 산술 `get_column_letter`(>Z·AA+ 안전), `escape_excel_formula` 선행 제어문자 우회 차단, `validators` 정당한 0값 '필수누락' 오라벨 수정, `_to_text`→`utils.to_text` 승격+모델코드 적용, 미사용 셀상수 제거, fi/ci 0단가 fallback 센티넬(무상라인 보존), ci 중복 Shipping Mark 제거, `create_po` **중복승인↔검증오류승인 분리**(중복 Y가 검증오류 우회 방지), `create_fi` DN_ID+`--po` 충돌 가드, `history` 중복탐지 정규식 앵커.
+- **대사**: FX 임계값 상대오차 `max(100, 0.5%)`, Customer '' backfill, 상세시트 매출일/선적일 추가, `build_mapping` 값있는 코드 우선dedup, `recon_paths` 빈 플랫폴더가 연도폴더 가리지 않도록.
+- **대시보드**: sync-log 검색 `pk_json` 정확매칭(부분문자열 오매칭 제거), OTD `groupby min`(fan-out 방지), 세금계산서 aging 라벨 비중첩, 미출고금액 음수 clip+캡션, backlog KPI '라이브 값' 캡션, `load_backlog` HAVING 수량 OR 금액.
+- **DB/SQL**: 빈시트 prune 시 `_sync_meta` 갱신, NULL EDD `COALESCE('')` 정규화(3파일), backlog 잔여수량 ROUND·HAVING.
+- **의도적 제외**(사유 기록): ts 라인별 VAT(sub-10원·의도적), FI 모델 prefix(소유자 확인필요), dead code, 스키마변경(undo 이력), theme CSS(시각회귀), by-design(snapshot EDD-move/소급) 등.
+
+### 검증
+- `pytest tests/` **281 passed, 2 skipped**(전 단계 반복) — test_validators/create_po/utils/history/cli_common 등이 핵심 변경 커버
+- 라이브 `noah_data.db`에서 수정 SQL 6종 정상 실행(HAVING 변경으로 누락됐던 개시 라인 2건 노출 확인)
+- 순수로직 타깃 검증(날짜정화, prune rowid, FX 연도, ind/project 정규화, reconcile_po 분배/disjoint), 로직 민감 변경 diff 스팟체크
+- 2차 회귀 리뷰: 1차 13개 수정 중 11개 안전 확인, 회귀 2건 즉시 수정
+
+### 파일 변경
+33개 파일(+702/−343), 브랜치 `audit-fixes-2026-06`(11커밋, High/Medium/LOW/docs 논리 단위 분리). 주요: `dashboard.py`, 생성기 7종, `reconcile_po/so/ind.py`, `db_sync.py`·`sync_db.py`·`snapshot.py`·`migrate_sync_log.py`, `utils.py`·`validators.py`·`history.py`·`recon_paths.py`, `create_*.py`, `sql/order_book*.sql`. 상세 항목·제외사유는 `tasks/todo.md` 참조.
+
+---
+
 ## 2026-06-01: Order Book 마감 — 금액 원 단위 ROUND (유령 잔량 / 'Start != 전월 Ending' 경고 제거)
 
 ### 배경
