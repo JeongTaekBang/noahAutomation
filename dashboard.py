@@ -120,52 +120,85 @@ def _show_load_errors() -> None:
 # ═══════════════════════════════════════════════════════════════
 @st.cache_data(ttl=300)
 def load_so() -> pd.DataFrame:
-    """SO 국내+해외 통합 (Status, EXW NOAH 포함)"""
+    """SO 국내+해외 통합 (EXW NOAH 포함).
+
+    출고 상태(status)는 수동 입력 Status가 아니라 DN 출고 **수량** 누계로 파생한다
+    (Order Book·SO_통합 쿼리와 동일 원리). 수동 Status는 Cancelled/Hold 주문 제외에만 사용:
+      • DN 없음              → 미출고
+      • SO수량 - DN수량 > 0   → 부분 출고
+      • DN 있으나 출고일 없음   → 공장 출고
+      • 그 외                 → 출고 완료
+    금액이 아닌 수량 기준이라 무상공급(단가 0)·환율차 케이스도 정확히 부분출고를 잡는다.
+    """
     conn = _conn()
     if not conn:
         return pd.DataFrame()
     try:
         df = pd.read_sql_query("""
-            SELECT SO_ID,
-                   [Customer name] AS customer_name,
-                   [Item name]     AS item_name,
-                   [OS name]       AS os_name,
-                   CAST([Line item] AS INTEGER) AS line_item,
-                   CAST([Item qty] AS REAL)     AS qty,
-                   CAST([Sales amount] AS REAL) AS amount_krw,
-                   Period  AS period,
-                   [Model code] AS model_code,
-                   Sector  AS sector,
-                   [Expected delivery date] AS delivery_date,
-                   [Requested delivery date] AS requested_date,
-                   [EXW NOAH] AS exw_noah,
-                   [PO receipt date] AS po_receipt_date,
-                   COALESCE(Status, '') AS status,
-                   COALESCE([Customer PO], '') AS customer_po,
-                   '' AS incoterms,
-                   '' AS shipping_method,
-                   '국내' AS market
-            FROM so_domestic
-            WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
-              AND Period IS NOT NULL AND TRIM(Period) != ''
-            UNION ALL
-            SELECT SO_ID, [Customer name], [Item name], [OS name],
-                   CAST([Line item] AS INTEGER),
-                   CAST([Item qty] AS REAL),
-                   CAST([Sales amount KRW] AS REAL),
-                   Period, [Model code], Sector,
-                   [Expected delivery date],
-                   [Requested delivery date],
-                   [EXW NOAH],
-                   [PO receipt date],
-                   COALESCE(Status, ''),
-                   COALESCE([Customer PO], ''),
-                   COALESCE(Incoterms, ''),
-                   COALESCE([Shipping method], ''),
-                   '해외'
-            FROM so_export
-            WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
-              AND Period IS NOT NULL AND TRIM(Period) != ''
+            WITH dn_ship AS (
+                SELECT SO_ID, CAST([Line item] AS INTEGER) AS line_item,
+                       SUM(CAST(Qty AS REAL)) AS dn_qty, MAX([출고일]) AS last_ship
+                FROM dn_domestic GROUP BY SO_ID, CAST([Line item] AS INTEGER)
+                UNION ALL
+                SELECT SO_ID, CAST([Line item] AS INTEGER),
+                       SUM(CAST(Qty AS REAL)), MAX([선적일])
+                FROM dn_export GROUP BY SO_ID, CAST([Line item] AS INTEGER)
+            ),
+            dn_agg AS (
+                SELECT SO_ID, line_item,
+                       SUM(dn_qty) AS dn_qty, MAX(last_ship) AS last_ship
+                FROM dn_ship GROUP BY SO_ID, line_item
+            ),
+            so_all AS (
+                SELECT SO_ID,
+                       [Customer name] AS customer_name,
+                       [Item name]     AS item_name,
+                       [OS name]       AS os_name,
+                       CAST([Line item] AS INTEGER) AS line_item,
+                       CAST([Item qty] AS REAL)     AS qty,
+                       CAST([Sales amount] AS REAL) AS amount_krw,
+                       Period  AS period,
+                       [Model code] AS model_code,
+                       Sector  AS sector,
+                       [Expected delivery date] AS delivery_date,
+                       [Requested delivery date] AS requested_date,
+                       [EXW NOAH] AS exw_noah,
+                       [PO receipt date] AS po_receipt_date,
+                       COALESCE([Customer PO], '') AS customer_po,
+                       '' AS incoterms,
+                       '' AS shipping_method,
+                       '국내' AS market
+                FROM so_domestic
+                WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
+                  AND Period IS NOT NULL AND TRIM(Period) != ''
+                UNION ALL
+                SELECT SO_ID, [Customer name], [Item name], [OS name],
+                       CAST([Line item] AS INTEGER),
+                       CAST([Item qty] AS REAL),
+                       CAST([Sales amount KRW] AS REAL),
+                       Period, [Model code], Sector,
+                       [Expected delivery date],
+                       [Requested delivery date],
+                       [EXW NOAH],
+                       [PO receipt date],
+                       COALESCE([Customer PO], ''),
+                       COALESCE(Incoterms, ''),
+                       COALESCE([Shipping method], ''),
+                       '해외'
+                FROM so_export
+                WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
+                  AND Period IS NOT NULL AND TRIM(Period) != ''
+            )
+            SELECT so_all.*,
+                   CASE
+                       WHEN d.dn_qty IS NULL THEN '미출고'
+                       WHEN COALESCE(so_all.qty, 0) - d.dn_qty > 0.001 THEN '부분 출고'
+                       WHEN d.last_ship IS NULL OR TRIM(d.last_ship) = '' THEN '공장 출고'
+                       ELSE '출고 완료'
+                   END AS status
+            FROM so_all
+            LEFT JOIN dn_agg d
+                   ON so_all.SO_ID = d.SO_ID AND so_all.line_item = d.line_item
         """, conn)
     except Exception as e:
         logger.warning("데이터 로드 실패: %s", e)

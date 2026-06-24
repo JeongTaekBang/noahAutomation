@@ -553,11 +553,12 @@ in
 | 구분 | 국내/해외 |
 | 원가_단가 | ICO Unit |
 | 원가 | Total ICO |
+| 출고수량 | DN에서 출고된 수량 (분할 출고 합산) |
 | 출고금액 | DN에서 출고된 금액 |
 | 출고일 | DN에서 출고된 날짜 |
 | 마진 | Sales - 원가 |
 | 마진율 | 마진 / Sales (%) |
-| 출고완료 | 미출고/부분 출고/공장 출고/출고 완료 |
+| 출고완료 | 미출고/부분 출고/공장 출고/출고 완료 (**수량 기준** 판정 — 무상공급 대응) |
 | 매출연월 | 출고일 기준 연월 (yyyy-MM) |
 | 미출고금액 | Sales - 출고금액 |
 
@@ -618,17 +619,18 @@ let
     DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
     DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
 
-    DN_국내_Select = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Total Sales", "출고일"}),
+    DN_국내_Select = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Qty", "Total Sales", "출고일"}),
     DN_국내 = Table.ReplaceErrorValues(DN_국내_Select,
         List.Transform(Table.ColumnNames(DN_국내_Select), each {_, null})
     ),
-    DN_국내_Renamed = Table.RenameColumns(DN_국내, {{"Total Sales", "출고금액"}}),
-    DN_해외_Select = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Total Sales KRW", "선적일"}),
+    DN_국내_Renamed = Table.RenameColumns(DN_국내, {{"Total Sales", "출고금액"}, {"Qty", "출고수량"}}),
+    DN_해외_Select = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Qty", "Total Sales KRW", "선적일"}),
     DN_해외 = Table.ReplaceErrorValues(DN_해외_Select,
         List.Transform(Table.ColumnNames(DN_해외_Select), each {_, null})
     ),
-    DN_해외_Renamed = Table.RenameColumns(DN_해외, {{"Total Sales KRW", "출고금액"}, {"선적일", "출고일"}}),
+    DN_해외_Renamed = Table.RenameColumns(DN_해외, {{"Total Sales KRW", "출고금액"}, {"선적일", "출고일"}, {"Qty", "출고수량"}}),
     DN_Combined = Table.Group(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}, {
+        {"출고수량", each List.Sum([출고수량]), type number},
         {"출고금액", each List.Sum([출고금액]), Currency.Type},
         {"출고일", each List.Max([출고일]), type nullable date}
     }),
@@ -639,16 +641,18 @@ let
 
     // ========== SO에 출고 조인 (SO_ID + Line item) - 출고일 포함 ==========
     WithShip = Table.NestedJoin(WithCostExpanded, {"SO_ID", "Line item"}, DN_Combined, {"SO_ID", "Line item"}, "DN", JoinKind.LeftOuter),
-    WithShipExpanded = Table.ExpandTableColumn(WithShip, "DN", {"출고금액", "출고일"}, {"출고금액", "출고일"}),
+    WithShipExpanded = Table.ExpandTableColumn(WithShip, "DN", {"출고수량", "출고금액", "출고일"}, {"출고수량", "출고금액", "출고일"}),
 
     // ========== 계산 컬럼 추가 ==========
     WithMargin = Table.AddColumn(WithShipExpanded, "마진", each [Sales amount KRW] - (if [원가] = null then 0 else [원가]), type number),
     WithMarginRate = Table.AddColumn(WithMargin, "마진율", each if [Sales amount KRW] = 0 or [Sales amount KRW] = null then null else [마진] / [Sales amount KRW], Percentage.Type),
+    // 출고 상태는 금액이 아닌 "수량"으로 판정 — 무상공급(단가 0)·환율차 케이스 대응
     WithShipStatus = Table.AddColumn(WithMarginRate, "출고완료", each
-        if [출고금액] = null then "미출고"
-        else if [Sales amount KRW] - [출고금액] > 0 then "부분 출고"
-        else if [출고일] = null then "공장 출고"
-        else "출고 완료",
+        let 발주수량 = if [Item qty] = null then 0 else [Item qty] in
+            if [출고수량] = null then "미출고"
+            else if 발주수량 - [출고수량] > 0 then "부분 출고"
+            else if [출고일] = null then "공장 출고"
+            else "출고 완료",
         type text),
     WithSalesMonth = Table.AddColumn(WithShipStatus, "매출연월", each
         if [출고일] = null then null
@@ -669,7 +673,7 @@ let
         {"마진", Currency.Type},
         {"미출고금액", Currency.Type}
     }),
-    #"다시 정렬한 열 수" = Table.ReorderColumns(Result,{"SO_ID", "PO receipt date", "Period", "AX Period", "AX Project number", "CS담당자", "Business registration number", "Customer name", "Customer PO", "Order type", "Opportunity", "Sector", "Industry code", "Model code", "Item name", "OS name", "Currency", "Line item", "Item qty", "Sales Unit Price", "Incoterms", "Requested delivery date", "EXW NOAH", "Expected delivery date", "영업 담당", "Remarks", "Sales amount KRW", "구분", "Sales amount", "원가_단가", "원가", "출고금액", "출고일", "마진", "마진율", "출고완료", "매출연월", "미출고금액"})
+    #"다시 정렬한 열 수" = Table.ReorderColumns(Result,{"SO_ID", "PO receipt date", "Period", "AX Period", "AX Project number", "CS담당자", "Business registration number", "Customer name", "Customer PO", "Order type", "Opportunity", "Sector", "Industry code", "Model code", "Item name", "OS name", "Currency", "Line item", "Item qty", "Sales Unit Price", "Incoterms", "Requested delivery date", "EXW NOAH", "Expected delivery date", "영업 담당", "Remarks", "Sales amount KRW", "구분", "Sales amount", "원가_단가", "원가", "출고수량", "출고금액", "출고일", "마진", "마진율", "출고완료", "매출연월", "미출고금액"})
 in
     #"다시 정렬한 열 수"
 ```
@@ -2137,6 +2141,17 @@ SQL 이벤트:   실제 일어난 일(Input/Output)만 기록 → 필요할 때 
 - **원인**: `[출고금액] > 0` 조건 때문에 출고금액이 0인 건은 출고완료 = N
 - **해결**: `[출고금액] <> null` 로 수정
   - DN에 조인되면 (출고 기록이 있으면) 출고완료 = Y
+
+### 무상 건의 "부분 출고"가 "출고 완료"로 표시 (2026-06-24 수정)
+- **증상**: 부분만 출고된 무상공급 라인(SOD-2026-0301 Line 9, Eye bolt 576개 중 220개 출고)이 `출고 완료`로 표시
+- **원인**: 출고완료 판정이 **금액 기반**(`[Sales amount KRW] - [출고금액] > 0`)이었음.
+  무상공급은 단가 0 → Sales·출고금액 모두 0 → `0 - 0 > 0` = 거짓 → 부분출고를 영원히 감지 못 함.
+  2026-01-30 패치(`[출고금액] = null`)는 무상 건의 "출고/미출고" 이분법만 고쳤고 "부분 출고"는 못 고침 — 같은 뿌리(금액 기반)의 미완성 패치.
+- **해결**: 판정을 **수량 기반**으로 전환.
+  - DN_Combined에 `출고수량 = List.Sum([Qty])` 추가, 판정식을 `[Item qty] - [출고수량] > 0` 로 변경
+  - 무상공급뿐 아니라 해외 환율차로 금액이 어긋나는 케이스도 함께 해결됨
+  - 금액 기반 `미출고금액` 컬럼은 재무 백로그용으로 그대로 유지 (무상 건은 0이 맞음)
+  - **참고**: Order Book SQL(`sql/order_book.sql`)·대시보드 `load_so()`도 동일하게 수량 기준 — 세 군데 모두 통일
 
 ### 분할 출고 시 출고금액 일부만 매칭 (2026-02-05 수정 → 2026-02-07 조인 키 변경 → 2026-02-28 쿼리 수정)
 - **증상**: SOO-2026-0011처럼 SO에 Line item 1개인데, DN에서 무게 등의 이유로 분할 출고 시 출고금액 일부만 매칭됨
