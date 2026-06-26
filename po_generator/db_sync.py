@@ -351,30 +351,28 @@ class SyncEngine:
             excel_pks: set[tuple] = set()
             for idx, row in df.iterrows():
                 try:
-                    # PK 값 추출 (required_column만 필수, 나머지 PK는 빈 문자열 허용)
+                    # PK 값 추출. _row_seq(자동 생성)를 제외한 PK(=자연키) 컬럼이
+                    # 하나라도 비어 있으면 '식별 불가한 미완성 행'으로 보고 스킵한다.
+                    # 핵심: 키 컬럼을 비운 채 먼저 동기화한 뒤 나중에 채우면, 키가
+                    # 바뀌며 같은 행이 삭제+신규(재키잉)로 기록돼 "데이터는 있는데
+                    # 삭제로 뜨는" 오해를 부른다. 완성 전까지 보류해 이를 원천 차단.
+                    # (예: PO_ID만 입력하고 Line item을 비운 채 동기화한 행)
                     pk_vals = []
                     skip = False
                     for pk_col in pk_cols:
                         val = _sanitize_value(row.get(pk_col))
                         if val is None or (isinstance(val, str) and val.strip() == ''):
-                            if pk_col == config.required_column:
+                            if pk_col != '_row_seq':
                                 skip = True
                                 break
-                            val = ''  # 비필수 PK는 빈 문자열로 치환
+                            val = ''  # _row_seq는 도달 불가(방어). NULL→'' 통일
                         pk_vals.append(val)
 
                     if skip:
                         result.skipped += 1
-                        continue
-
-                    # _row_seq 제외 원본 PK가 전부 빈값 → 빈 행으로 간주
-                    real_pk_vals = [
-                        v for v, c in zip(pk_vals, pk_cols) if c != '_row_seq'
-                    ]
-                    if real_pk_vals and all(v == '' for v in real_pk_vals):
-                        result.skipped += 1
                         logger.debug(
-                            "%s - 행 %d: PK 전부 빈값 → 스킵", config.sheet_name, idx,
+                            "%s - 행 %d: PK 미완성(빈 키 컬럼) → 동기화 보류",
+                            config.sheet_name, idx,
                         )
                         continue
 

@@ -181,6 +181,80 @@ def _jdump(obj) -> str:
     return json.dumps(obj, ensure_ascii=False, separators=(',', ':'))
 
 
+# 시트명 → PK 컬럼 (재키잉 인식 시 '키 컬럼'을 비교에서 제외하기 위함)
+_PK_BY_SHEET: dict[str, tuple[str, ...]] = {c.sheet_name: c.pk_columns for c in SYNC_SHEETS}
+
+
+def _content_matches(snap: dict, vals: dict, key_set: set[str]) -> bool:
+    """삭제 스냅샷(snap)과 신규 값(vals)이 '같은 논리 행'인지 — 비키 컬럼 내용 일치 판정.
+
+    - 키 컬럼(key_set)은 비교에서 제외 (재키잉으로 바뀌는 부분이라 당연히 다름).
+    - snap에 있는 모든 비키 컬럼이 vals에서 동일해야 함 (snap ⊆ vals).
+      vals가 더 많은 컬럼을 가질 수 있음(빈 키 채우며 함께 입력된 값) — 그건 허용.
+    - 최소 1개 이상의 비키 컬럼이 실제로 매칭돼야 함 (빈 행끼리 오매칭 방지).
+    """
+    matched = 0
+    for col, sv in snap.items():
+        if col in key_set:
+            continue
+        if _to_text(sv) != _to_text(vals.get(col)):
+            return False
+        matched += 1
+    return matched >= 1
+
+
+def _reconcile_rekeys(pk_columns: tuple[str, ...],
+                      inserted_details: list[dict],
+                      pruned_snapshots: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """동일 논리 행의 (삭제 스냅샷 ↔ 신규 값)을 1:1로 묶어 '키변경(수정)'으로 합친다.
+
+    위치성 키 컬럼(Line item/_row_seq 등)을 편집하면 같은 행이 삭제+신규로 기록되는데,
+    실제로는 수정이다. 같은 sync 안에서 문서ID(pk[0])가 같고 비키 내용이 일치하는
+    삭제·신규 쌍을 찾아 단일 '수정' 이벤트로 변환한다.
+
+    Returns: (rekey_events, 잔여_inserted, 잔여_pruned)
+        rekey_events: [{'pk': new_pk_tuple, 'changes': {col: {old, new}}}]
+    """
+    if not pk_columns or not inserted_details or not pruned_snapshots:
+        return [], list(inserted_details), list(pruned_snapshots)
+
+    key_set = set(pk_columns)
+    inserts = [
+        {'pk': _normalize_pk(tuple(d['pk'])), 'values': d.get('values', {}), 'used': False}
+        for d in inserted_details
+    ]
+    rekeys: list[dict] = []
+    rem_pruned: list[dict] = []
+
+    for s in pruned_snapshots:
+        spk = _normalize_pk(tuple(s['pk']))
+        snap = s.get('snapshot', {})
+        cands = [
+            i for i, ins in enumerate(inserts)
+            if not ins['used']
+            and ins['pk'][0] == spk[0]                       # 같은 문서ID (재키잉 시 불변)
+            and _content_matches(snap, ins['values'], key_set)
+        ]
+        if len(cands) == 1:                                  # 모호하면(0/2+) 묶지 않음 → 삭제 유지
+            ins = inserts[cands[0]]
+            ins['used'] = True
+            # 옛 행/새 행의 '전체 표현' 비교로 변경 컬럼 산출.
+            # 키 컬럼 값은 PK 튜플(권위 있는 키)에서, 비키 값은 snapshot/values에서.
+            old_map = {**dict(zip(pk_columns, spk)), **snap}
+            new_map = {**dict(zip(pk_columns, ins['pk'])), **ins['values']}
+            changes = {}
+            for col in list(old_map.keys()) + [c for c in new_map if c not in old_map]:
+                old, new = _to_text(old_map.get(col)), _to_text(new_map.get(col))
+                if old != new:
+                    changes[col] = {'old': old, 'new': new}
+            rekeys.append({'pk': ins['pk'], 'changes': changes})
+        else:
+            rem_pruned.append(s)
+
+    rem_inserted = [d for d, ins in zip(inserted_details, inserts) if not ins['used']]
+    return rekeys, rem_inserted, rem_pruned
+
+
 def write_sync_log_to_db(summary: SyncSummary, note: str | None = None,
                          db_path: Path = DB_FILE) -> None:
     """동기화 변경 내역을 _sync_log v2 스키마에 기록.
@@ -198,8 +272,16 @@ def write_sync_log_to_db(summary: SyncSummary, note: str | None = None,
     rows: list[tuple] = []
     # placeholder sync_id — INSERT 시점에 채움
     for r in summary.results:
-        # 신규
-        for detail in r.inserted_details:
+        # 재키잉 인식: 위치성 키(Line item 등) 편집으로 발생한 삭제+신규 쌍을
+        # '키변경(수정)' 단일 이벤트로 합쳐 "데이터는 있는데 삭제로 뜨는" 오해 제거.
+        # 묶이지 않은 신규/삭제만 그대로 신규/삭제로 기록한다.
+        pk_cols = _PK_BY_SHEET.get(r.sheet_name, ())
+        rekeys, inserted_details, pruned_snapshots = _reconcile_rekeys(
+            pk_cols, r.inserted_details, r.pruned_snapshots,
+        )
+
+        # 신규 (재키잉으로 묶이지 않은 것만)
+        for detail in inserted_details:
             pk_tuple = _normalize_pk(tuple(detail['pk']))
             pk_json = _jdump(list(pk_tuple))
             pk_disp = _format_pk(pk_tuple)
@@ -218,10 +300,19 @@ def write_sync_log_to_db(summary: SyncSummary, note: str | None = None,
             rows.append((r.sheet_name, '수정', pk_json, pk_disp,
                          _jdump(changes) if changes else None, None))
 
+        # 수정 (재키잉) — 같은 논리 행의 키가 바뀐 것. 살아남은 새 PK 기준으로 기록.
+        for rk in rekeys:
+            pk_tuple = _normalize_pk(tuple(rk['pk']))
+            pk_json = _jdump(list(pk_tuple))
+            pk_disp = _format_pk(pk_tuple)
+            changes = rk['changes']
+            rows.append((r.sheet_name, '수정', pk_json, pk_disp,
+                         _jdump(changes) if changes else None, None))
+
         # 삭제 — pruned_snapshots는 물리 행 단위(각자 pk+snapshot)다. pruned_pks를
         # 재키잉하면 동일 정규화 pk가 여러 물리행을 가질 때 스냅샷이 유실/중복되므로
         # pruned_snapshots를 직접 순회해 행:스냅샷을 1:1로 보존한다.
-        for s in r.pruned_snapshots:
+        for s in pruned_snapshots:
             pk_tuple = _normalize_pk(tuple(s['pk']))
             pk_json = _jdump(list(pk_tuple))
             pk_disp = _format_pk(pk_tuple)
