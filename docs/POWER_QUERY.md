@@ -83,7 +83,7 @@ NOAH 엑셀 원가 계산:
 | **PO_매입월별** | **월별 매입 집계 (IC Balance Confirmation용)** |
 | **PO_AX대사** | **Period + AX Project + AX PO별 GRN 금액 집계 (회계 마감 대사용)** |
 | **PO_미출고** | **Invoiced인데 DN 미매칭 건 (데이터 점검용)** |
-| **PO_출고** | **출고(DN)는 됐는데 Invoiced 라인이 전무한 PO (PO_ID 단위, 분할출고·번들 오탐 배제)** |
+| **PO_출고** | **출고(DN)는 됐는데 계상 라인(Invoiced·외주비)이 전무한 PO (PO_ID 단위, 분할출고·번들 오탐 배제)** |
 | **PO_Industry** | **PO_ID별 Industry code + Opportunity + AX Project (분석용)** |
 | Inventory_Transaction | 입출고 트랜잭션 (감사 추적용) |
 | **Order_Book** | **월별 수주잔고 (Backlog) 롤링 원장 - AX 오더북 형식** |
@@ -1234,9 +1234,9 @@ in
 ## PO_출고
 
 ### 목적
-- **출고(DN)는 됐는데 그 PO에 Invoiced 라인이 하나도 없는** 건 — `PO_미출고`의 **정반대 방향** 점검.
-- 업무 불변식: **DN에 출고기록이 있으면 해당 PO는 반드시 Invoiced여야 한다.** 이를 어긴(출고됐는데 매입계상 누락) PO를 잡는다.
-- **PO_ID 단위 판정**(라인 단위 아님). 분할 출고는 한 PO가 출고 배치별로 여러 행(Invoiced 분 + Confirmed 잔여)으로 쪼개지는데, 출고된 분이 Invoiced면 위반이 아니다. 또 PO는 부속을 한 라인에 묶고(`SA09X-MA + ADAPTER`) DN은 라인을 분리하므로, Line item 단위 PO↔DN 비교는 번들·반품(Credit Note)·분할 잔여 때문에 **오탐**을 낳는다 → 라인이 아니라 **PO_ID + 출고 여부 + Invoiced 라인 유무**로 판정한다.
+- **출고(DN)는 됐는데 그 PO에 계상 라인(Invoiced·외주비)이 하나도 없는** 건 — `PO_미출고`의 **정반대 방향** 점검.
+- 업무 불변식: **DN에 출고기록이 있으면 해당 PO는 반드시 계상(Invoiced 또는 외주비)되어 있어야 한다.** 이를 어긴(출고됐는데 매입계상 누락) PO를 잡는다. `외주비`(외주가공 매입계상)도 Invoiced와 함께 '계상됨'으로 본다.
+- **PO_ID 단위 판정**(라인 단위 아님). 분할 출고는 한 PO가 출고 배치별로 여러 행(계상 분 + Confirmed 잔여)으로 쪼개지는데, 출고된 분이 계상됐으면 위반이 아니다. 또 PO는 부속을 한 라인에 묶고(`SA09X-MA + ADAPTER`) DN은 라인을 분리하므로, Line item 단위 PO↔DN 비교는 번들·반품(Credit Note)·분할 잔여 때문에 **오탐**을 낳는다 → 라인이 아니라 **PO_ID + 출고 여부 + 계상 라인 유무**로 판정한다.
 - 국내·해외 모두 대상.
 
 ### 결과 컬럼
@@ -1249,7 +1249,7 @@ in
 | Line item | 라인 번호 |
 | Item qty | PO 수량 |
 | Total ICO | PO 금액 |
-| Status | PO 상태 (이 PO엔 Invoiced 라인이 전무 — Confirmed/Sent/Open/외주비 등) |
+| Status | PO 상태 (이 PO엔 계상 라인이 전무 — Confirmed/Sent/Open 등; Invoiced·외주비는 계상으로 제외) |
 | 출고일 | 해당 PO의 DN 출고일 (최댓값) |
 | DN_ID | 해당 PO의 출고 DN 번호 |
 | 구분 | 국내/해외 |
@@ -1263,13 +1263,14 @@ let
     PO_해외 = Table.AddColumn(Table.SelectColumns(Excel.CurrentWorkbook(){[Name="PO_해외"]}[Content], {"PO_ID", "SO_ID", "Item name", "Line item", "Item qty", "Total ICO", "Status"}), "구분", each "해외"),
     PO_Active = Table.Buffer(Table.SelectRows(Table.Combine({PO_국내, PO_해외}), each [Status] <> null and [Status] <> "Cancelled")),
 
-    // ========== PO_ID별 'Invoiced 라인 보유' 여부 → Invoiced 전무 PO만 ==========
-    // 분할 출고: 한 PO가 출고 배치별로 여러 행(Invoiced 분 + Confirmed 잔여)으로 나뉜다.
-    // 출고된 분이 Invoiced면 그 PO엔 Invoiced 라인이 있으므로 위반 아님 → PO_ID 단위로 본다.
+    // ========== PO_ID별 '계상 라인 보유' 여부 → 계상 전무 PO만 ==========
+    // '계상' = Invoiced(매입계상) 또는 외주비(외주가공 매입계상). 둘 다 비용으로 잡힌 상태.
+    // 분할 출고: 한 PO가 출고 배치별로 여러 행(계상 분 + Confirmed 잔여)으로 나뉜다.
+    // 출고된 분이 계상됐으면 그 PO엔 계상 라인이 있으므로 위반 아님 → PO_ID 단위로 본다.
     PO_ID_Inv = Table.Group(PO_Active, {"PO_ID"}, {
-        {"has_invoiced", each List.AnyTrue(List.Transform([Status], each _ <> null and Text.StartsWith(_, "Invoiced"))), type logical}
+        {"has_billed", each List.AnyTrue(List.Transform([Status], each _ <> null and (Text.StartsWith(_, "Invoiced") or Text.StartsWith(_, "외주비")))), type logical}
     }),
-    PO_무Invoiced = Table.SelectColumns(Table.SelectRows(PO_ID_Inv, each [has_invoiced] = false), {"PO_ID"}),
+    PO_무계상 = Table.SelectColumns(Table.SelectRows(PO_ID_Inv, each [has_billed] = false), {"PO_ID"}),
 
     // ========== DN에서 '출고(출고일)된 PO_ID' + 출고일/DN_ID (국내=PO_ID, 해외=RCK PO) ==========
     DN_국내 = Table.SelectColumns(Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content], {"PO_ID", "출고일", "DN_ID"}),
@@ -1280,9 +1281,9 @@ let
         {"DN_ID", each Text.Combine(List.Distinct(List.Transform(List.RemoveNulls([DN_ID]), each Text.From(_))), ", "), type text}
     }),
 
-    // ========== 위반 PO = (출고됨) ∩ (Invoiced 라인 전무) — 조인(집합연산)으로 ==========
+    // ========== 위반 PO = (출고됨) ∩ (계상 라인 전무) — 조인(집합연산)으로 ==========
     // List.Contains/List.Intersect를 행마다 평가하면 위 계산이 매 행 반복돼 매우 느려진다 → Inner Join으로 대체.
-    위반PO = Table.RemoveColumns(Table.NestedJoin(DN_Grouped, {"PO_ID"}, PO_무Invoiced, {"PO_ID"}, "chk", JoinKind.Inner), {"chk"}),
+    위반PO = Table.RemoveColumns(Table.NestedJoin(DN_Grouped, {"PO_ID"}, PO_무계상, {"PO_ID"}, "chk", JoinKind.Inner), {"chk"}),
 
     // ========== 위반 PO의 라인 추출 (Inner Join) + 출고 근거(DN) 부착 ==========
     위반라인 = Table.ExpandTableColumn(Table.NestedJoin(PO_Active, {"PO_ID"}, 위반PO, {"PO_ID"}, "DN_Data", JoinKind.Inner), "DN_Data", {"출고일", "DN_ID"}, {"출고일", "DN_ID"}),
@@ -1299,13 +1300,14 @@ in
 ```
 
 ### 점검 방법
-1. 결과의 PO_ID 확인 → 출고·매입계상이 끝난 건이면 PO 시트 Status를 **Invoiced(Pxx)** 로 갱신.
+1. 결과의 PO_ID 확인 → 출고·매입계상이 끝난 건이면 PO 시트 Status를 **Invoiced(Pxx)**(외주가공이면 **외주비**)로 갱신.
 2. 아직 출고 전인데 DN이 잡혔다면(오발행 DN) DN 시트를 점검.
-3. **일부만 Invoiced인 PO(분할 출고)는 이 쿼리에 안 잡힌다** — 출고된 배치가 Invoiced면 정상이기 때문(예: SOD-2026-0301은 9개 라인 모두 출고분=Invoiced분으로 일치 → 정상). 라인/수량 단위로 더 파고들면 번들(`A + ADAPTER`)·반품(Credit Note)·분할 잔여 때문에 오탐이 급증하는 것이 검증돼, PO_ID 단위가 가장 견고하다.
+3. **일부만 계상(Invoiced·외주비)된 PO(분할 출고)는 이 쿼리에 안 잡힌다** — 출고된 배치가 계상됐으면 정상이기 때문(예: SOD-2026-0301은 9개 라인 모두 출고분=Invoiced분으로 일치 → 정상). 라인/수량 단위로 더 파고들면 번들(`A + ADAPTER`)·반품(Credit Note)·분할 잔여 때문에 오탐이 급증하는 것이 검증돼, PO_ID 단위가 가장 견고하다.
 
 ### 결과 (현재 데이터, 2026-06-29 기준)
-- 총 **24라인 / 2건**: `SOD-2026-0046`(ND-0046, 외주비 P02 1라인), `SOO-2026-0165`(NO-0165, Confirmed 23라인).
-- 제외(정상 판정) 검증: 분할 출고 8건(SOD-2026-0301 등) + 번들(SOD-2026-0231·0331) + 반품 Credit Note(SOO-2026-0032) — 모두 출고분이 Invoiced이거나 PO↔DN 라인 구조 차이라 **실제 위반 아님**. 라인 단위로 보면 이들이 오탐으로 잡히므로 PO_ID 단위 판정을 채택.
+- 총 **23라인 / 1건**: `SOO-2026-0165`(NO-0165, Confirmed 23라인).
+- `외주비`를 계상으로 포함하면서 `SOD-2026-0046`(ND-0046, 외주비 P02 1라인)은 **계상됨으로 제외**됨(이전 2건 → 1건).
+- 제외(정상 판정) 검증: 분할 출고 8건(SOD-2026-0301 등) + 번들(SOD-2026-0231·0331) + 반품 Credit Note(SOO-2026-0032) — 모두 출고분이 계상됐거나 PO↔DN 라인 구조 차이라 **실제 위반 아님**. 라인 단위로 보면 이들이 오탐으로 잡히므로 PO_ID 단위 판정을 채택.
 
 ---
 
