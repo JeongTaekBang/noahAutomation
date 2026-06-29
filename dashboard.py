@@ -1192,6 +1192,22 @@ def _render_bucketed_cards(items_with_bucket: list[dict], cols_per_row: int = 2)
         _render_cards(grp_list, cols_per_row=cols_per_row)
 
 
+def _market_tabs(df, *, market_col: str = "market", unique_col: str | None = None):
+    """국내/해외 탭 — 라벨에 시장별 건수 배지를 붙인다.
+
+    건수 0인 탭이 비어 보여 "데이터 없음"으로 오해하는 혼란을 막기 위함.
+    (예: 해외 건만 있을 때 기본 표시되는 국내 탭이 비어 보이던 문제)
+    unique_col 지정 시 행 수가 아니라 해당 컬럼의 고유값 수로 카운트
+    (SO_ID 단위로 묶어 표시하는 화면용).
+    """
+    def _n(mkt: str) -> int:
+        if df is None or df.empty or market_col not in df.columns:
+            return 0
+        sub = df[df[market_col] == mkt]
+        return sub[unique_col].nunique() if unique_col else len(sub)
+    return st.tabs([f"🇰🇷 국내 ({_n('국내')})", f"🌏 해외 ({_n('해외')})"])
+
+
 # ═══════════════════════════════════════════════════════════════
 # 메인
 # ═══════════════════════════════════════════════════════════════
@@ -2059,7 +2075,7 @@ def pg_today(market, sectors, customers, **_):
                 lambda d: pd.Series(_assign_bucket(d))
             )
 
-            tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
+            tab_dom, tab_exp = _market_tabs(g, market_col="마켓")
             for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
                 with tab:
                     mkt_g = g[g["마켓"] == mkt]
@@ -2162,7 +2178,7 @@ def pg_today(market, sectors, customers, **_):
             lambda d: pd.Series((-1, "⚪", "수주일 미입력")) if d < 0 else pd.Series(_assign_bucket(d))
         )
 
-        tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
+        tab_dom, tab_exp = _market_tabs(unordered)
         for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
             with tab:
                 mkt_u = unordered[unordered["market"] == mkt]
@@ -2290,7 +2306,7 @@ def pg_today(market, sectors, customers, **_):
             "— 공장에 EXW date 재확인 필요"
         )
 
-        tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
+        tab_dom, tab_exp = _market_tabs(g, market_col="마켓")
         for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
             with tab:
                 mkt_g = g[g["마켓"] == mkt]
@@ -2410,7 +2426,7 @@ def pg_today(market, sectors, customers, **_):
                 f"납기 경과 후 DN 미생성 또는 부분출고 건: **{_n_so}건** "
                 "— DN 발급 또는 납기 일정 확인 필요"
             )
-            tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
+            tab_dom, tab_exp = _market_tabs(due_pending, unique_col="SO_ID")
             for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
                 with tab:
                     mkt_df = due_pending[due_pending["market"] == mkt]
@@ -2747,7 +2763,7 @@ def pg_today(market, sectors, customers, **_):
 
         dn_lines = load_dn_lines_by_so_line()
 
-        tab_dom, tab_exp = st.tabs(["🇰🇷 국내", "🌏 해외"])
+        tab_dom, tab_exp = _market_tabs(anomalies)
         for tab, mkt in [(tab_dom, "국내"), (tab_exp, "해외")]:
             with tab:
                 mkt_m = anomalies[anomalies["market"] == mkt]
@@ -4215,7 +4231,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
     st.subheader("🔴 PO 미등록 상세")
     st.caption("SO시트에만 있고 PO시트에 아예 없음 — 데이터 입력 누락 확인 필요")
     if not unreg.empty:
-        tab_d, tab_e = st.tabs(["국내", "해외"])
+        tab_d, tab_e = _market_tabs(unreg)
         for tab, mkt in [(tab_d, "국내"), (tab_e, "해외")]:
             with tab:
                 sub = unreg[unreg["market"] == mkt]
@@ -4237,7 +4253,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
     st.subheader("미발주 상세")
     st.caption("PO Open 상태 (PO 생성은 됐으나 공장 발주 전)")
     if not unordered.empty:
-        tab_d, tab_e = st.tabs(["국내", "해외"])
+        tab_d, tab_e = _market_tabs(unordered)
         for tab, mkt in [(tab_d, "국내"), (tab_e, "해외")]:
             with tab:
                 sub = unordered[unordered["market"] == mkt]
@@ -4260,7 +4276,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
     st.subheader("부분 발주 상세")
     st.caption("일부 PO는 발주(Sent/Confirmed), 일부는 Open — Open 부분 발주 필요")
     if not partial.empty:
-        tab_d, tab_e = st.tabs(["국내", "해외"])
+        tab_d, tab_e = _market_tabs(partial)
         for tab, mkt in [(tab_d, "국내"), (tab_e, "해외")]:
             with tab:
                 sub = partial[partial["market"] == mkt]
@@ -4283,7 +4299,7 @@ def pg_po_coverage(market, sectors, customers, year, month):
     st.subheader("발주 진행중 상세")
     st.caption("공장에 발주(Sent)했으나 Confirmed 전 단계")
     if not in_progress.empty:
-        tab_d, tab_e = st.tabs(["국내", "해외"])
+        tab_d, tab_e = _market_tabs(in_progress)
         for tab, mkt in [(tab_d, "국내"), (tab_e, "해외")]:
             with tab:
                 sub = in_progress[in_progress["market"] == mkt]
