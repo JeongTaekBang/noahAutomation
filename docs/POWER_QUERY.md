@@ -87,6 +87,7 @@ NOAH 엑셀 원가 계산:
 | **PO_Industry** | **PO_ID별 Industry code + Opportunity + AX Project (분석용)** |
 | Inventory_Transaction | 입출고 트랜잭션 (감사 추적용) |
 | **Order_Book** | **월별 수주잔고 (Backlog) 롤링 원장 - AX 오더북 형식** |
+| **AX_매출대사** | **매출(DN) 라인별 집계 — 국내=세금계산서발행일(선수금건은 출고일) / 해외=선적일(FX 선적월 재환산) 기준 매출월, AX 매출 대사용** |
 
 ---
 
@@ -1308,6 +1309,151 @@ in
 - 총 **23라인 / 1건**: `SOO-2026-0165`(NO-0165, Confirmed 23라인).
 - `외주비`를 계상으로 포함하면서 `SOD-2026-0046`(ND-0046, 외주비 P02 1라인)은 **계상됨으로 제외**됨(이전 2건 → 1건).
 - 제외(정상 판정) 검증: 분할 출고 8건(SOD-2026-0301 등) + 번들(SOD-2026-0231·0331) + 반품 Credit Note(SOO-2026-0032) — 모두 출고분이 계상됐거나 PO↔DN 라인 구조 차이라 **실제 위반 아님**. 라인 단위로 보면 이들이 오탐으로 잡히므로 PO_ID 단위 판정을 채택.
+
+---
+
+## AX_매출대사
+
+### 목적
+- **AX ERP 매출 vs NOAH 엑셀 매출** 대사를 위한 **NOAH(엑셀) 측 매출 집계**. 출고(DN) 라인을 매출인식 기준으로 정리한다. AX 실적과의 비교는 Power Pivot 관계 또는 `reconcile_so.py`에서 수행하며, 이 쿼리는 **매출측만** 산출한다.
+- **매출인식일**: 국내 = **세금계산서 발행일**(없으면 **선수금 세금계산서가 있고 출고된 건은 출고일** — 선청구 후 출고 시점에 수익인식), 해외 = **선적일**. 출고일이 아니라 이 날짜로 매출월을 귀속한다(고객 cutoff로 출고월과 매출월이 갈리는 경우 대응). 기준일이 비어 있으면(세금계산서·선수금 모두 없이 출고만 됐거나 미선적) `매출인식 = N`으로 표시하고 행은 남긴다.
+- **해외 KRW 환산**: FX 시트의 **선적월 환율**을 적용해 `외화금액 × 선적월환율`로 재환산한다. 시트에 이미 있는 `Total Sales KRW`는 `기존_KRW`로 병기하고, 재환산값과의 차이를 `KRW차이`로 노출한다(주문시점 환율 등으로 계산된 기존값과의 괴리 감지).
+- **IP 여부**(= AX Invoice Proposal 등록 여부)는 **필터하지 않고 컬럼으로 표시**한다(값은 `Y`로 정규화). '매출인식(세금계산서/선적)'과 'AX 등록(IP)'을 각각 축으로 두어, 인식됐는데 AX 미등록인 건을 대사에서 잡는다.
+- **Grain: DN 라인 단위**. `AX Project` + `매출월`로 피벗/합산하여 AX 매출 실적과 대사한다.
+
+### 결과 컬럼
+| 컬럼 | 설명 |
+|------|------|
+| 구분 | 국내 / 해외 |
+| AX Project | AX 프로젝트 번호 (국내 `AX Project no` / 해외 `AX Project number` 통합) |
+| SO_ID / Line item | 주문번호 / 라인 (SO·FX·매출월 조인키) |
+| Customer code | 사업자등록번호 (국내=DN, 해외=SO_해외 조인) |
+| Customer name | 고객명 |
+| OS name | OneStream Item 분류 (SO에서 `SO_ID`+`Line item` 조인) |
+| Item name | 품목명 (DN `Item`) |
+| Qty | 출고 수량 |
+| Currency | 통화 (KRW/USD/EUR/GBP) |
+| 외화금액 | 원 통화 매출액 (해외만; 국내는 공란) |
+| 재환산환율 | 적용한 선적월 FX 환율 (해외 비KRW) |
+| **매출금액_KRW** | **매출액(KRW) — 국내=`Total Sales`, 해외=`외화금액 × 선적월환율`** |
+| 기존_KRW | 시트에 저장된 KRW (국내 `Total Sales` / 해외 `Total Sales KRW`) |
+| KRW차이 | `매출금액_KRW − 기존_KRW` (해외 환율차 진단) |
+| IP 여부 | AX Invoice Proposal 등록 여부 (`Y` 정규화, 미등록=공란) |
+| 매출인식 | `Y`=매출월 확정(세금계산서/선적) / `N`=출고했으나 미인식 |
+| 매출일 | 매출인식일 (국내 세금계산서 발행일 · 선수금건은 출고일 / 해외 선적일) |
+| 매출연월 | `2026-03` (YYYY-MM) |
+| 매출월 | `P03` (Pxx) |
+| DN_ID / 출고일 | 출고 참조 |
+
+### M 코드
+
+```
+let
+    // ========== DN 국내 (매출인식일: 세금계산서 발행일 → 없으면 선수금O·출고일O이면 출고일) ==========
+    DN_국내_Sel = Table.SelectColumns(Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
+        {"DN_ID", "SO_ID", "Line item", "AX Project no", "Business registration number", "Customer name", "Item", "Qty", "Currency", "Unit Price", "Total Sales", "세금계산서 발행일", "선수금 세금계산서 발행일", "출고일", "IP 여부"}),
+    // 선수금(선청구) 세금계산서만 있고 출고된 건은 수익인식 시점인 출고일 월을 매출로 본다.
+    DN_국내_Rev = Table.AddColumn(DN_국내_Sel, "매출일", each
+        if [세금계산서 발행일] <> null then [세금계산서 발행일]
+        else if [선수금 세금계산서 발행일] <> null and [출고일] <> null then [출고일]
+        else null),
+    DN_국내_Std = Table.AddColumn(Table.AddColumn(
+        Table.RenameColumns(Table.RemoveColumns(DN_국내_Rev, {"세금계산서 발행일", "선수금 세금계산서 발행일"}), {
+            {"AX Project no", "AX Project"},
+            {"Business registration number", "Customer code"},
+            {"Item", "Item name"},
+            {"Total Sales", "기존_KRW"}
+        }),
+        "구분", each "국내"),
+        "외화금액", each null),
+
+    // ========== DN 해외 (매출인식일 = 선적일, KRW = FX 선적월 재환산) ==========
+    DN_해외_Sel = Table.SelectColumns(Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
+        {"DN_ID", "SO_ID", "Line item", "AX Project number", "Customer name", "Item", "Qty", "Currency", "Unit Price", "Total Sales", "Total Sales KRW", "선적일", "출고일", "IP 여부"}),
+    DN_해외_Std = Table.AddColumn(Table.AddColumn(
+        Table.RenameColumns(DN_해외_Sel, {
+            {"AX Project number", "AX Project"},
+            {"Item", "Item name"},
+            {"선적일", "매출일"},
+            {"Total Sales", "외화금액"},
+            {"Total Sales KRW", "기존_KRW"}
+        }),
+        "구분", each "해외"),
+        "Customer code", each null),
+
+    // ========== 국내 + 해외 통합 ==========
+    DN_All = Table.Combine({DN_국내_Std, DN_해외_Std}),
+
+    // ========== IP 여부 정규화 (Y / y / "Y(6월 DN)" → "Y", 빈값 → null) ==========
+    DN_IPNorm = Table.TransformColumns(DN_All, {
+        {"IP 여부", each if _ = null then null else (let s = Text.Trim(Text.From(_)) in if s = "" then null else if Text.StartsWith(Text.Upper(s), "Y") then "Y" else s), type text}
+    }),
+
+    // ========== 매출일 → 날짜화 + 매출인식 / 매출연월(YYYY-MM) / 매출월(Pxx) 파생 ==========
+    DN_Date = Table.RenameColumns(Table.RemoveColumns(
+        Table.AddColumn(DN_IPNorm, "매출일_d", each try Date.From([매출일]) otherwise null, type date),
+        {"매출일"}), {{"매출일_d", "매출일"}}),
+    DN_Period = Table.AddColumn(Table.AddColumn(Table.AddColumn(DN_Date,
+        "매출인식", each if [매출일] = null then "N" else "Y", type text),
+        "매출연월", each if [매출일] = null then null else Text.From(Date.Year([매출일])) & "-" & Text.PadStart(Text.From(Date.Month([매출일])), 2, "0"), type text),
+        "매출월", each if [매출일] = null then null else "P" & Text.PadStart(Text.From(Date.Month([매출일])), 2, "0"), type text),
+
+    // ========== FX 시트 언피벗 (가로 → 세로: Currency + 환율월 + 환율) ==========
+    FX_Unpiv = Table.UnpivotOtherColumns(Table.RenameColumns(Excel.CurrentWorkbook(){[Name="FX"]}[Content], {{"FX", "Currency"}}), {"Currency"}, "환율월", "환율"),
+    FX_Clean = Table.Buffer(Table.SelectRows(FX_Unpiv, each [Currency] <> null and [환율] <> null and Text.Length(Text.From([환율월])) = 7 and Text.Contains(Text.From([환율월]), "-"))),
+
+    // ========== 해외 KRW = 외화금액 × 선적월 환율 (국내는 이미 KRW) ==========
+    Joined_FX = Table.ExpandTableColumn(Table.NestedJoin(DN_Period, {"Currency", "매출연월"}, FX_Clean, {"Currency", "환율월"}, "FX_Match", JoinKind.LeftOuter), "FX_Match", {"환율"}, {"환율"}),
+    DN_KRW = Table.AddColumn(Table.AddColumn(Table.AddColumn(Joined_FX,
+        "재환산환율", each if [구분] = "해외" and [Currency] <> "KRW" then [환율] else null, type number),
+        "매출금액_KRW", each
+            if [구분] = "국내" then [기존_KRW]
+            else if [Currency] = "KRW" then [외화금액]
+            else if [환율] <> null then Number.Round([외화금액] * [환율], 0)
+            else null, type number),
+        "KRW차이", each if [매출금액_KRW] <> null and [기존_KRW] <> null then [매출금액_KRW] - [기존_KRW] else null, type number),
+
+    // ========== SO 조인 (OS name, 해외 고객코드) — SO_ID + Line item ==========
+    SO_Lookup = Table.Buffer(Table.Distinct(Table.Combine({
+        Table.SelectColumns(Excel.CurrentWorkbook(){[Name="SO_국내"]}[Content], {"SO_ID", "Line item", "OS name", "Business registration number"}),
+        Table.SelectColumns(Excel.CurrentWorkbook(){[Name="SO_해외"]}[Content], {"SO_ID", "Line item", "OS name", "Business registration number"})
+    }), {"SO_ID", "Line item"})),
+    Joined_SO = Table.ExpandTableColumn(Table.NestedJoin(DN_KRW, {"SO_ID", "Line item"}, SO_Lookup, {"SO_ID", "Line item"}, "SO_Match", JoinKind.LeftOuter), "SO_Match", {"OS name", "Business registration number"}, {"OS name", "SO_고객코드"}),
+
+    // ========== 고객코드 채움 (국내=DN 사업자번호, 해외=SO 조인) ==========
+    DN_Code = Table.RenameColumns(Table.RemoveColumns(
+        Table.AddColumn(Joined_SO, "고객코드_f", each if [Customer code] <> null and Text.Trim(Text.From([Customer code])) <> "" then [Customer code] else [SO_고객코드]),
+        {"Customer code", "SO_고객코드"}), {{"고객코드_f", "Customer code"}}),
+
+    // ========== 최종 컬럼 선택/정렬 + 타입 캐스팅 + 에러 방어 ==========
+    Final = Table.SelectColumns(DN_Code, {"구분", "AX Project", "SO_ID", "Line item", "Customer code", "Customer name", "OS name", "Item name", "Qty", "Currency", "외화금액", "재환산환율", "매출금액_KRW", "기존_KRW", "KRW차이", "IP 여부", "매출인식", "매출일", "매출연월", "매출월", "DN_ID", "출고일"}),
+    Typed = Table.TransformColumnTypes(Final, {
+        {"Qty", Int64.Type},
+        {"외화금액", type number},
+        {"재환산환율", type number},
+        {"매출금액_KRW", Currency.Type},
+        {"기존_KRW", Currency.Type},
+        {"KRW차이", Currency.Type},
+        {"출고일", type date}
+    }),
+    Result = Table.ReplaceErrorValues(Typed, List.Transform(Table.ColumnNames(Typed), each {_, null}))
+in
+    Result
+```
+
+### 점검 방법
+1. `AX Project` + `매출월`로 피벗(합계 `매출금액_KRW`) → AX 매출 실적과 월별·프로젝트별 비교.
+2. `매출인식 = N`: 출고했으나 세금계산서 미발행(국내)·미선적(해외) → 아직 매출 미인식. 고객 cutoff/선적 지연 확인.
+3. `IP 여부`가 공란인데 `매출인식 = Y`: 매출은 인식됐는데 AX Invoice Proposal 미등록 의심 → AX 등록 점검.
+4. `KRW차이`가 큰 해외 건: 시트의 기존 KRW가 선적월 환율과 다른 환율로 계산됨 → 환율/금액 재확인.
+5. **전제**: `FX`/`DN_국내`/`DN_해외`/`SO_국내`/`SO_해외`가 통합 문서 안에 **표(또는 이름 정의)** 로 존재해야 `Excel.CurrentWorkbook`이 인식한다. `FX`는 헤더가 `FX | 2026-01 | …`로 승격돼 있어야 하며(아니면 첫 스텝에 `Table.PromoteHeaders` 추가), 월 컬럼명은 `YYYY-MM` 텍스트여야 매출연월과 조인된다.
+
+### 결과 (현재 데이터, 2026-07-01 기준)
+- 총 **1,839 라인** (국내 1,161 / 해외 678). 매출인식 **Y 1,765 / N 74** (국내 10·해외 64 미인식).
+- 국내 미인식은 세금계산서·선수금 모두 없는 **10건**만 남는다(무상공급 0원·반품 상쇄·당일 출고분). 선수금 세금계산서 + 출고 건 **25건**은 출고일 월로 인식됨.
+- OS name·Customer code 조인 결측 **0** (`SO_ID`+`Line item` 완전 매칭 — 해외 고객코드까지 SO에서 채워짐).
+- 해외 비KRW 인식건 614 중 **459건이 선적월 환율 재환산 시 기존 시트 KRW와 1,000원 초과 차이**(총 |차이| 8,843만 원) → FX 재적용의 실효 확인. 매출인식 Y·비KRW인데 FX 환율 없는 건 **0**.
+- 국내 **출고월 ≠ 세금계산서 발행월 64건** — 현행 `reconcile_so.py`(출고일 기준)와 월귀속이 갈리는 지점.
 
 ---
 
