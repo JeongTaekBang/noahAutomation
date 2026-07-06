@@ -555,6 +555,7 @@ in
 | 구분 | 국내/해외 |
 | 원가_단가 | ICO Unit |
 | 원가 | Total ICO |
+| DN_ID | 출고 번호 (분할 출고 시 콤마 연결) |
 | 출고수량 | DN에서 출고된 수량 (분할 출고 합산) |
 | 출고금액 | DN에서 출고된 금액 |
 | 출고일 | DN에서 출고된 날짜 |
@@ -621,17 +622,18 @@ let
     DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
     DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
 
-    DN_국내_Select = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Qty", "Total Sales", "출고일"}),
+    DN_국내_Select = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "DN_ID", "Qty", "Total Sales", "출고일"}),
     DN_국내 = Table.ReplaceErrorValues(DN_국내_Select,
         List.Transform(Table.ColumnNames(DN_국내_Select), each {_, null})
     ),
     DN_국내_Renamed = Table.RenameColumns(DN_국내, {{"Total Sales", "출고금액"}, {"Qty", "출고수량"}}),
-    DN_해외_Select = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Qty", "Total Sales KRW", "선적일"}),
+    DN_해외_Select = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "DN_ID", "Qty", "Total Sales KRW", "선적일"}),
     DN_해외 = Table.ReplaceErrorValues(DN_해외_Select,
         List.Transform(Table.ColumnNames(DN_해외_Select), each {_, null})
     ),
     DN_해외_Renamed = Table.RenameColumns(DN_해외, {{"Total Sales KRW", "출고금액"}, {"선적일", "출고일"}, {"Qty", "출고수량"}}),
     DN_Combined = Table.Group(Table.Combine({DN_국내_Renamed, DN_해외_Renamed}), {"SO_ID", "Line item"}, {
+        {"DN_ID", each Text.Combine(List.Distinct(List.RemoveNulls([DN_ID])), ", "), type text},
         {"출고수량", each List.Sum([출고수량]), type number},
         {"출고금액", each List.Sum([출고금액]), Currency.Type},
         {"출고일", each List.Max([출고일]), type nullable date}
@@ -643,7 +645,7 @@ let
 
     // ========== SO에 출고 조인 (SO_ID + Line item) - 출고일 포함 ==========
     WithShip = Table.NestedJoin(WithCostExpanded, {"SO_ID", "Line item"}, DN_Combined, {"SO_ID", "Line item"}, "DN", JoinKind.LeftOuter),
-    WithShipExpanded = Table.ExpandTableColumn(WithShip, "DN", {"출고수량", "출고금액", "출고일"}, {"출고수량", "출고금액", "출고일"}),
+    WithShipExpanded = Table.ExpandTableColumn(WithShip, "DN", {"DN_ID", "출고수량", "출고금액", "출고일"}, {"DN_ID", "출고수량", "출고금액", "출고일"}),
 
     // ========== 계산 컬럼 추가 ==========
     WithMargin = Table.AddColumn(WithShipExpanded, "마진", each [Sales amount KRW] - (if [원가] = null then 0 else [원가]), type number),
@@ -675,7 +677,7 @@ let
         {"마진", Currency.Type},
         {"미출고금액", Currency.Type}
     }),
-    #"다시 정렬한 열 수" = Table.ReorderColumns(Result,{"SO_ID", "PO receipt date", "Period", "AX Period", "AX Project number", "CS담당자", "Business registration number", "Customer name", "Customer PO", "Order type", "Opportunity", "Sector", "Industry code", "Model code", "Item name", "OS name", "Currency", "Line item", "Item qty", "Sales Unit Price", "Incoterms", "Requested delivery date", "EXW NOAH", "Expected delivery date", "영업 담당", "Remarks", "Sales amount KRW", "구분", "Sales amount", "원가_단가", "원가", "출고수량", "출고금액", "출고일", "마진", "마진율", "출고완료", "매출연월", "미출고금액"})
+    #"다시 정렬한 열 수" = Table.ReorderColumns(Result,{"SO_ID", "PO receipt date", "Period", "AX Period", "AX Project number", "CS담당자", "Business registration number", "Customer name", "Customer PO", "Order type", "Opportunity", "Sector", "Industry code", "Model code", "Item name", "OS name", "Currency", "Line item", "Item qty", "Sales Unit Price", "Incoterms", "Requested delivery date", "EXW NOAH", "Expected delivery date", "영업 담당", "Remarks", "Sales amount KRW", "구분", "Sales amount", "원가_단가", "원가", "DN_ID", "출고수량", "출고금액", "출고일", "마진", "마진율", "출고완료", "매출연월", "미출고금액"})
 in
     #"다시 정렬한 열 수"
 ```
