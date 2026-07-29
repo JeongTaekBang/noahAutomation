@@ -1,13 +1,16 @@
-"""거래명세표 메일 발송 모듈 (Outlook COM 기반)
+"""고객 메일 발송 모듈 (Outlook COM / .eml 초안)
 ================================================
 
-거래명세표를 발행한 뒤, 사업자번호로 `Customer_국내`에서 수신자를 조회해
-PDF를 첨부한 Outlook 메일을 만듭니다.
+문서를 발행한 뒤, 사업자번호로 `Customer_국내`에서 수신자를 조회해 첨부 메일을 만듭니다.
+거래명세표(`create_ts.py`)와 납기현황(`delivery_status.py`)이 함께 씁니다.
 
 동작 원칙:
 - 기본은 **초안 열기**(Display). `send=True`일 때만 즉시 발송.
-- 메일 실패가 거래명세표 생성 성공을 뒤엎지 않도록, 호출부에서 별도 단계로 처리.
+- 메일 실패가 문서 생성 성공을 뒤엎지 않도록, 호출부에서 별도 단계로 처리.
 - Outlook 미설치 환경에서 import만으로 죽지 않도록 win32com은 지연 import.
+
+문서별로 다른 것(제목·본문 템플릿, 첨부 형식, 고정 CC, 초안 파일명)은 전부 인자다.
+`create_document_mail()`이 일반형이고, `create_ts_mail()`은 TS 상수를 넘기는 얇은 래퍼다.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from email.message import EmailMessage
 from enum import Enum
 from html import escape as html_escape
 from pathlib import Path
+from typing import Mapping, Sequence
 
 import pandas as pd
 
@@ -141,6 +145,7 @@ def find_recipient(
     biz_no: object,
     df_customer: pd.DataFrame | None = None,
     fallback_name: str = '',
+    fixed_cc: Sequence[str] | None = None,
 ) -> Recipient | None:
     """사업자번호로 Customer_국내에서 메일 수신자 조회
 
@@ -148,6 +153,7 @@ def find_recipient(
         biz_no: 사업자번호 (DN_국내의 Business registration number)
         df_customer: Customer_국내 DataFrame (없으면 로드)
         fallback_name: 마스터에 거래처명이 없을 때 쓸 이름 (보통 DN의 Customer name)
+        fixed_cc: 문서 종류별 고정 참조 (None이면 거래명세표 설정 `TS_MAIL_CC`)
 
     Returns:
         Recipient (고정 CC 포함) 또는 None (사업자번호 미매칭/메일 미등록)
@@ -212,7 +218,7 @@ def find_recipient(
         return None
 
     # 고정 CC + 거래처별 참조메일 (중복 제거, To에 이미 있는 주소는 제외)
-    cc_values: list[str] = list(TS_MAIL_CC)
+    cc_values: list[str] = list(TS_MAIL_CC if fixed_cc is None else fixed_cc)
     if cc_col is not None:
         cc_values.extend(split_emails(row[cc_col]))
 
@@ -392,7 +398,7 @@ def resolve_backend(configured: str | None = None) -> MailBackend:
     return MailBackend.OUTLOOK if outlook_com_available() else MailBackend.EML
 
 
-def _body_to_html(body: str) -> str:
+def body_to_html(body: str) -> str:
     """평문 본문을 최소 HTML로 변환
 
     서식을 입히지 않고 줄바꿈만 유지합니다. 거래처명에 `&`나 `<`가 있어도
@@ -414,6 +420,8 @@ def build_eml(
     body: str,
     attachments: tuple[Path, ...],
     output_dir: Path | None = None,
+    body_html: str | None = None,
+    prefix: str = 'ts_draft',
 ) -> Path:
     """발송 대기 상태(.eml) 초안 파일 생성
 
@@ -427,6 +435,8 @@ def build_eml(
         body: 본문 (평문)
         attachments: 첨부 파일 경로
         output_dir: 저장 폴더 (기본: 임시 폴더)
+        body_html: HTML 본문 (없으면 평문을 줄바꿈만 살려 변환)
+        prefix: 초안 파일명 접두사
 
     Returns:
         생성된 .eml 경로
@@ -440,7 +450,7 @@ def build_eml(
     msg.set_content(body)
     # HTML 대체본을 함께 넣는다. 평문만 보내면 Outlook이 서명을 본문 '위'에 끼워넣어
     # 서명 → 인사말 순서가 되지만, HTML이면 본문 '아래'에 정상적으로 붙는다.
-    msg.add_alternative(_body_to_html(body), subtype='html')
+    msg.add_alternative(body_html or body_to_html(body), subtype='html')
 
     for path in attachments:
         path = Path(path)
@@ -455,7 +465,7 @@ def build_eml(
     target_dir = Path(output_dir) if output_dir else Path(tempfile.gettempdir())
     target_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
-    eml_path = target_dir / f"ts_draft_{stamp}.eml"
+    eml_path = target_dir / f"{prefix}_{stamp}.eml"
     eml_path.write_bytes(msg.as_bytes())
     logger.info(f".eml 초안 생성: {eml_path}")
     return eml_path
@@ -484,6 +494,7 @@ def render_template(
     doc_id: str,
     date_str: str,
     customer_po: str = NO_VALUE,
+    extra: Mapping[str, object] | None = None,
 ) -> str:
     """제목/본문 템플릿 치환
 
@@ -493,11 +504,12 @@ def render_template(
         doc_id: DN_ID 등 문서 ID
         date_str: 표시용 날짜
         customer_po: 거래처 발주번호 (여러 건이면 쉼표 구분, 없으면 'N/A')
+        extra: 문서별 추가 치환자 (예: 납기현황의 `{table}` `{count}`)
 
     Returns:
         치환된 문자열 (알 수 없는 치환자가 있으면 원본 유지)
     """
-    values = {
+    values: dict[str, object] = {
         'customer': recipient.customer_name,
         'customer_en': recipient.display_name_en,
         'customer_po': customer_po or NO_VALUE,
@@ -505,6 +517,8 @@ def render_template(
         'date': date_str,
         'supplier': SUPPLIER_INFO.name,
     }
+    if extra:
+        values.update(extra)
     try:
         return template.format(**values)
     except (KeyError, IndexError) as e:
@@ -512,27 +526,41 @@ def render_template(
         return template
 
 
-def create_ts_mail(
+def create_document_mail(
     xlsx_path: Path,
     recipient: Recipient,
     doc_id: str,
+    subject_template: str,
+    body_template: str,
     date_str: str | None = None,
     send: bool = False,
-    attach_format: str = TS_MAIL_ATTACH_FORMAT,
+    attach_format: str = 'pdf',
     backend: MailBackend | None = None,
     customer_po: str = NO_VALUE,
+    extra: Mapping[str, object] | None = None,
+    body_html: str | None = None,
+    doc_label: str = '문서',
+    draft_prefix: str = 'mail_draft',
 ) -> MailResult:
-    """거래명세표 첨부 메일 생성 (기본: 초안 열기)
+    """문서 첨부 메일 생성 (기본: 초안 열기)
+
+    문서 종류에 무관한 일반형입니다. 제목/본문 템플릿과 첨부 형식을 인자로 받습니다.
 
     Args:
-        xlsx_path: 생성된 거래명세표 경로
+        xlsx_path: 생성된 문서 경로
         recipient: 수신자 정보
-        doc_id: DN_ID 등 문서 ID
+        doc_id: DN_ID·사업자번호 등 문서 식별자 (로그·템플릿용)
+        subject_template: 제목 템플릿
+        body_template: 본문 템플릿 (평문)
         date_str: 제목/본문에 쓸 날짜 (기본: 오늘)
         send: True면 즉시 발송 (Outlook COM에서만 가능)
         attach_format: 'pdf' | 'xlsx' | 'both'
         backend: 작성 방식 (기본: 설정+환경으로 자동 판정)
         customer_po: 거래처 발주번호 (여러 건이면 쉼표 구분, 없으면 'N/A')
+        extra: 템플릿 추가 치환자
+        body_html: HTML 본문 (없으면 평문에서 자동 변환)
+        doc_label: 로그에 쓸 문서 이름
+        draft_prefix: .eml 초안 파일명 접두사
 
     Returns:
         MailResult
@@ -551,12 +579,61 @@ def create_ts_mail(
             message=f"첨부 파일 준비 실패: {e}", backend=backend,
         )
 
-    subject = render_template(TS_MAIL_SUBJECT, recipient, doc_id, date_str, customer_po)
-    body = render_template(TS_MAIL_BODY, recipient, doc_id, date_str, customer_po)
+    subject = render_template(subject_template, recipient, doc_id, date_str, customer_po, extra)
+    body = render_template(body_template, recipient, doc_id, date_str, customer_po, extra)
 
     if backend is MailBackend.EML:
-        return _create_via_eml(recipient, subject, body, attachments, doc_id, send)
-    return _create_via_outlook(recipient, subject, body, attachments, doc_id, send)
+        return _create_via_eml(
+            recipient, subject, body, attachments, doc_id, send,
+            body_html=body_html, doc_label=doc_label, draft_prefix=draft_prefix,
+        )
+    return _create_via_outlook(
+        recipient, subject, body, attachments, doc_id, send,
+        body_html=body_html, doc_label=doc_label,
+    )
+
+
+def create_ts_mail(
+    xlsx_path: Path,
+    recipient: Recipient,
+    doc_id: str,
+    date_str: str | None = None,
+    send: bool = False,
+    attach_format: str = TS_MAIL_ATTACH_FORMAT,
+    backend: MailBackend | None = None,
+    customer_po: str = NO_VALUE,
+) -> MailResult:
+    """거래명세표 첨부 메일 생성 (기본: 초안 열기)
+
+    `create_document_mail()`에 거래명세표 설정을 넘기는 얇은 래퍼입니다.
+
+    Args:
+        xlsx_path: 생성된 거래명세표 경로
+        recipient: 수신자 정보
+        doc_id: DN_ID 등 문서 ID
+        date_str: 제목/본문에 쓸 날짜 (기본: 오늘)
+        send: True면 즉시 발송 (Outlook COM에서만 가능)
+        attach_format: 'pdf' | 'xlsx' | 'both'
+        backend: 작성 방식 (기본: 설정+환경으로 자동 판정)
+        customer_po: 거래처 발주번호 (여러 건이면 쉼표 구분, 없으면 'N/A')
+
+    Returns:
+        MailResult
+    """
+    return create_document_mail(
+        xlsx_path=xlsx_path,
+        recipient=recipient,
+        doc_id=doc_id,
+        subject_template=TS_MAIL_SUBJECT,
+        body_template=TS_MAIL_BODY,
+        date_str=date_str,
+        send=send,
+        attach_format=attach_format,
+        backend=backend,
+        customer_po=customer_po,
+        doc_label='거래명세표',
+        draft_prefix='ts_draft',
+    )
 
 
 def _create_via_outlook(
@@ -566,6 +643,8 @@ def _create_via_outlook(
     attachments: tuple[Path, ...],
     doc_id: str,
     send: bool,
+    body_html: str | None = None,
+    doc_label: str = '문서',
 ) -> MailResult:
     """Outlook COM으로 메일 작성 (classic Outlook 전용)"""
     try:
@@ -575,17 +654,22 @@ def _create_via_outlook(
         if recipient.cc:
             mail.CC = recipient.cc_line
         mail.Subject = subject
-        mail.Body = body
+        # HTMLBody와 Body는 동시에 쓰면 나중 대입이 앞을 지운다. 표가 있는 문서는
+        # HTML만 설정하고, 없으면 종전대로 평문을 쓴다.
+        if body_html:
+            mail.HTMLBody = body_html
+        else:
+            mail.Body = body
 
         for path in attachments:
             mail.Attachments.Add(str(Path(path).resolve()))
 
         if send:
             mail.Send()
-            logger.info(f"거래명세표 메일 발송: {doc_id} -> {recipient.to_line}")
+            logger.info(f"{doc_label} 메일 발송: {doc_id} -> {recipient.to_line}")
         else:
             mail.Display()
-            logger.info(f"거래명세표 메일 초안 생성: {doc_id} -> {recipient.to_line}")
+            logger.info(f"{doc_label} 메일 초안 생성: {doc_id} -> {recipient.to_line}")
 
     except MailConfigError:
         raise
@@ -611,6 +695,9 @@ def _create_via_eml(
     attachments: tuple[Path, ...],
     doc_id: str,
     send: bool,
+    body_html: str | None = None,
+    doc_label: str = '문서',
+    draft_prefix: str = 'mail_draft',
 ) -> MailResult:
     """.eml 초안을 만들어 기본 메일 앱으로 열기 (새 Outlook 호환)
 
@@ -623,7 +710,10 @@ def _create_via_eml(
         logger.warning(".eml 방식에서는 즉시 발송이 불가능합니다 — 초안으로 대체")
 
     try:
-        eml_path = build_eml(recipient, subject, body, attachments)
+        eml_path = build_eml(
+            recipient, subject, body, attachments,
+            body_html=body_html, prefix=draft_prefix,
+        )
         open_eml(eml_path)
     except MailConfigError:
         raise
@@ -635,7 +725,7 @@ def _create_via_eml(
             backend=MailBackend.EML,
         )
 
-    logger.info(f"거래명세표 .eml 초안 열기: {doc_id} -> {recipient.to_line}")
+    logger.info(f"{doc_label} .eml 초안 열기: {doc_id} -> {recipient.to_line}")
     return MailResult(
         success=True, sent=False, recipient=recipient, attachments=attachments,
         message=f'초안 생성 완료{note}', backend=MailBackend.EML,

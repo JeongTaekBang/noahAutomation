@@ -23,7 +23,7 @@ from create_ts import (
     _mail_ts,
     resolve_mail_mode,
 )
-from po_generator import mailer
+from po_generator import mail_cli, mailer
 from po_generator.mailer import (
     MailBackend,
     MailConfigError,
@@ -407,6 +407,11 @@ class TestMailTsPrompt:
 # === 마스터 지연 로딩 ===
 
 class TestCustomerMasterLazyLoad:
+    """MailOptions는 po_generator/mail_cli.py에 있다 (create_ts / delivery_status 공유).
+
+    지연 로딩을 가로채려면 그 모듈의 이름을 패치해야 한다.
+    """
+
     def test_loads_once_and_caches(self, df_customer, monkeypatch):
         calls = []
 
@@ -414,7 +419,7 @@ class TestCustomerMasterLazyLoad:
             calls.append(1)
             return df_customer
 
-        monkeypatch.setattr(create_ts, 'load_customer_domestic', fake_load)
+        monkeypatch.setattr(mail_cli, 'load_customer_domestic', fake_load)
         opts = MailOptions(mode=MailMode.ASK)
         assert opts.customer_master() is df_customer
         assert opts.customer_master() is df_customer
@@ -423,7 +428,7 @@ class TestCustomerMasterLazyLoad:
     def test_missing_email_column_reported_once_then_silent(self, df_customer, monkeypatch, capsys):
         """이메일 컬럼이 없으면 한 번만 안내하고 이후 실행 내내 조용히 건너뛴다"""
         no_email = df_customer.drop(columns=['이메일', '참조메일'])
-        monkeypatch.setattr(create_ts, 'load_customer_domestic', lambda: no_email)
+        monkeypatch.setattr(mail_cli, 'load_customer_domestic', lambda: no_email)
 
         opts = MailOptions(mode=MailMode.ASK)
         assert opts.customer_master() is None
@@ -436,7 +441,7 @@ class TestCustomerMasterLazyLoad:
     def test_load_failure_reported_once(self, monkeypatch, capsys):
         def boom():
             raise FileNotFoundError('소스 파일 없음')
-        monkeypatch.setattr(create_ts, 'load_customer_domestic', boom)
+        monkeypatch.setattr(mail_cli, 'load_customer_domestic', boom)
 
         opts = MailOptions(mode=MailMode.ASK)
         assert opts.customer_master() is None
