@@ -19,6 +19,10 @@ pip install -r requirements.txt
 python create_po.py ND-0001              # Single PO
 python create_po.py ND-0001 --force      # Skip validation errors
 python create_ts.py DND-2026-0001 --merge  # Merged transaction statement
+python create_ts.py DND-2026-0001           # 생성 후 "이메일 발송?" y/N 확인 → y면 Outlook
+python create_ts.py DND-2026-0001 --mail    # 확인 없이 바로 Outlook 창
+python create_ts.py DND-2026-0001 --send    # 확인 없이 즉시 발송 (Outlook COM 환경만)
+python create_ts.py DND-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
 python create_pi.py NO-0001              # Proforma invoice
 python create_fi.py DNO-2026-0001        # Final invoice (복수 RCK PO 시 발주번호별 자동 분리)
 python create_fi.py --po 26KPO00144     # 발주번호 기준 FI 생성 (복수 DN 통합)
@@ -47,6 +51,7 @@ python reconcile_ind.py P03 -v            # 상세 로그
 
 # Dashboard
 streamlit run dashboard.py                # Streamlit 대시보드
+
 
 # Tests
 pytest                                    # All tests
@@ -109,6 +114,7 @@ Reconciliation layer:
 | `po_generator/validators.py` | Required field checks, ICO Unit > 0, delivery date validation |
 | `po_generator/services/document_service.py` | Orchestrator: find → validate → generate → save |
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
+| `po_generator/mailer.py` | 거래명세표 메일 발송 — 사업자번호로 `Customer_국내` 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). 새 Outlook은 COM 미지원이라 `auto`가 `.eml`로 전환 |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
 | `docs/DATA_STRUCTURE_DESIGN.md` | Excel schema (8 sheets), Power Query setup |
 | `docs/POWER_QUERY.md` | Power Query 수식, Power Pivot 관계 — 데이터 소스 구조 이해 시 참고 |
@@ -134,6 +140,7 @@ Reconciliation layer:
 - DN numbers: `DND-*` = domestic, `DNO-*` = overseas
 - Validation blocks generation unless `--force`: missing required fields, ICO Unit ≤ 0, past delivery date
 - Warnings (non-blocking): delivery within 7 days, duplicate order in history
+- 거래명세표 메일: 수신자(To)는 `Customer_국내.사업자번호` ↔ `DN_국내.Business registration number` 조인으로 결정, 고정 참조(CC)는 `user_settings.py: TS_MAIL_CC`. 기본은 **수신자를 보여준 뒤 y/N 확인**(비대화형 실행은 자동 OFF — 배치가 프롬프트에서 멈추지 않게). 메일 실패는 문서 생성 성공을 뒤엎지 않으며, 고객이 섞인 `--merge` 문서는 발송 차단
 
 ## Self-Improvement Loop
 

@@ -23,6 +23,7 @@ from po_generator.config import (
     SO_EXPORT_SHEET,
     PO_EXPORT_SHEET,
     DN_EXPORT_SHEET,
+    CUSTOMER_DOMESTIC_SHEET,
     CUSTOMER_EXPORT_SHEET,
     WEIGHT_SHEET,
     COLUMN_ALIASES,
@@ -655,6 +656,76 @@ def find_so_export_data(
         - 없음: None
     """
     return _find_data_by_id(df, 'so_id', so_id, 'SO_ID')
+
+
+# === Customer_국내 데이터 로드 (거래명세표 메일 발송용) ===
+
+def normalize_biz_no(value: Any) -> str:
+    """사업자번호를 숫자만 남긴 형태로 정규화
+
+    '220-81-21175', '220 81 21175', 2208121175(숫자로 읽힌 경우) 모두
+    '2208121175'로 맞춰 하이픈 유무·서식 차이로 조인이 깨지는 것을 막습니다.
+
+    Args:
+        value: 사업자번호 (문자열/숫자/NaN)
+
+    Returns:
+        숫자만 남은 사업자번호 (빈 값이면 '')
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return ''
+    text = str(value).strip()
+    if not text or text.lower() == 'nan':
+        return ''
+    # 숫자로 읽혀 '2208121175.0'이 된 경우 소수부 제거
+    if text.endswith('.0') and text[:-2].isdigit():
+        text = text[:-2]
+    return ''.join(ch for ch in text if ch.isdigit())
+
+
+def load_customer_domestic() -> pd.DataFrame:
+    """Customer_국내 마스터 로드 (사업자번호 정규화 + 중복 제거)
+
+    거래명세표 메일 수신자 조회에 사용됩니다.
+    사업자번호가 중복된 거래처는 첫 행만 남기고 경고를 남깁니다.
+
+    Returns:
+        Customer_국내 DataFrame ('_사업자번호_정규화' 컬럼 추가)
+
+    Raises:
+        FileNotFoundError: 소스 파일이 없는 경우
+        ValueError: 시트에 사업자번호 컬럼이 없는 경우
+    """
+    if not NOAH_SO_PO_DN_FILE.exists():
+        raise FileNotFoundError(f"소스 파일을 찾을 수 없습니다: {NOAH_SO_PO_DN_FILE}")
+
+    logger.info(f"Customer_국내 데이터 로드: {NOAH_SO_PO_DN_FILE.name}")
+    with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
+        df = pd.read_excel(xl, sheet_name=CUSTOMER_DOMESTIC_SHEET)
+
+    biz_col = resolve_column(df.columns, 'biz_no')
+    if biz_col is None:
+        raise ValueError(
+            f"'{CUSTOMER_DOMESTIC_SHEET}' 시트에서 사업자번호 컬럼을 찾을 수 없습니다. "
+            f"현재 컬럼: {list(df.columns)}"
+        )
+
+    df = df.copy()
+    df['_사업자번호_정규화'] = df[biz_col].map(normalize_biz_no)
+    df = df[df['_사업자번호_정규화'] != ''].copy()
+
+    # 중복 사업자번호: 첫 행 사용 + 경고 (거래처별 메일이 다르면 육안 확인 필요)
+    dup_mask = df['_사업자번호_정규화'].duplicated(keep=False)
+    if dup_mask.any():
+        dup_keys = sorted(df.loc[dup_mask, '_사업자번호_정규화'].unique())
+        logger.warning(
+            f"{CUSTOMER_DOMESTIC_SHEET} 사업자번호 중복 {len(dup_keys)}건 "
+            f"(첫 행 사용): {dup_keys}"
+        )
+    df = df.drop_duplicates(subset='_사업자번호_정규화', keep='first')
+
+    logger.info(f"Customer_국내 {len(df)}건 로드 완료")
+    return df
 
 
 # === SO 해외 + Customer_해외 데이터 로드 (Order Confirmation용) ===

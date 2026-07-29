@@ -83,6 +83,7 @@ PMT_DOMESTIC_SHEET: Final[str] = 'PMT_국내'
 SO_EXPORT_SHEET: Final[str] = 'SO_해외'
 PO_EXPORT_SHEET: Final[str] = 'PO_해외'
 DN_EXPORT_SHEET: Final[str] = 'DN_해외'
+CUSTOMER_DOMESTIC_SHEET: Final[str] = 'Customer_국내'
 CUSTOMER_EXPORT_SHEET: Final[str] = 'Customer_해외'
 WEIGHT_SHEET: Final[str] = 'Weight'
 
@@ -245,7 +246,7 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'order_no': ('PO_ID', 'RCK Order no.', 'RCK Order No', 'RCK Order no', 'Order No', '주문번호'),
     'so_id': ('SO_ID', 'SO ID', 'so_id'),
     'noah_oc_no': ('NOAH O.C No.', 'NOAH O.C No', 'NOAH OC No', '공장발주번호'),
-    'customer_name': ('Customer name', 'Customer Name', 'customer name', '고객명', '고객사'),
+    'customer_name': ('Customer name', 'Customer Name', 'customer name', '고객명', '고객사', '거래처명'),
     'customer_po': ('Customer PO', 'Customer PO No', 'customer po', '고객 PO', '고객PO'),
     'item_qty': ('Item qty', 'Item Qty', 'item qty', 'Qty', '수량'),
     'ico_unit': ('ICO Unit', 'ICO unit', 'ico unit', 'Unit Price', '단가'),
@@ -296,6 +297,20 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     # Order Confirmation 필드
     'exw_noah': ('EXW NOAH', 'EXW Noah', 'exw_noah', 'EXW date'),
     'shipping_method': ('Shipping method', 'Shipping Method', 'shipping_method', '배송방법'),
+    # Customer_국내 (거래명세표 메일 발송) 필드
+    'biz_no': ('Business registration number', '사업자번호', '사업자등록번호', 'biz_no', 'BRN'),
+    'customer_name_en': ('Customer Name ENG', 'Customer name ENG', '거래처명(영문)', '영문 거래처명'),
+    # 주의: '참조 이메일'도 '이메일'을 포함하므로 부분일치를 쓰면 안 된다.
+    #       두 목록 모두 완전일치 전용이며, 참조용 이름은 customer_email에 넣지 말 것.
+    'customer_email': (
+        '수신자 이메일', '수신자이메일', '수신 이메일', '수신메일',
+        '이메일', '이메일 주소', '메일', '담당자 이메일',
+        'Email', 'E-mail', 'EMAIL', 'email',
+    ),
+    'customer_email_cc': (
+        '참조 이메일', '참조이메일', '참조메일', '참조 메일', 'CC 이메일',
+        'CC', 'Cc', 'cc', 'Email CC', '참조',
+    ),
     # Packing List 필드
     'model_code': ('Model code', 'AX Project number', 'model_code'),
     'weight_per_unit': ('Weight per unit', 'Weight/Unit', 'KG/PC', 'weight_per_unit', '단위중량'),
@@ -355,3 +370,34 @@ class TSColumnWidths:
 
 
 TS_COLUMN_WIDTHS: Final[TSColumnWidths] = TSColumnWidths()
+
+
+# === 거래명세표 메일 발송 설정 ===
+# 수신자(To)는 Customer_국내에서 사업자번호로 조회하고, 아래 CC는 항상 붙는 고정 참조자.
+_ts_mail_cc = _load_user_setting('TS_MAIL_CC', ())
+TS_MAIL_CC: Final[tuple[str, ...]] = tuple(_ts_mail_cc) if _ts_mail_cc else ()
+
+# 첨부 형식: 'pdf' | 'xlsx' | 'both'
+TS_MAIL_ATTACH_FORMAT: Final[str] = _load_user_setting('TS_MAIL_ATTACH_FORMAT', 'pdf')
+
+# 메일 작성 방식: 'auto' | 'outlook' | 'eml'
+#   outlook — Outlook COM. classic Outlook 전용 (새 Outlook은 COM 미지원)
+#   eml     — .eml 초안 파일을 만들어 기본 메일 앱으로 열기. 새 Outlook에서도 동작
+#   auto    — COM을 한 번 시도해보고 안 되면 eml로 자동 전환 (기본)
+TS_MAIL_BACKEND: Final[str] = _load_user_setting('TS_MAIL_BACKEND', 'auto')
+
+# 제목/본문 템플릿
+# 치환자: {customer} 한글 거래처명, {customer_en} 영문 거래처명(없으면 한글명),
+#         {customer_po} 거래처 발주번호(여러 건이면 쉼표 구분, 없으면 N/A),
+#         {doc_id} DN 번호, {date} 출고일, {supplier} 공급자명(한글)
+TS_MAIL_SUBJECT: Final[str] = _load_user_setting(
+    'TS_MAIL_SUBJECT',
+    '[거래명세표] {customer} - {date}',
+)
+TS_MAIL_BODY: Final[str] = _load_user_setting(
+    'TS_MAIL_BODY',
+    '{customer} 귀중\n\n'
+    '{date}자 출고분 거래명세표를 첨부와 같이 송부합니다.\n\n'
+    '발주번호: {customer_po}\n\n'
+    '본 메일은 자동 발송된 메일입니다.\n',
+)

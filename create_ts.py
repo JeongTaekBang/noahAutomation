@@ -10,6 +10,10 @@ DN_ID 또는 선수금_ID를 입력하면 NOAH_SO_PO_DN.xlsx에서 해당 데이
     python create_ts.py DN-2026-0001              # 납품 거래명세표
     python create_ts.py ADV_2026-0001             # 선수금 거래명세표
     python create_ts.py DN-2026-0001 DN-2026-0002 # 여러 건 동시 생성
+
+생성 후 "이메일을 발송하시겠습니까? [y/N]"을 묻고, y면 Outlook 메일 창을 띄웁니다.
+    python create_ts.py DN-2026-0001 --mail       # 확인 없이 바로 Outlook 창
+    python create_ts.py DN-2026-0001 --no-mail    # 묻지 않고 문서만
 """
 
 from __future__ import annotations
@@ -17,24 +21,294 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
 
 import pandas as pd
 
 from po_generator.config import (
+    CUSTOMER_DOMESTIC_SHEET,
+    TS_MAIL_ATTACH_FORMAT,
+    TS_MAIL_CC,
     TS_OUTPUT_DIR,
     TS_TEMPLATE_FILE,
 )
 from po_generator.utils import (
+    load_customer_domestic,
     load_dn_data,
     load_pmt_data,
     get_value,
+    resolve_column,
 )
 from po_generator.ts_generator import create_ts_xlwings
 from po_generator.cli_common import validate_output_path, generate_output_filename
 from po_generator.logging_config import setup_logging
+from po_generator.mailer import (
+    NO_VALUE,
+    MailBackend,
+    MailConfigError,
+    create_ts_mail,
+    find_recipient_for_order,
+    resolve_backend,
+)
 from po_generator.services import DocumentService, GenerationStatus
 
 logger = logging.getLogger(__name__)
+
+
+class MailMode(str, Enum):
+    """메일 동작 모드"""
+    OFF = 'off'      # --no-mail 또는 비대화형 실행: 묻지도 보내지도 않음
+    ASK = 'ask'      # 기본: 수신자를 보여주고 y/N 확인
+    DRAFT = 'draft'  # --mail: 확인 없이 초안 열기
+    SEND = 'send'    # --send: 확인 없이 즉시 발송
+
+
+# 긍정 응답 — 'ㅛ'는 한글 IME 상태에서 y를 누른 경우
+_YES_ANSWERS: frozenset[str] = frozenset({'y', 'yes', 'ㅛ', '네', 'ㅇ'})
+
+
+@dataclass
+class MailOptions:
+    """거래명세표 메일 발송 옵션
+
+    Customer_국내 마스터는 **실제로 필요할 때 한 번만** 로드합니다.
+    (메일을 안 쓰는 실행에 Excel 로딩 비용을 물리지 않기 위함)
+    """
+    mode: MailMode = MailMode.OFF
+    backend: MailBackend | None = None  # None이면 mailer가 자동 판정
+    df_customer: pd.DataFrame | None = None
+    _skip_reason: str = ''  # 설정 문제로 이번 실행 내내 메일을 접은 이유
+
+    @classmethod
+    def disabled(cls) -> MailOptions:
+        return cls()
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode is not MailMode.OFF
+
+    @property
+    def send(self) -> bool:
+        return self.mode is MailMode.SEND
+
+    @property
+    def ask(self) -> bool:
+        return self.mode is MailMode.ASK
+
+    def customer_master(self) -> pd.DataFrame | None:
+        """Customer_국내 마스터 (지연 로딩 + 캐시)
+
+        로딩/설정 실패는 이번 실행 전체에 대해 한 번만 안내하고 이후 조용히 건너뜁니다.
+
+        Returns:
+            DataFrame 또는 None (사용 불가)
+        """
+        if self._skip_reason:
+            return None
+        if self.df_customer is not None:
+            return self.df_customer
+
+        try:
+            df = load_customer_domestic()
+        except (FileNotFoundError, ValueError) as e:
+            self._skip_reason = str(e)
+            print(f"  [메일 생략] 수신자 마스터를 읽을 수 없습니다: {e}")
+            return None
+
+        if resolve_column(df.columns, 'customer_email') is None:
+            self._skip_reason = 'no-email-column'
+            print(f"  [메일 생략] '{CUSTOMER_DOMESTIC_SHEET}' 시트에 이메일 컬럼이 없습니다.")
+            print("             시트 끝에 '수신자 이메일' 컬럼을 추가하면 메일 발송을 물어봅니다.")
+            return None
+
+        self.df_customer = df
+        return df
+
+
+def _confirm(question: str) -> bool:
+    """y/N 확인 (기본값 N)
+
+    파이프/리다이렉트로 stdin이 닫혀 있거나 Ctrl+C면 '아니오'로 처리합니다.
+
+    Args:
+        question: 표시할 질문
+
+    Returns:
+        사용자가 긍정했는지 여부
+    """
+    try:
+        answer = input(question).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return False
+    return answer in _YES_ANSWERS
+
+
+def resolve_mail_mode(args: argparse.Namespace, is_tty: bool) -> MailMode:
+    """CLI 인자 + 실행 환경으로 메일 모드 결정
+
+    비대화형(배치/파이프) 실행에서 기본 ASK를 그대로 두면 input()에서 멈추므로
+    OFF로 낮춥니다. 명시적 --mail/--send는 그대로 존중합니다.
+
+    Args:
+        args: 파싱된 CLI 인자
+        is_tty: stdin이 터미널인지
+
+    Returns:
+        MailMode
+    """
+    if args.no_mail:
+        return MailMode.OFF
+    if args.send:
+        return MailMode.SEND
+    if args.mail:
+        return MailMode.DRAFT
+    return MailMode.ASK if is_tty else MailMode.OFF
+
+
+def _format_mail_date(value: object) -> str:
+    """메일 제목/본문에 쓸 날짜 문자열
+
+    출고일이 비어 있거나(선수금 문서) 파싱되지 않으면 오늘 날짜를 씁니다.
+    빈 값은 None/NaT/NaN 모두로 들어올 수 있어 한 곳에서 흡수합니다.
+
+    Args:
+        value: 출고일 값
+
+    Returns:
+        'YYYY-MM-DD'
+    """
+    try:
+        stamp = pd.to_datetime(value)
+    except (ValueError, TypeError):
+        stamp = None
+
+    if stamp is None or pd.isna(stamp):
+        return datetime.now().strftime('%Y-%m-%d')
+    return stamp.strftime('%Y-%m-%d')
+
+
+def _collect_customer_po(
+    order_data: pd.Series,
+    items_df: pd.DataFrame | None = None,
+) -> str:
+    """거래처 발주번호 표기 문자열
+
+    월합 거래명세표는 DN마다 발주번호가 다를 수 있으므로 **전체 아이템에서** 모읍니다.
+    첫 건만 쓰면 여러 발주가 묶인 문서에 엉뚱한 번호 하나만 나가게 됩니다.
+
+    Args:
+        order_data: 주문 데이터 (items_df가 없을 때 폴백)
+        items_df: 문서에 실린 전체 아이템
+
+    Returns:
+        발주번호 (여러 건이면 ', ' 구분, 없으면 'N/A')
+    """
+    values: list = []
+    if items_df is not None and not items_df.empty:
+        col = resolve_column(items_df.columns, 'customer_po')
+        if col is not None:
+            values = items_df[col].tolist()
+    if not values:
+        values = [get_value(order_data, 'customer_po', '')]
+
+    unique: dict[str, None] = {}
+    for value in values:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        text = str(value).strip()
+        if text and text.lower() != 'nan':
+            unique.setdefault(text, None)
+
+    return ', '.join(unique) if unique else NO_VALUE
+
+
+def _mail_ts(
+    order_data: pd.Series,
+    output_file: Path,
+    doc_id: str,
+    opts: MailOptions,
+    items_df: pd.DataFrame | None = None,
+) -> bool:
+    """생성된 거래명세표를 메일로 발송/초안 생성
+
+    메일 실패는 거래명세표 생성 성공을 뒤엎지 않습니다 (경고만 출력).
+
+    Args:
+        order_data: 주문 데이터 (사업자번호/고객명/출고일 포함)
+        output_file: 생성된 거래명세표 경로
+        doc_id: DN_ID 또는 선수금_ID
+        opts: 메일 옵션
+        items_df: 문서에 실린 전체 아이템 (발주번호 수집용)
+
+    Returns:
+        메일 생성/발송 성공 여부
+    """
+    if not opts.enabled:
+        return True
+
+    df_customer = opts.customer_master()
+    if df_customer is None:
+        return False
+
+    try:
+        recipient = find_recipient_for_order(order_data, df_customer)
+    except MailConfigError as e:
+        print(f"  [메일 오류] {e}")
+        return False
+
+    if recipient is None:
+        biz_no = get_value(order_data, 'biz_no', '(사업자번호 없음)')
+        customer = get_value(order_data, 'customer_name', '')
+        print(f"  [메일 생략] 수신자 미등록 — {customer} / {biz_no}")
+        print(f"             {CUSTOMER_DOMESTIC_SHEET} 시트에 해당 사업자번호의 이메일을 입력하세요.")
+        return False
+
+    # 제목/본문 날짜: 출고일 우선, 없으면 오늘
+    # (선수금 거래명세표는 SO_국내 기반이라 출고일 자체가 없다)
+    date_str = _format_mail_date(get_value(order_data, 'dispatch_date', None))
+    customer_po = _collect_customer_po(order_data, items_df)
+
+    # 누구에게 나가는지 먼저 보여주고 확인받는다 (오발송 차단)
+    print(f"  받는사람: {recipient.to_line}")
+    if recipient.cc:
+        print(f"  참조    : {recipient.cc_line}")
+    print(f"  발주번호: {customer_po}")
+
+    if opts.ask and not _confirm("  이메일을 발송하시겠습니까? [y/N]: "):
+        print("  -> 메일 생략")
+        return False
+
+    try:
+        result = create_ts_mail(
+            xlsx_path=output_file,
+            recipient=recipient,
+            doc_id=doc_id,
+            date_str=date_str,
+            send=opts.send,
+            backend=opts.backend,
+            customer_po=customer_po,
+        )
+    except MailConfigError as e:
+        print(f"  [메일 오류] {e}")
+        return False
+
+    if result.success:
+        attach_names = ', '.join(p.name for p in result.attachments)
+        if result.sent:
+            verb = "메일 발송 완료"
+        else:
+            verb = "메일 초안 생성 (메일 창에서 [보내기] 확인)"
+        print(f"  -> {verb}: {attach_names}")
+        if opts.send and not result.sent:
+            print("     [주의] 자동 발송이 안 되는 방식이라 초안까지만 진행했습니다.")
+        return True
+
+    print(f"  [메일 실패] {result.message}")
+    return False
 
 
 def detect_id_type(doc_id: str) -> str:
@@ -97,7 +371,11 @@ def print_available_ids(df_dn: pd.DataFrame, df_pmt: pd.DataFrame, limit: int = 
     print("=" * 50)
 
 
-def generate_ts_from_dn(dn_id: str, df_dn: pd.DataFrame) -> bool:
+def generate_ts_from_dn(
+    dn_id: str,
+    df_dn: pd.DataFrame,
+    mail_opts: MailOptions | None = None,
+) -> bool:
     """DN 기반 거래명세표 생성
 
     DocumentService를 사용하여 거래명세표를 생성합니다.
@@ -105,10 +383,12 @@ def generate_ts_from_dn(dn_id: str, df_dn: pd.DataFrame) -> bool:
     Args:
         dn_id: DN_ID
         df_dn: DN 데이터 (하위 호환용, 실제로는 사용하지 않음)
+        mail_opts: 메일 발송 옵션 (None이면 발송 안 함)
 
     Returns:
-        성공 여부
+        성공 여부 (메일 실패는 성공 여부에 영향 없음)
     """
+    mail_opts = mail_opts or MailOptions.disabled()
     print(f"\n{'=' * 50}")
     print(f"거래명세표 생성 (납품): {dn_id}")
     print('=' * 50)
@@ -143,6 +423,8 @@ def generate_ts_from_dn(dn_id: str, df_dn: pd.DataFrame) -> bool:
     # 4. 결과 처리
     if result.success:
         print(f"  -> 거래명세표 생성 완료: {result.output_file.name}")
+        _mail_ts(order_data.first_item, result.output_file, dn_id, mail_opts,
+                 items_df=order_data.items_df)
         return True
     else:
         if result.status == GenerationStatus.FILE_ERROR:
@@ -152,15 +434,17 @@ def generate_ts_from_dn(dn_id: str, df_dn: pd.DataFrame) -> bool:
         return False
 
 
-def generate_merged_ts(dn_ids: list[str]) -> bool:
+def generate_merged_ts(dn_ids: list[str], mail_opts: MailOptions | None = None) -> bool:
     """여러 DN을 합쳐서 월합 거래명세표 생성
 
     Args:
         dn_ids: DN_ID 목록
+        mail_opts: 메일 발송 옵션 (None이면 발송 안 함)
 
     Returns:
         성공 여부
     """
+    mail_opts = mail_opts or MailOptions.disabled()
     print(f"\n{'=' * 50}")
     print(f"월합 거래명세표 생성: {len(dn_ids)}건")
     print('=' * 50)
@@ -247,23 +531,35 @@ def generate_merged_ts(dn_ids: list[str]) -> bool:
             use_po_as_remark=True,
         )
         print(f"\n  -> 월합 거래명세표 생성 완료: {output_filename}")
-        return True
     except Exception as e:
         print(f"  [오류] 거래명세표 생성 실패: {e}")
         return False
 
+    # 고객이 섞인 월합 문서는 메일 발송 금지 — 타 거래처 라인이 노출됨
+    if mail_opts.enabled and len(customer_names) > 1:
+        print(f"  [메일 중단] 고객이 {len(customer_names)}곳 섞여 있어 발송하지 않습니다.")
+        print(f"             {sorted(customer_names)}")
+        return True
 
-def generate_ts_from_adv(advance_id: str) -> bool:
+    # 월합은 DN마다 발주번호가 다를 수 있으므로 합쳐진 전체 아이템을 넘긴다
+    _mail_ts(first_order_data.first_item, output_path, first_dn_id or "merge", mail_opts,
+             items_df=merged_items_df)
+    return True
+
+
+def generate_ts_from_adv(advance_id: str, mail_opts: MailOptions | None = None) -> bool:
     """선수금 거래명세표 생성 (SO_국내 데이터 사용)
 
     DocumentService를 사용하여 선수금 거래명세표를 생성합니다.
 
     Args:
         advance_id: 선수금_ID
+        mail_opts: 메일 발송 옵션 (None이면 발송 안 함)
 
     Returns:
-        성공 여부
+        성공 여부 (메일 실패는 성공 여부에 영향 없음)
     """
+    mail_opts = mail_opts or MailOptions.disabled()
     print(f"\n{'=' * 50}")
     print(f"거래명세표 생성 (선수금): {advance_id}")
     print('=' * 50)
@@ -301,6 +597,8 @@ def generate_ts_from_adv(advance_id: str) -> bool:
     # 4. 결과 처리
     if gen_result.success:
         print(f"  -> 선수금 거래명세표 생성 완료: {gen_result.output_file.name}")
+        _mail_ts(order_data.first_item, gen_result.output_file, advance_id, mail_opts,
+                 items_df=order_data.items_df)
         return True
     else:
         if gen_result.status == GenerationStatus.FILE_ERROR:
@@ -338,6 +636,16 @@ NOAH_SO_PO_DN.xlsx의 DN_국내 또는 PMT_국내 시트에서 데이터를 읽�
 월합 거래명세표 (여러 DN을 한 장으로):
   python create_ts.py DN-2026-0001 DN-2026-0002 DN-2026-0003 --merge
 
+Outlook 메일 발송:
+  생성이 끝나면 받는사람/참조를 보여주고 "이메일을 발송하시겠습니까? [y/N]"을 묻습니다.
+  y를 누르면 PDF를 첨부한 Outlook 메일 창이 뜨고, 최종 [보내기]는 직접 누릅니다.
+  수신자는 사업자번호로 Customer_국내에서 조회하고, 고정 참조(CC)는 user_settings.py의
+  TS_MAIL_CC로 관리합니다.
+
+  python create_ts.py DN-2026-0001 --mail     # 확인 없이 바로 Outlook 창
+  python create_ts.py DN-2026-0001 --send     # 확인 없이 즉시 발송
+  python create_ts.py DN-2026-0001 --no-mail  # 묻지 않고 문서만
+
 인자 없이 실행하면 사용 가능한 ID 목록을 표시합니다.
 """
 
@@ -373,7 +681,62 @@ NOAH_SO_PO_DN.xlsx의 DN_국내 또는 PMT_국내 시트에서 데이터를 읽�
         help='대화형 모드 (여러 줄 입력 지원)',
     )
 
+    parser.add_argument(
+        '--mail',
+        action='store_true',
+        help='확인 없이 Outlook 메일 초안 열기 (기본은 건별 y/N 확인)',
+    )
+
+    parser.add_argument(
+        '--send',
+        action='store_true',
+        help='확인 없이 즉시 발송',
+    )
+
+    parser.add_argument(
+        '--no-mail',
+        action='store_true',
+        help='메일 확인 없이 문서만 생성 (배치용)',
+    )
+
     return parser
+
+
+def prepare_mail_options(args: argparse.Namespace) -> MailOptions:
+    """CLI 인자로 메일 옵션 구성
+
+    마스터 로딩은 실제로 메일이 필요한 시점까지 미룹니다
+    (메일을 쓰지 않는 실행에 Excel 로딩 비용을 물리지 않기 위함).
+
+    Args:
+        args: 파싱된 CLI 인자
+
+    Returns:
+        MailOptions
+    """
+    mode = resolve_mail_mode(args, is_tty=sys.stdin.isatty())
+    if mode is MailMode.OFF:
+        return MailOptions.disabled()
+
+    label = {
+        MailMode.ASK: '건별 확인 후 발송',
+        MailMode.DRAFT: '확인 없이 초안 열기',
+        MailMode.SEND: '확인 없이 즉시 발송',
+    }[mode]
+    backend = resolve_backend()
+    backend_label = 'Outlook COM' if backend is MailBackend.OUTLOOK else '.eml 초안'
+    # 참조자는 거래처마다 달라서 Customer_국내의 '참조 이메일'로 건별 관리한다.
+    # TS_MAIL_CC는 모든 거래처에 공통으로 붙일 주소가 있을 때만 쓰는 선택 항목.
+    cc_note = f" / 고정 CC {len(TS_MAIL_CC)}명" if TS_MAIL_CC else ""
+    print(f"\n메일: {label} / 첨부 {TS_MAIL_ATTACH_FORMAT.upper()} / "
+          f"방식 {backend_label}{cc_note}")
+
+    # .eml은 작성 창을 띄우는 방식이라 자동 발송이 불가능하다
+    if mode is MailMode.SEND and backend is MailBackend.EML:
+        print("  [주의] .eml 방식은 자동 발송을 지원하지 않습니다 — 초안까지만 진행됩니다.")
+        print("         (Outlook COM 미사용 환경: 새 Outlook은 COM 자동화를 지원하지 않음)")
+
+    return MailOptions(mode=mode, backend=backend)
 
 
 def main() -> int:
@@ -425,6 +788,9 @@ def main() -> int:
 
     print(f"DN: {len(df_dn)}건, PMT: {len(df_pmt)}건 로드 완료")
 
+    # 메일 옵션 (마스터는 실제 발송 시점에 지연 로딩)
+    mail_opts = prepare_mail_options(args)
+
     # --merge 옵션: 여러 DN을 한 장으로 합침
     if args.merge:
         # DN만 merge 가능 (ADV는 제외)
@@ -445,7 +811,7 @@ def main() -> int:
             print("\n[오류] --merge 옵션은 2개 이상의 DN_ID가 필요합니다.")
             return 1
 
-        success = generate_merged_ts(dn_ids)
+        success = generate_merged_ts(dn_ids, mail_opts)
         return 0 if success else 1
 
     # 일반 모드: 각 ID에 대해 거래명세표 생성
@@ -454,10 +820,10 @@ def main() -> int:
         id_type = detect_id_type(doc_id)
 
         if id_type == 'DN':
-            if generate_ts_from_dn(doc_id, df_dn):
+            if generate_ts_from_dn(doc_id, df_dn, mail_opts):
                 success_count += 1
         else:  # ADV
-            if generate_ts_from_adv(doc_id):
+            if generate_ts_from_adv(doc_id, mail_opts):
                 success_count += 1
 
     # 결과 출력

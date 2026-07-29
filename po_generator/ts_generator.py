@@ -169,6 +169,27 @@ def _restore_ts_item_borders(ws: xw.Sheet, item_start_row: int, num_items: int) 
     logger.debug(f"테두리 복원: Row {header_bottom_row} 하단, Row {last_item_row} 하단")
 
 
+def _wrap_item_text(ws: xw.Sheet, item_start_row: int, end_row: int) -> None:
+    """아이템 행의 품명(B)·비고(C) 줄바꿈 + 행 높이 자동 조정
+
+    긴 품명이 열 너비에서 잘리는 것을 막습니다. 숫자 열은 줄바꿈 대상이 아니며,
+    행이 세로로 늘어나므로 값들이 위로 붙지 않도록 세로 가운데 정렬합니다.
+
+    Args:
+        ws: xlwings Sheet 객체
+        item_start_row: 아이템 시작 행
+        end_row: 아이템 마지막 행
+    """
+    try:
+        ws.range(f'B{item_start_row}:C{end_row}').api.WrapText = True
+        ws.range(f'A{item_start_row}:H{end_row}').api.VerticalAlignment = XlConstants.xlCenter
+        ws.range(f'A{item_start_row}:A{end_row}').api.EntireRow.AutoFit()
+        logger.debug(f"아이템 행 줄바꿈/높이 조정: {item_start_row}~{end_row}")
+    except Exception as e:
+        # 서식 조정 실패가 문서 생성 자체를 막지는 않게 한다
+        logger.warning(f"아이템 행 줄바꿈 설정 실패 (내용은 정상): {e}")
+
+
 def _fill_ts_data(
     ws: xw.Sheet,
     order_data: pd.Series,
@@ -232,6 +253,13 @@ def _fill_ts_data(
     total_amount, total_tax = _fill_items_batch(
         ws, item_start_row, items_df, dispatch_date, remark, use_po_as_remark
     )
+
+    # 품명·비고 줄바꿈 + 행 높이 자동 조정
+    # 품명은 최대 64자(전체의 27%가 B열 너비 22를 넘음), 비고는 36자까지 들어오는데
+    # 줄바꿈이 꺼져 있으면 열 너비에서 잘려 거래처가 품목을 알 수 없다.
+    # 인쇄가 fitToPage(축소)라 열을 넓히면 글자만 작아지므로, 너비는 그대로 두고
+    # 세로로 늘린다. 아이템 행에는 병합 셀이 없어 AutoFit이 안전하다.
+    _wrap_item_text(ws, item_start_row, end_row)
 
     # 소계 행 수식 업데이트 (다중 아이템인 경우)
     subtotal_row = item_start_row + num_items

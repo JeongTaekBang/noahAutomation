@@ -40,11 +40,16 @@ env/
 *.log
 logs/
 
-# Generated files (keep folder, ignore contents)
-generated_po/*.xlsx
-generated_ts/*.xlsx
-generated_pi/*.xlsx
-generated_fi/*.xlsx
+# Generated files (운영 산출물 - 폴더 통째로 제외)
+# 확장자별로 막으면 새 출력 형식이 생길 때마다 구멍이 난다.
+# 실제로 거래명세표 메일 기능이 만든 고객 PDF 15개가 `*.xlsx`만 막힌 사이로 새어 들어왔다.
+generated_po/
+generated_ts/
+generated_pi/
+generated_fi/
+generated_ci/
+generated_pl/
+generated_oc/
 
 # Temp/analysis files
 *.bak

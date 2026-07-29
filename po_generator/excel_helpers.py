@@ -62,6 +62,9 @@ class XlConstants:
     xlThin = 2             # 얇은 선
     xlMedium = -4138       # 중간 두께
 
+    # 정렬 (XlVAlign / XlHAlign 공용)
+    xlCenter = -4108       # 가운데 정렬
+
 
 # === xlwings 앱 컨텍스트 매니저 ===
 
