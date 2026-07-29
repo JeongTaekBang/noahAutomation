@@ -1,4 +1,97 @@
-# Current Tasks — 거래처 납기현황 회신 [2026-07-29]
+# Current Tasks — 납기현황 메일 발송 [2026-07-29]
+
+납기현황을 만든 뒤 거래명세표(TS)와 같은 방식으로 고객에게 메일 발송한다.
+수신자는 `Customer_국내`(사업자번호 조인), 본문에 표를 넣고 xlsx를 첨부한다.
+
+**결정사항** (사용자 확인)
+- 본문: **HTML 표 + xlsx 첨부** — 기존 회신이 표를 본문에 붙이는 방식이었다. 첨부만 보내면 후퇴
+- 첨부 범위: 생성된 **2시트 그대로** (`납기현황` + `상세`)
+- 조회가 이미 사업자번호 기준이라 TS와 달리 "고객 섞임" 위험이 없다 — merge 차단 로직 불필요
+
+## 설계
+
+**`mailer.py`를 문서 중립으로.** 지금은 TS 전용 상수가 함수 안에 박혀 있다.
+TS 동작은 한 톨도 바뀌지 않게 하고, 고정된 부분만 인자로 뺀다.
+- `create_document_mail(...)` 신설 — 제목/본문 템플릿, 첨부형식, 초안 파일명 접두사, HTML 본문을 받는다
+- `create_ts_mail(...)`은 TS 상수를 넘기는 얇은 래퍼로 (기존 호출부·테스트 그대로)
+- `render_template(..., extra=None)` — 문서별 치환자 추가
+- `find_recipient(..., fixed_cc=None)` — 기본값은 `TS_MAIL_CC` (현행 유지)
+- `build_eml(..., prefix=...)` / Outlook COM에 `HTMLBody` 지원
+
+**`po_generator/mail_cli.py` 신설.** `MailMode`·`MailOptions`·`resolve_mail_mode`·`confirm`은
+CLI 두 개가 똑같이 필요한 배선인데 지금 `create_ts.py` 안에 있다. 복사하면 반드시 갈라진다.
+`create_ts.py`는 재노출만 해서 `from create_ts import MailMode` 하는 기존 테스트를 깨지 않는다.
+
+## 구현
+- [x] 1. `po_generator/mail_cli.py` — MailMode / MailOptions / resolve_mail_mode / confirm / add_mail_arguments
+- [x] 2. `create_ts.py` — 위 심볼을 mail_cli에서 import + 재노출 (동작 불변)
+- [x] 3. `mailer.py` — `create_document_mail`, `render_template(extra)`, `find_recipient(fixed_cc)`,
+      `build_eml(prefix, body_html)`, Outlook `HTMLBody` 경로, `body_to_html` 공개
+- [x] 4. `config.py` — `DS_MAIL_CC` / `DS_MAIL_ATTACH_FORMAT`(기본 xlsx) / `DS_MAIL_SUBJECT` / `DS_MAIL_BODY`
+- [x] 5. `delivery_status.py` — `--mail`/`--send`/`--no-mail`, 본문 표(HTML+평문) 생성, 발송 흐름
+- [x] 6. 테스트 — `tests/test_delivery_status.py` 15건 추가 (72개)
+- [x] 7. 문서 — `CLAUDE.md` / `docs/CHANGELOG.md` / `create_po.bat` 안내 문구
+      (`user_settings.example.py`는 이 레포에 없음 — 설정 설명은 `config.py` 주석에 둔다)
+
+## 원칙
+- **메일 실패가 문서 생성 성공을 뒤엎지 않는다** (TS와 동일)
+- 비대화형 실행은 자동으로 묻지 않는다 — 배치가 프롬프트에서 멈추면 안 된다
+- 수신자를 보여주고 y/N 확인이 기본. 고객에게 나가는 것은 항상 사람이 한 번 본다
+- TS 경로는 회귀 0 — `tests/test_mailer.py` 100개가 그대로 통과해야 한다
+
+## Review
+
+계획대로 갔다. 리팩터를 먼저 한 판단이 옳았는데, 근거가 구현 중에 드러났다:
+`mailer.py`에서 실제로 문서마다 달라야 했던 건 **6가지**(제목·본문 템플릿, 첨부형식, 고정 CC,
+HTML 본문, 초안 파일명, 로그 라벨)였다. 복사했다면 642줄짜리 모듈이 두 벌이 됐을 것이다.
+
+구현 중 판단한 것 셋:
+
+1. ~~**본문 표는 4개 컬럼만.**~~ → **피드백으로 Sales 금액 + Requested delivery date 추가.**
+   처음엔 "좁은 화면" 이유로 금액을 뺐는데, 초안을 열어본 사용자가 금액도 요청납기도 필요하다고 했다.
+   요청납기를 공장출고일 바로 왼쪽에 둬서 대조되게 했다 — 엔이에스 14건 중 2건이 요청보다 늦다.
+   PO receipt date만 첨부 전용으로 남긴다 (고객이 이미 아는 날짜).
+   요청납기가 라인마다 갈리면 처음엔 가장 이른 날로 접었는데, 사용자가 "다르면 풀어달라"고 했다.
+   맞는 지적이다 — 접으면 나머지 약속이 사라진다. 피엠에스 `SOD-2026-0344`는 요청 10/06인데
+   출고 11/15인 라인이 10/06 행에 묻혀 있었다. **분리 기준을 요청납기+공장출고일 둘 다로** 바꿨고
+   실측 161행 → 164행 (3개 주문만 추가 분리).
+2. **HTML과 평문 둘 다 데이터를 담는다.** 평문 대체본을 "첨부 참조"로 때우면 HTML을 막아둔
+   클라이언트가 받는 메일엔 답이 없다. `_pad`(표시 폭 기준)를 재사용해 문자표를 그렸다.
+3. **표는 이스케이프 뒤에 넣는다.** 본문 값은 전부 이스케이프해야 하는데(`S&T중공업`),
+   표를 먼저 끼우면 `<table>`이 통째로 글자가 된다. 토큰(`%%DELIVERY_STATUS_TABLE%%`)을 넣고
+   이스케이프한 다음 되돌린다. 순서가 뒤집히면 조용히 깨지는 종류라 회귀 테스트를 붙였다.
+
+Outlook COM 쪽에서 하나 배웠다: `HTMLBody`와 `Body`를 **둘 다 대입하면 나중 것이 앞을 지운다.**
+표가 있는 문서는 HTML만 설정한다 (이 PC는 .eml 경로지만 classic Outlook 환경 대비).
+
+**초안을 실제로 열어보고 고친 것 (2026-07-29, 2·3차)**
+- **서명 위치 — 두 번 틀리고 규칙을 좁혔다.**
+  - 1차: `<br>`로 이은 인라인 텍스트 → 서명이 표(첫 블록) **앞**에
+  - 2차: 문단을 `<p>` 블록으로 → 서명이 첫 `<p>` **뒤**에. `<div>` 래퍼는 무력
+  - → 규칙은 "**Outlook은 본문의 첫 블록 요소 뒤에 서명을 넣는다**".
+    3차: 본문 전체를 `<table><tr><td>` 한 칸에 담아 최상위 블록을 하나로. 삽입 지점 = 본문 끝
+  - 여기서 검증할 수 있는 건 HTML 구조까지다(`<body>` 직계 자식 1개 확인). 실제 위치는 Outlook 판정.
+    이것도 실패하면 **Outlook 자동 서명을 끄고 서명 텍스트를 `DS_MAIL_BODY`에 넣는 것**이 확실한 해법이다
+- 제목 태그 `[납기현황 회신]` → `[Delivery Schedule]` (사용자 선택)
+- 본문 문구를 거래명세표 톤으로 건조하게 (`요청하신…회신드립니다` → `…송부하오니 참고 바랍니다`),
+  끝에 "본 메일은 자동 발송된 메일입니다."
+- 표에 Sales 금액 추가
+
+**남은 위험**: `Remarks`가 고객에게 그대로 나간다. 데이터에 내부 생산 메모가 섞여 있다
+(`… 2026-02-09-CH-05 미출고 Worm gear 사용하여 제작`). 초안을 눈으로 훑는 것을 전제로 한다 —
+기본이 즉시 발송이 아니라 초안인 이유가 여기에도 있다.
+
+검증:
+- 실제 `.eml` 생성 — 수신자 `nes@neskorea.co.kr` + 참조 5명이 **기존 회신 메일과 동일하게** 잡혔다.
+  `X-Unsent: 1`, xlsx 첨부, text/plain·text/html 양쪽에 14행 표, 토큰 잔존 없음
+- `pytest tests/` **476 passed, 2 skipped** — TS 경로 회귀 0
+  (`test_mailer.py` 3건은 `MailOptions` 이사로 monkeypatch 대상만 갱신, 동작 검증 내용은 그대로)
+
+남은 것: 실제 발송 1건. `.eml` 초안까지는 확인했지만 [보내기]를 눌러본 적은 없다.
+
+---
+
+# 완료: 거래처 납기현황 회신 [2026-07-29]
 
 업체가 "언제 나오냐"고 물을 때마다 SO_국내를 수기로 피벗해 회신하던 작업을 CLI 한 줄로 만든다.
 조회 기준은 **사업자등록번호**(Business registration number), 대상은 **국내(SO_국내)**.

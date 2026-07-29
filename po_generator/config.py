@@ -455,3 +455,29 @@ TS_MAIL_BODY: Final[str] = _load_user_setting(
     '발주번호: {customer_po}\n\n'
     '본 메일은 자동 발송된 메일입니다.\n',
 )
+
+
+# === 납기현황 회신 메일 설정 (delivery_status.py) ===
+# 수신자(To)는 거래명세표와 같은 경로로 찾는다 — 조회 기준인 사업자번호로 Customer_국내 조인.
+DS_MAIL_CC: Final[tuple[str, ...]] = tuple(_load_user_setting('DS_MAIL_CC', ()) or ())
+
+# 첨부 형식: 'xlsx' | 'pdf' | 'both'
+# 기본이 xlsx인 이유 — 납기현황은 고객이 자기 시스템에 옮겨 넣거나 정렬해 보는 표라서
+# PDF보다 원본이 쓸모 있다. 거래명세표(PDF 기본)와 성격이 다르다.
+DS_MAIL_ATTACH_FORMAT: Final[str] = _load_user_setting('DS_MAIL_ATTACH_FORMAT', 'xlsx')
+
+# 제목/본문 템플릿
+# 치환자: {customer} 한글 거래처명, {customer_en} 영문 거래처명, {date} 기준일,
+#         {count} 미출고 건수, {qty} 미출고 수량 합, {supplier} 공급자명,
+#         {table} 납기현황 표 (본문 전용 — 평문/HTML 각각 알맞은 형태로 치환된다)
+DS_MAIL_SUBJECT: Final[str] = _load_user_setting(
+    'DS_MAIL_SUBJECT',
+    '[Delivery Schedule] {customer} - {date} 기준',
+)
+DS_MAIL_BODY: Final[str] = _load_user_setting(
+    'DS_MAIL_BODY',
+    '{customer} 귀중\n\n'
+    '{date} 기준 미출고 {count}건의 납기현황을 아래와 같이 송부하오니 참고 바랍니다.\n\n'
+    '{table}\n\n'
+    '본 메일은 자동 발송된 메일입니다.\n',
+)

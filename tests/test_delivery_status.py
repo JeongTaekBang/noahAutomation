@@ -12,11 +12,14 @@ delivery_status.py 테스트
 from __future__ import annotations
 
 import datetime as dt
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
 
 import delivery_status as ds
+from po_generator.mail_cli import MailMode, MailOptions
+from po_generator.mailer import MailConfigError, MailResult, Recipient
 
 
 # === 픽스처 ================================================================
@@ -38,6 +41,9 @@ def make_so(rows: list[dict]) -> pd.DataFrame:
         'Sales Unit Price': 100000,
         'Sales amount': 1000000,
         'PO receipt date': dt.datetime(2026, 1, 20),
+        # 기본값은 '정상'(요청납기 ≥ 공장출고일)이어야 한다.
+        # 늦은 값을 기본으로 두면 무관한 테스트에까지 '요청납기 초과' 표식이 섞인다.
+        'Requested delivery date': dt.datetime(2026, 9, 19),
         'EXW NOAH': dt.datetime(2026, 9, 14),
         'Expected delivery date': dt.datetime(2026, 9, 19),
         'Remarks': '2026-024N',
@@ -228,7 +234,7 @@ class TestDateHandling:
         so = make_so([{'EXW NOAH': dt.time(0, 0)}])
         work = ds.attach_ship_status(so, EMPTY_DN)
         summary = ds.build_summary(work)
-        assert summary['NOAH 공장 출고일'].tolist() == [ds.DATE_TBD_LABEL]
+        assert summary[ds.COL_EXW].tolist() == [ds.DATE_TBD_LABEL]
 
     def test_주문_안에_날짜가_하나면_한_행(self):
         so = make_so([
@@ -236,13 +242,55 @@ class TestDateHandling:
             {'Line item': 2, 'EXW NOAH': dt.datetime(2026, 8, 10)},
         ])
         summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
-        assert summary['NOAH 공장 출고일'].tolist() == ['2026-08-10']
+        assert summary[ds.COL_EXW].tolist() == ['2026-08-10']
         # 안 갈린 주문에는 품목 주석을 붙이지 않는다 — 표가 시끄러워진다
         assert summary['Remarks'].tolist() == ['2026-024N']
 
 
 class TestSplitDelivery:
-    """분할 납기 — 한 주문 안에서 EXW NOAH가 갈리면 날짜별로 행을 나눈다"""
+    """분할 납기 — 한 주문 안에서 납기가 갈리면 날짜별로 행을 나눈다
+
+    기준은 두 날짜 모두다: 고객 요청납기(Requested delivery date)와 공장 출고일(EXW NOAH).
+    """
+
+    def test_요청납기가_갈리면_나뉜다(self):
+        """공장 출고일이 같아도 요청납기가 다르면 다른 약속이다"""
+        so = make_so([
+            {'Line item': 1, 'Item qty': 3, 'Requested delivery date': dt.datetime(2026, 9, 30)},
+            {'Line item': 2, 'Item qty': 7, 'Requested delivery date': dt.datetime(2026, 8, 10)},
+        ])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert summary['Requested delivery date'].tolist() == ['2026-08-10', '2026-09-30']
+        assert summary['수량'].tolist() == [7.0, 3.0]
+        # 공장 출고일은 원래대로 하나
+        assert set(summary[ds.COL_EXW]) == {'2026-09-14'}
+
+    def test_요청납기가_같으면_안_나뉜다(self):
+        so = make_so([
+            {'Line item': 1, 'Item qty': 3},
+            {'Line item': 2, 'Item qty': 7},
+        ])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert len(summary) == 1
+        assert summary.loc[0, '수량'] == 10.0
+
+    def test_두_날짜가_모두_갈리면_조합만큼_나뉜다(self):
+        so = make_so([
+            {'Line item': 1, 'Requested delivery date': dt.datetime(2026, 8, 1),
+             'EXW NOAH': dt.datetime(2026, 9, 1)},
+            {'Line item': 2, 'Requested delivery date': dt.datetime(2026, 8, 1),
+             'EXW NOAH': dt.datetime(2026, 10, 1)},
+            {'Line item': 3, 'Requested delivery date': dt.datetime(2026, 8, 20),
+             'EXW NOAH': dt.datetime(2026, 10, 1)},
+        ])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert len(summary) == 3
+        pairs = set(zip(summary['Requested delivery date'], summary[ds.COL_EXW]))
+        assert pairs == {
+            ('2026-08-01', '2026-09-01'),
+            ('2026-08-01', '2026-10-01'),
+            ('2026-08-20', '2026-10-01'),
+        }
 
     def test_미정이_섞이면_확정분과_분리된다(self):
         """대표 날짜 하나로 뭉개면 나머지 납기가 사라지거나 틀린 약속이 된다"""
@@ -251,7 +299,7 @@ class TestSplitDelivery:
             {'Line item': 2, 'EXW NOAH': dt.time(0, 0), 'Item qty': 2},
         ])
         summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
-        assert summary['NOAH 공장 출고일'].tolist() == ['2026-08-10', ds.DATE_TBD_LABEL]
+        assert summary[ds.COL_EXW].tolist() == ['2026-08-10', ds.DATE_TBD_LABEL]
         assert summary['수량'].tolist() == [8.0, 2.0]
 
     def test_확정_날짜가_여럿이어도_나뉜다(self):
@@ -260,7 +308,7 @@ class TestSplitDelivery:
             {'Line item': 2, 'EXW NOAH': dt.datetime(2026, 8, 10)},
         ])
         summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
-        assert summary['NOAH 공장 출고일'].tolist() == ['2026-08-10', '2026-09-30']
+        assert summary[ds.COL_EXW].tolist() == ['2026-08-10', '2026-09-30']
 
     def test_수량과_금액이_날짜별로_갈라진다(self):
         so = make_so([
@@ -318,7 +366,7 @@ class TestSplitDelivery:
                for i, name in enumerate(long_names)]
         )
         summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
-        note = summary[summary['NOAH 공장 출고일'] == '2026-08-10'].iloc[0]['Remarks']
+        note = summary[summary[ds.COL_EXW] == '2026-08-10'].iloc[0]['Remarks']
         assert long_names[0] in note          # 첫 품목은 반드시 남는다
         assert '외 ' in note and '종' in note   # 나머지는 종수로 접힌다
         assert len(note) < 110                # 표가 깨지지 않을 길이
@@ -330,7 +378,7 @@ class TestSplitDelivery:
                for n in range(2, 5)]
         )
         summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
-        confirmed = summary[summary['NOAH 공장 출고일'] == '2026-08-10'].iloc[0]
+        confirmed = summary[summary[ds.COL_EXW] == '2026-08-10'].iloc[0]
         assert confirmed['Remarks'] == '2026-024N (품목: ITEM-2, ITEM-3, ITEM-4)'
 
     def test_품목명_하나가_한도보다_길어도_남긴다(self):
@@ -361,7 +409,7 @@ class TestSplitDelivery:
         ])
         summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
         assert len(summary) == 3
-        plain = summary[summary['NOAH 공장 출고일'] == '2026-08-10'].iloc[0]
+        plain = summary[summary[ds.COL_EXW] == '2026-08-10'].iloc[0]
         assert plain['Remarks'] == '2026-024N'
         assert summary['Remarks'].str.contains('품목:').sum() == 2
 
@@ -374,8 +422,25 @@ class TestSummary:
     def test_컬럼_구성(self):
         work = ds.attach_ship_status(make_so([{}]), EMPTY_DN)
         assert list(ds.build_summary(work).columns) == [
-            'Customer PO', 'Remarks', '수량', 'NOAH 공장 출고일', 'Sales 금액', 'PO receipt date',
+            'Customer PO', 'Remarks', '수량',
+            'Requested delivery date', ds.COL_EXW,
+            'Sales 금액', 'PO receipt date',
         ]
+
+    def test_요청납기가_채워진다(self):
+        work = ds.attach_ship_status(make_so([{}]), EMPTY_DN)
+        assert ds.build_summary(work).loc[0, 'Requested delivery date'] == '2026-09-19'
+
+    def test_요청납기가_비어_있으면_빈칸(self):
+        so = make_so([{'Requested delivery date': None}])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert summary.loc[0, 'Requested delivery date'] == ''
+
+    def test_요청납기가_문자열이어도_읽는다(self):
+        """실데이터에 ISO 문자열로 들어간 셀이 38건 있다"""
+        so = make_so([{'Requested delivery date': '2026-10-06'}])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert summary.loc[0, 'Requested delivery date'] == '2026-10-06'
 
     def test_같은_SO는_한_행으로_합산(self):
         so = make_so([
@@ -412,7 +477,38 @@ class TestSummary:
             {'SO_ID': 'SOD-3', 'EXW NOAH': dt.datetime(2026, 8, 31)},
         ])
         summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
-        assert summary['NOAH 공장 출고일'].tolist() == ['2026-08-31', '2026-09-14', ds.DATE_TBD_LABEL]
+        assert summary[ds.COL_EXW].tolist() == ['2026-08-31', '2026-09-14', ds.DATE_TBD_LABEL]
+
+    def test_요약합과_상세합이_같다(self):
+        """그룹핑이 금액을 흘리거나 중복 집계하면 안 된다
+
+        분리 기준을 두 번 바꿨다(EXW → EXW+요청납기). 키가 늘 때 merge fan-out이나
+        행 누락이 생기면 고객에게 틀린 금액이 나간다.
+        """
+        so = make_so([
+            {'SO_ID': 'SOD-1', 'Line item': 1, 'Item qty': 3, 'Sales Unit Price': 100000,
+             'EXW NOAH': dt.datetime(2026, 9, 1)},
+            {'SO_ID': 'SOD-1', 'Line item': 2, 'Item qty': 7, 'Sales Unit Price': 250000,
+             'EXW NOAH': dt.datetime(2026, 10, 1)},
+            {'SO_ID': 'SOD-1', 'Line item': 3, 'Item qty': 5, 'Sales Unit Price': 250000,
+             'EXW NOAH': dt.datetime(2026, 10, 1),
+             'Requested delivery date': dt.datetime(2026, 8, 1)},
+            {'SO_ID': 'SOD-2', 'Line item': 1, 'Item qty': 2, 'Sales Unit Price': 500000},
+        ])
+        rows = ds.attach_ship_status(so, EMPTY_DN)
+        summary, detail = ds.build_summary(rows), ds.build_detail(rows)
+        assert summary['Sales 금액'].sum() == detail['미출고금액'].sum()
+        assert summary['수량'].sum() == detail['미출고수량'].sum()
+        # 전량 미출고이므로 원본 Sales amount 합과도 같아야 한다
+        assert summary['Sales 금액'].sum() == 3 * 100000 + 7 * 250000 + 5 * 250000 + 2 * 500000
+
+    def test_부분출고_출고분과_미출고분이_원본과_맞는다(self):
+        so = make_so([{'Item qty': 3, 'Sales Unit Price': 1000000, 'Sales amount': 3000000}])
+        dn = make_dn([{'Qty': 1}])
+        rows = ds.attach_ship_status(so, dn)
+        미출고 = ds.build_summary(rows).loc[0, 'Sales 금액']
+        출고 = rows.iloc[0]['_단가'] * rows.iloc[0]['출고수량']
+        assert 출고 + 미출고 == 3000000
 
     def test_빈_입력은_빈_요약(self):
         empty = ds.attach_ship_status(make_so([{}]), EMPTY_DN).iloc[0:0]
@@ -431,12 +527,14 @@ class TestDetail:
         assert list(detail.columns) == [
             'SO_ID', 'Line item', 'Customer PO', 'Remarks', 'Item name',
             '주문수량', '출고수량', '미출고수량', 'Sales Unit Price', '미출고금액',
-            'PO receipt date', 'EXW NOAH', 'Expected delivery date', '출고상태',
+            'PO receipt date', 'Requested delivery date', 'EXW NOAH',
+            'Expected delivery date', '출고상태',
         ]
         row = detail.iloc[0]
         assert (row['주문수량'], row['출고수량'], row['미출고수량']) == (10, 4.0, 6.0)
         assert row['출고상태'] == '부분 출고'
         assert row['PO receipt date'] == '2026-01-20'
+        assert row['Requested delivery date'] == '2026-09-19'
 
     def test_라인번호_순으로_정렬(self):
         so = make_so([{'Line item': n} for n in (10, 2, 1)])
@@ -522,6 +620,233 @@ class TestCustomerList:
 
 
 # === 표시 폭 ===============================================================
+
+# === 메일 본문 ============================================================
+
+def _summary(rows: list[dict]) -> pd.DataFrame:
+    """메일 본문 테스트용 요약 (build_summary를 거쳐 실제 컬럼 구성을 얻는다)"""
+    return ds.build_summary(ds.attach_ship_status(make_so(rows), EMPTY_DN))
+
+
+class TestMailTables:
+    """본문 표 — PO receipt date만 빼고 첨부와 같은 컬럼"""
+
+    def test_평문표_컬럼(self):
+        text = ds.build_text_table(_summary([{}]))
+        header = text.splitlines()[0]
+        for col in ('Customer PO', 'Remarks', '수량', ds.COL_EXW, 'Sales 금액'):
+            assert col in header
+        assert 'PO receipt date' not in header
+
+    def test_금액은_천단위_구분(self):
+        text = ds.build_text_table(_summary([{'Item qty': 10, 'Sales Unit Price': 123456}]))
+        assert '1,234,560' in text
+
+    def test_평문표_한글_열_정렬(self):
+        """한글 비고가 섞여도 열이 어긋나면 안 된다"""
+        text = ds.build_text_table(_summary([
+            {'SO_ID': 'SOD-1', 'Remarks': '짧음'},
+            {'SO_ID': 'SOD-2', 'Remarks': '아주 긴 한글 비고입니다'},
+        ]))
+        # 각주는 표가 아니므로 폭 비교에서 뺀다 (빈 줄 뒤부터가 각주)
+        table = text.split('\n\n')[0]
+        widths = {ds._display_width(l) for l in table.splitlines() if not l.startswith('-')}
+        assert len(widths) == 1
+
+    def test_HTML표_행수(self):
+        html = ds.build_html_table(_summary([{'SO_ID': 'SOD-1'}, {'SO_ID': 'SOD-2'}]))
+        assert html.count('<tr>') == 3  # 헤더 + 2행
+
+    def test_HTML표_이스케이프(self):
+        """거래처 비고에 & < 가 들어와도 표가 깨지면 안 된다 (예: 'S&T중공업')"""
+        html = ds.build_html_table(_summary([{'Remarks': 'S&T중공업 <긴급>'}]))
+        assert 'S&amp;T중공업 &lt;긴급&gt;' in html
+        assert '<긴급>' not in html
+
+    def test_HTML표_처리중_강조(self):
+        html = ds.build_html_table(_summary([{'EXW NOAH': dt.time(0, 0)}]))
+        assert ds.DATE_TBD_LABEL in html
+        assert 'color:#c00000' in html
+
+
+class TestLateHighlight:
+    """요청납기를 넘긴 공장 출고일은 빨간색 — 고객이 가장 먼저 봐야 하는 줄"""
+
+    LATE = {'Requested delivery date': dt.datetime(2026, 9, 14),
+            'EXW NOAH': dt.datetime(2026, 10, 22)}
+    ONTIME = {'Requested delivery date': dt.datetime(2026, 10, 22),
+              'EXW NOAH': dt.datetime(2026, 9, 14)}
+
+    @pytest.mark.parametrize('row,expected', [
+        (LATE, True),
+        (ONTIME, False),
+        # 같은 날은 늦은 게 아니다
+        ({'Requested delivery date': dt.datetime(2026, 9, 14),
+          'EXW NOAH': dt.datetime(2026, 9, 14)}, False),
+    ])
+    def test_판정(self, row, expected):
+        s = _summary([row])
+        assert ds.is_late(s.iloc[0]) is expected
+
+    def test_출고일_미정은_판정하지_않는다(self):
+        """모르는 것을 늦었다고 표시하면 안 된다"""
+        s = _summary([{'Requested delivery date': dt.datetime(2026, 1, 1),
+                       'EXW NOAH': dt.time(0, 0)}])
+        assert ds.is_late(s.iloc[0]) is False
+
+    def test_요청납기_없으면_판정하지_않는다(self):
+        s = _summary([{'Requested delivery date': None,
+                       'EXW NOAH': dt.datetime(2026, 10, 22)}])
+        assert ds.is_late(s.iloc[0]) is False
+
+    def test_HTML은_해당_셀만_빨강_굵게(self):
+        html = ds.build_html_table(_summary([self.LATE]))
+        assert 'color:#c00000;font-weight:bold;">2026-10-22' in html
+        # 요청납기 칸은 건드리지 않는다 (문제는 출고일이다)
+        assert 'font-weight:bold;">2026-09-14' not in html
+
+    def test_HTML_정상건은_강조_없음(self):
+        html = ds.build_html_table(_summary([self.ONTIME]))
+        assert 'font-weight:bold' not in html
+
+    def test_평문은_별표와_각주(self):
+        """색을 못 쓰는 대체본도 같은 정보를 담아야 한다"""
+        text = ds.build_text_table(_summary([self.LATE]))
+        assert '2026-10-22 *' in text
+        assert '* 요청 납기일보다 공장 출고 예정일이 늦은 건' in text
+
+    def test_평문_정상건은_각주_없음(self):
+        text = ds.build_text_table(_summary([self.ONTIME]))
+        assert '*' not in text
+
+    def test_빈_요약에도_안_터진다(self):
+        """지금 흐름에선 빈 요약이 메일까지 오지 않지만, 폭 계산이 빈 시퀀스에서 죽으면 안 된다"""
+        empty = _summary([{}]).iloc[0:0]
+        assert ds.build_text_table(empty) == ''
+        html = ds.build_html_table(empty)
+        assert html.count('<tr>') == 1  # 헤더만
+        assert '<td' not in html
+
+
+class TestHtmlBody:
+    """본문 구조 — Outlook은 첫 블록 요소 뒤에 서명을 끼워 넣는다
+
+    그래서 본문 전체가 최상위 블록 **하나** 안에 들어가야 서명이 맨 끝에 붙는다.
+    """
+
+    def test_최상위_블록이_하나다(self):
+        """<body> 바로 아래에 형제 블록이 여러 개면 서명이 그 사이로 들어간다"""
+        html = ds.build_html_body(f'인사말\n\n{ds._HTML_TABLE_TOKEN}\n\n맺음말', '<table>T</table>')
+        inner = html[html.index('<body>') + len('<body>'):html.index('</body>')]
+        assert inner.startswith('<table role="presentation"')
+        assert inner.endswith('</table>')
+        # 래퍼를 벗기면 그 안에 문단·표가 들어 있다
+        assert inner.count('<td ') == 1
+
+    def test_문단이_블록요소로_나온다(self):
+        html = ds.build_html_body(f'인사말\n\n{ds._HTML_TABLE_TOKEN}\n\n맺음말', '<table></table>')
+        assert html.count('<p ') == 2
+        assert '인사말</p>' in html and '맺음말</p>' in html
+
+    def test_표가_문단_사이_제자리에_들어간다(self):
+        html = ds.build_html_body(f'앞\n\n{ds._HTML_TABLE_TOKEN}\n\n뒤', '<table>T</table>')
+        assert html.index('앞') < html.index('<table>T') < html.index('뒤')
+
+    def test_본문_텍스트는_이스케이프된다(self):
+        html = ds.build_html_body('S&T중공업 <긴급>', '')
+        assert 'S&amp;T중공업 &lt;긴급&gt;' in html
+
+    def test_문단_안_줄바꿈은_유지(self):
+        html = ds.build_html_body('첫줄\n둘째줄', '')
+        assert '첫줄<br>둘째줄' in html
+
+    def test_토큰이_남지_않는다(self):
+        html = ds.build_html_body(f'앞\n\n{ds._HTML_TABLE_TOKEN}\n\n뒤', '<table></table>')
+        assert ds._HTML_TABLE_TOKEN not in html
+
+
+class TestMailSummary:
+    """발송 흐름 — 메일 실패가 문서 생성을 뒤엎지 않는다"""
+
+    @pytest.fixture
+    def recipient(self):
+        return Recipient(
+            biz_no='6158188675', customer_name='엔이에스',
+            to=('nes@example.com',), cc=('cc@example.com',),
+        )
+
+    @pytest.fixture
+    def summary(self):
+        return _summary([{}])
+
+    def _opts(self, mode=MailMode.DRAFT):
+        # df_customer가 채워져 있으면 customer_master()가 Excel을 읽지 않는다
+        return MailOptions(mode=mode, df_customer=pd.DataFrame({'x': [1]}))
+
+    def test_메일_꺼져_있으면_아무것도_안_한다(self, summary, tmp_path):
+        with patch.object(ds, 'find_recipient') as finder:
+            assert ds.mail_summary(summary, tmp_path / 'a.xlsx', '1', 'A',
+                                   MailOptions.disabled()) is True
+        finder.assert_not_called()
+
+    def test_수신자_미등록이면_False(self, summary, tmp_path, capsys):
+        with patch.object(ds, 'find_recipient', return_value=None):
+            assert ds.mail_summary(summary, tmp_path / 'a.xlsx', '6158188675', '엔이에스',
+                                   self._opts()) is False
+        assert '수신자 미등록' in capsys.readouterr().out
+
+    def test_설정오류는_문서를_뒤엎지_않는다(self, summary, tmp_path, capsys):
+        with patch.object(ds, 'find_recipient', side_effect=MailConfigError('이메일 컬럼 없음')):
+            assert ds.mail_summary(summary, tmp_path / 'a.xlsx', '1', 'A', self._opts()) is False
+        assert '이메일 컬럼 없음' in capsys.readouterr().out
+
+    def test_확인에서_거부하면_보내지_않는다(self, summary, recipient, tmp_path, capsys):
+        with patch.object(ds, 'find_recipient', return_value=recipient), \
+             patch.object(ds, 'confirm', return_value=False), \
+             patch.object(ds, 'create_document_mail') as sender:
+            assert ds.mail_summary(summary, tmp_path / 'a.xlsx', '1', 'A',
+                                   self._opts(MailMode.ASK)) is False
+        sender.assert_not_called()
+        assert '메일 생략' in capsys.readouterr().out
+
+    def test_수신자를_먼저_보여준다(self, summary, recipient, tmp_path, capsys):
+        """오발송 차단 — 누구에게 나가는지 확인 전에 화면에 찍혀야 한다"""
+        with patch.object(ds, 'find_recipient', return_value=recipient), \
+             patch.object(ds, 'confirm', return_value=False):
+            ds.mail_summary(summary, tmp_path / 'a.xlsx', '1', 'A', self._opts(MailMode.ASK))
+        out = capsys.readouterr().out
+        assert 'nes@example.com' in out and 'cc@example.com' in out
+
+    def test_성공_경로(self, summary, recipient, tmp_path):
+        result = MailResult(success=True, sent=False, recipient=recipient,
+                            attachments=(tmp_path / 'a.xlsx',))
+        with patch.object(ds, 'find_recipient', return_value=recipient), \
+             patch.object(ds, 'create_document_mail', return_value=result) as sender:
+            assert ds.mail_summary(summary, tmp_path / 'a.xlsx', '6158188675', '엔이에스',
+                                   self._opts()) is True
+        kwargs = sender.call_args.kwargs
+        assert kwargs['attach_format'] == ds.DS_MAIL_ATTACH_FORMAT
+        assert kwargs['doc_label'] == '납기현황'
+
+    def test_HTML본문에_토큰이_남지_않는다(self, summary, recipient, tmp_path):
+        """평문을 이스케이프한 뒤 표를 되돌리는데, 순서가 틀리면 토큰이 그대로 나간다"""
+        with patch.object(ds, 'find_recipient', return_value=recipient), \
+             patch.object(ds, 'create_document_mail',
+                          return_value=MailResult(True, False, recipient)) as sender:
+            ds.mail_summary(summary, tmp_path / 'a.xlsx', '1', 'A', self._opts())
+        html = sender.call_args.kwargs['body_html']
+        assert ds._HTML_TABLE_TOKEN not in html
+        assert '<table' in html and '&lt;table' not in html
+
+    def test_본문_치환자가_채워진다(self, summary, recipient, tmp_path):
+        with patch.object(ds, 'find_recipient', return_value=recipient), \
+             patch.object(ds, 'create_document_mail',
+                          return_value=MailResult(True, False, recipient)) as sender:
+            ds.mail_summary(summary, tmp_path / 'a.xlsx', '1', 'A', self._opts())
+        extra = sender.call_args.kwargs['extra']
+        assert extra['count'] == len(summary)
+        assert 'Customer PO' in extra['table']
+
 
 class TestPad:
     """한글은 콘솔에서 2칸을 차지한다 — 글자 수로 패딩하면 열이 어긋난다"""

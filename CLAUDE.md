@@ -45,10 +45,12 @@ python reconcile_so.py P03                # 3월 매출대사 (AX vs NOAH DN)
 python reconcile_so.py P03 -v             # 상세 로그
 
 # 거래처 납기현황 회신 (미출고 조회)
-python delivery_status.py 615-81-88675    # 사업자번호 기준 (하이픈 유무 무관)
+python delivery_status.py 615-81-88675    # 생성 후 "이메일 발송?" y/N 확인 → y면 메일 초안
 python delivery_status.py 엔이에스         # 거래처명 부분일치 (후보 여럿이면 목록 출력)
 python delivery_status.py --list          # 미출고 잔량이 있는 거래처 목록
 python delivery_status.py 615-81-88675 -a # 출고완료 포함 전체
+python delivery_status.py 615-81-88675 --mail     # 확인 없이 메일 초안
+python delivery_status.py 615-81-88675 --no-mail  # 묻지 않고 문서만 (배치용)
 
 # Industry Code 대사 + Sector 검증
 python reconcile_ind.py P03               # Industry code 채움 + Sector 검증
@@ -127,7 +129,8 @@ Reconciliation layer:
 | `noah_gui.py` | tkinter GUI — 문서 생성 7종. 기존 `create_*.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함 |
 | `cli_dist/build_portable_gui.py` | 사내 배포판 빌드 — python-build-standalone 런타임 + 앱 파일 + `설치.bat` → zip. 빌드는 임시 폴더에서(OneDrive 동기화·MAX_PATH 회피), 프로젝트엔 zip만 남김 |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
-| `po_generator/mailer.py` | 거래명세표 메일 발송 — 사업자번호로 `Customer_국내` 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). 새 Outlook은 COM 미지원이라 `auto`가 `.eml`로 전환 |
+| `po_generator/mailer.py` | 고객 메일 발송 — 사업자번호로 `Customer_국내` 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). 새 Outlook은 COM 미지원이라 `auto`가 `.eml`로 전환. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
+| `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`confirm`/`add_mail_arguments`. `create_ts.py`와 `delivery_status.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다) |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
 | `docs/DATA_STRUCTURE_DESIGN.md` | Excel schema (8 sheets), Power Query setup |
 | `docs/POWER_QUERY.md` | Power Query 수식, Power Pivot 관계 — 데이터 소스 구조 이해 시 참고 |
@@ -145,7 +148,7 @@ Reconciliation layer:
 | `dashboard.py` | Streamlit 대시보드 (9페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book/동기화로그, PO미등록감지, PO확정지연, EXW미출고, 납기현황(DN qty매칭+PO EXW보충), 납기캘린더(선적예정 포함), 해외선적(Incoterms/운송방식별), 세금계산서미발행, Order Book 3탭, `_sync_log` 변경이력 조회) |
 | `reconcile_po.py` | PO 매입대사 — 공장 출고(Delivery) vs 회계 GRN 금액 비교. 출력: `대사결과_{period}.xlsx` (6시트), `AX_PO_매핑_{period}.xlsx` (Delivery+AX PO) |
 | `reconcile_so.py` | SO 매출대사 — AX ERP 매출 vs NOAH DN 매출 비교 (국내=출고일, 해외=선적일 기준 월 필터 + FX 환율차이 자동 판별). 출력: `대사결과_SO_{period}.xlsx` (3시트: 대사/상세/범례) |
-| `delivery_status.py` | 거래처 납기현황 회신 — 사업자번호로 `SO_국내` 미출고 조회 → `generated_ds/납기현황_*.xlsx` (납기현황/상세 2시트). **출고 여부는 시트 `Status`가 아니라 `DN_국내` 출고수량으로 직접 계산** (아래 Business Rules 참조) |
+| `delivery_status.py` | 거래처 납기현황 회신 — 사업자번호로 `SO_국내` 미출고 조회 → `generated_ds/납기현황_*.xlsx` (납기현황/상세 2시트) → 메일 발송. **출고 여부는 시트 `Status`가 아니라 `DN_국내` 출고수량으로 직접 계산** (아래 Business Rules 참조) |
 | `reconcile_ind.py` | Industry Code 대사 — (1) Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 → `ind_code_결과_{period}.xlsx`, (2) SO Sector vs 마스터 Category 교차 검증 → `sector_검증.xlsx`. `--sector-only`로 검증만 실행 가능 |
 
 ## Business Rules
@@ -160,7 +163,16 @@ Reconciliation layer:
   `출고수량 없음=미출고 / 주문-출고>0=부분 출고 / 출고일 없음=공장 출고 / 그 외=출고 완료`.
   시트 `Status`는 `Cancelled`/`Hold` 제외에만 쓴다 (취소 건은 DN이 영영 안 생겨 수량으로 구분 불가).
   `dashboard.py: load_so()`, `delivery_status.py`가 같은 규칙을 쓴다
-- 거래명세표 메일: 수신자(To)는 `Customer_국내.사업자번호` ↔ `DN_국내.Business registration number` 조인으로 결정, 고정 참조(CC)는 `user_settings.py: TS_MAIL_CC`. 기본은 **수신자를 보여준 뒤 y/N 확인**(비대화형 실행은 자동 OFF — 배치가 프롬프트에서 멈추지 않게). 메일 실패는 문서 생성 성공을 뒤엎지 않으며, 고객이 섞인 `--merge` 문서는 발송 차단
+- 고객 메일 발송(거래명세표·납기현황 공통): 수신자(To)는 `Customer_국내.사업자번호` 조인으로 결정.
+  기본은 **수신자를 보여준 뒤 y/N 확인**(비대화형 실행은 자동 OFF — 배치가 프롬프트에서 멈추지 않게).
+  메일 실패는 문서 생성 성공을 뒤엎지 않는다
+  - 거래명세표: `DN_국내.Business registration number`로 조인, 고정 참조는 `TS_MAIL_CC`, 첨부 기본 PDF.
+    고객이 섞인 `--merge` 문서는 발송 차단
+  - 납기현황: 조회 기준인 사업자번호를 그대로 사용(항상 단일 거래처라 섞임 없음), 고정 참조는 `DS_MAIL_CC`,
+    첨부 기본 **xlsx**(고객이 정렬·가공해 보는 표라 원본이 쓸모 있다). 본문에 납기 표를 HTML로 싣는다
+- 납기현황 요약 행은 **주문 × 요청납기 × 공장출고일** 단위다. 한 주문 안에서 두 날짜 중 하나라도
+  다르면 행을 나눈다 — 대표값 하나로 접으면 나머지 납기 약속이 회신에서 사라진다.
+  나뉜 행이 비고만으로 구분되지 않을 때만 `(품목: ...)`를 덧붙인다
 
 ## Self-Improvement Loop
 

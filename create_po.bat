@@ -109,6 +109,8 @@ echo.
 echo   사업자등록번호(하이픈 무관) 또는 거래처명 일부를 입력하세요.
 echo   그냥 Enter를 누르면 미출고가 있는 거래처 목록을 보여줍니다.
 echo.
+echo   생성 후 수신자를 보여주고 이메일 발송 여부를 물어봅니다.
+echo.
 
 set "DS_CUSTOMER="
 set /p DS_CUSTOMER="거래처: "
