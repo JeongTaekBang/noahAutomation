@@ -43,6 +43,7 @@ echo   [S] SO 매출대사 (Sales Reconciliation)
 echo   [I] Industry Code 대사
 echo.
 echo   [기타]
+echo   [C] 거래처 납기현황 조회 (미출고 회신용)
 echo   [H] 발주 이력 조회
 echo   [0] 종료
 echo.
@@ -65,6 +66,7 @@ if /i "%CHOICE%"=="R" goto reconcile
 if /i "%CHOICE%"=="S" goto reconcile_so
 if /i "%CHOICE%"=="I" goto reconcile_ind
 
+if /i "%CHOICE%"=="C" goto delivery_status
 if /i "%CHOICE%"=="H" goto view_history
 if "%CHOICE%"=="0" goto end
 echo [오류] 올바른 번호를 입력하세요.
@@ -96,6 +98,36 @@ echo.
 echo ----------------------------------------
 set /p CONTINUE="다른 발주서를 생성하시겠습니까? (Y/N): "
 if /i "%CONTINUE%"=="Y" goto input
+goto menu
+
+:delivery_status
+echo.
+echo ----------------------------------------
+echo   거래처 납기현황 조회
+echo ----------------------------------------
+echo.
+echo   사업자등록번호(하이픈 무관) 또는 거래처명 일부를 입력하세요.
+echo   그냥 Enter를 누르면 미출고가 있는 거래처 목록을 보여줍니다.
+echo.
+
+set "DS_CUSTOMER="
+set /p DS_CUSTOMER="거래처: "
+
+echo.
+REM 괄호 블록 대신 라벨로 분기한다. 거래처명에 '(주)'가 흔한데,
+REM if 괄호블록 안에서 DS_CUSTOMER가 전개되면 괄호 짝이 깨져 배치가 죽는다.
+REM 'if not defined'는 값을 전개하지 않아 특수문자가 섞여도 안전하다.
+if not defined DS_CUSTOMER goto ds_list
+
+"%PYTHON_PATH%" "%~dp0delivery_status.py" "%DS_CUSTOMER%"
+goto ds_done
+
+:ds_list
+"%PYTHON_PATH%" "%~dp0delivery_status.py" --list
+
+:ds_done
+echo.
+pause
 goto menu
 
 :view_history

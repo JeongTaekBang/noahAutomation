@@ -123,6 +123,9 @@ PL_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_pl"
 OC_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "order_confirmation.xlsx"
 OC_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_oc"
 
+# === 거래처 납기현황 회신 설정 (템플릿 없음 — 조회 결과를 새 통합문서로 출력) ===
+DS_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_ds"
+
 
 # === 시트 설정 (NOAH_SO_PO_DN.xlsx) ===
 # 국내 시트

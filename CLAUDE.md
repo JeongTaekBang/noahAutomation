@@ -44,6 +44,12 @@ python reconcile_po.py P03 -v             # 상세 로그
 python reconcile_so.py P03                # 3월 매출대사 (AX vs NOAH DN)
 python reconcile_so.py P03 -v             # 상세 로그
 
+# 거래처 납기현황 회신 (미출고 조회)
+python delivery_status.py 615-81-88675    # 사업자번호 기준 (하이픈 유무 무관)
+python delivery_status.py 엔이에스         # 거래처명 부분일치 (후보 여럿이면 목록 출력)
+python delivery_status.py --list          # 미출고 잔량이 있는 거래처 목록
+python delivery_status.py 615-81-88675 -a # 출고완료 포함 전체
+
 # Industry Code 대사 + Sector 검증
 python reconcile_ind.py P03               # Industry code 채움 + Sector 검증
 python reconcile_ind.py --sector-only     # Sector 검증만 (월 입력 불필요)
@@ -139,6 +145,7 @@ Reconciliation layer:
 | `dashboard.py` | Streamlit 대시보드 (9페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book/동기화로그, PO미등록감지, PO확정지연, EXW미출고, 납기현황(DN qty매칭+PO EXW보충), 납기캘린더(선적예정 포함), 해외선적(Incoterms/운송방식별), 세금계산서미발행, Order Book 3탭, `_sync_log` 변경이력 조회) |
 | `reconcile_po.py` | PO 매입대사 — 공장 출고(Delivery) vs 회계 GRN 금액 비교. 출력: `대사결과_{period}.xlsx` (6시트), `AX_PO_매핑_{period}.xlsx` (Delivery+AX PO) |
 | `reconcile_so.py` | SO 매출대사 — AX ERP 매출 vs NOAH DN 매출 비교 (국내=출고일, 해외=선적일 기준 월 필터 + FX 환율차이 자동 판별). 출력: `대사결과_SO_{period}.xlsx` (3시트: 대사/상세/범례) |
+| `delivery_status.py` | 거래처 납기현황 회신 — 사업자번호로 `SO_국내` 미출고 조회 → `generated_ds/납기현황_*.xlsx` (납기현황/상세 2시트). **출고 여부는 시트 `Status`가 아니라 `DN_국내` 출고수량으로 직접 계산** (아래 Business Rules 참조) |
 | `reconcile_ind.py` | Industry Code 대사 — (1) Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 → `ind_code_결과_{period}.xlsx`, (2) SO Sector vs 마스터 Category 교차 검증 → `sector_검증.xlsx`. `--sector-only`로 검증만 실행 가능 |
 
 ## Business Rules
@@ -147,6 +154,12 @@ Reconciliation layer:
 - DN numbers: `DND-*` = domestic, `DNO-*` = overseas
 - Validation blocks generation unless `--force`: missing required fields, ICO Unit ≤ 0, past delivery date
 - Warnings (non-blocking): delivery within 7 days, duplicate order in history
+- **출고 여부는 `SO_국내.Status`를 읽지 말고 `DN_국내` 출고수량으로 계산한다.** `Status`는 수기 입력이 아니라
+  `XLOOKUP(..., SO_통합[출고완료])` 캐시라서 파워쿼리 새로고침 전에는 실제 출고와 어긋난다
+  (2026-07-29 실측 29행). 판정식은 파워쿼리 `SO_통합[출고완료]`와 동일 —
+  `출고수량 없음=미출고 / 주문-출고>0=부분 출고 / 출고일 없음=공장 출고 / 그 외=출고 완료`.
+  시트 `Status`는 `Cancelled`/`Hold` 제외에만 쓴다 (취소 건은 DN이 영영 안 생겨 수량으로 구분 불가).
+  `dashboard.py: load_so()`, `delivery_status.py`가 같은 규칙을 쓴다
 - 거래명세표 메일: 수신자(To)는 `Customer_국내.사업자번호` ↔ `DN_국내.Business registration number` 조인으로 결정, 고정 참조(CC)는 `user_settings.py: TS_MAIL_CC`. 기본은 **수신자를 보여준 뒤 y/N 확인**(비대화형 실행은 자동 OFF — 배치가 프롬프트에서 멈추지 않게). 메일 실패는 문서 생성 성공을 뒤엎지 않으며, 고객이 섞인 `--merge` 문서는 발송 차단
 
 ## Self-Improvement Loop
