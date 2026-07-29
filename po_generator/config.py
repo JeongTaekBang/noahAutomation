@@ -6,19 +6,70 @@
 사용자 설정은 user_settings.py에서 관리합니다.
 """
 
+import configparser
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Final
 
 
+# === 배포판 설정 파일 (noah_config.ini) ===
+# 개발 PC는 user_settings.py를 쓰고, 배포판은 앱 폴더의 noah_config.ini를 쓴다.
+# ini는 GUI(noah_gui.py) 첫 실행 마법사가 만든다.
+_INI_FILE: Final[Path] = Path(__file__).parent.parent / "noah_config.ini"
+
+# ini 키 → user_settings.py 변수명 (ini에서 지원하는 항목만)
+_INI_KEYS: Final[dict[str, str]] = {
+    'DATA_FOLDER': 'data_folder',
+    'OUTPUT_BASE_DIR': 'output_base_dir',
+}
+
+
+def _read_ini() -> dict[str, str]:
+    """noah_config.ini의 [paths] 섹션 로드 (없으면 빈 dict)"""
+    if not _INI_FILE.exists():
+        return {}
+    # interpolation=None — 경로에 '%'가 있어도 깨지지 않게
+    # utf-8-sig — 메모장으로 저장하면 BOM이 붙는다. BOM이 있으면 첫 섹션 헤더가
+    #             '﻿[paths]'가 되어 섹션을 못 찾고, 설정이 조용히 무시된다.
+    parser = configparser.ConfigParser(interpolation=None)
+    try:
+        parser.read(_INI_FILE, encoding='utf-8-sig')
+    except (configparser.Error, OSError):
+        return {}
+    if not parser.has_section('paths'):
+        return {}
+    return {k: v.strip() for k, v in parser.items('paths') if v.strip()}
+
+
+_INI_VALUES: Final[dict[str, str]] = _read_ini()
+
+_MISSING: Final[object] = object()
+
+
 # === 사용자 설정 로딩 헬퍼 ===
 def _load_user_setting(name: str, default: Any) -> Any:
-    """user_settings.py에서 설정값 로드 (없으면 기본값 반환)"""
+    """설정값 로드
+
+    우선순위: user_settings.py → noah_config.ini → 기본값
+
+    user_settings.py에 이름이 있으면 값이 None이어도 그것이 최종값이다
+    (`OUTPUT_BASE_DIR = None`은 "프로젝트 폴더 사용"이라는 의미 있는 설정).
+    따라서 개발 PC에 ini가 생겨도 기존 동작은 그대로다.
+    배포판에는 user_settings.py가 없어 ini가 쓰인다.
+    """
     try:
         import user_settings
-        return getattr(user_settings, name, default)
+        value = getattr(user_settings, name, _MISSING)
+        if value is not _MISSING:
+            return value
     except ImportError:
-        return default
+        pass
+
+    ini_key = _INI_KEYS.get(name)
+    if ini_key and ini_key in _INI_VALUES:
+        return _INI_VALUES[ini_key]
+
+    return default
 
 
 # === 경로 설정 ===

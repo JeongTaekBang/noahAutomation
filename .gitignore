@@ -102,5 +102,11 @@ htmlcov/
 # Dashboard distribution (packaged exe - too large)
 dashboard_dist/
 
+# 문서 생성기 배포판 — 빌드 산출물만 제외하고 빌드 스크립트는 커밋한다
+cli_dist/*.zip
+
+# 배포판이 만드는 사용자별 설정 (개발 PC에서 GUI를 띄우면 생길 수 있음)
+noah_config.ini
+
 # Test output
 test_output.txt

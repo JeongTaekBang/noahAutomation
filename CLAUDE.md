@@ -52,6 +52,9 @@ python reconcile_ind.py P03 -v            # 상세 로그
 # Dashboard
 streamlit run dashboard.py                # Streamlit 대시보드
 
+# GUI (문서 생성 7종) / 사내 배포판 빌드
+python noah_gui.py                        # tkinter GUI (개발 PC에서도 그대로 실행)
+python cli_dist/build_portable_gui.py     # 배포 zip 빌드 → cli_dist/NOAH_문서생성기_배포.zip
 
 # Tests
 pytest                                    # All tests
@@ -104,6 +107,7 @@ Reconciliation layer:
 - `config.py` — Project constants, paths, sheet names, column aliases, business rules (committed)
 - `user_settings.py` — User-specific paths (DATA_FOLDER, OUTPUT_BASE_DIR), supplier info (git-ignored, copy from `user_settings.example.py`)
 - `local_config.bat` — Local Python/conda path for batch wrapper (git-ignored)
+- `noah_config.ini` — 배포판 경로 설정 (git-ignored, GUI 마법사가 생성). 우선순위는 `user_settings.py` → ini → 기본값이며, **user_settings.py에 이름이 있으면 값이 `None`이어도 그것이 최종값**이다 (`OUTPUT_BASE_DIR = None`을 ini가 덮어쓰면 개발 PC 출력 위치가 조용히 바뀌므로)
 
 ## Key Files
 
@@ -114,6 +118,9 @@ Reconciliation layer:
 | `po_generator/validators.py` | Required field checks, ICO Unit > 0, delivery date validation |
 | `po_generator/services/document_service.py` | Orchestrator: find → validate → generate → save |
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
+| `noah_gui.py` | tkinter GUI — 문서 생성 7종. 기존 `create_*.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함 |
+| `cli_dist/build_portable_gui.py` | 사내 배포판 빌드 — python-build-standalone 런타임 + 앱 파일 + `설치.bat` → zip. 빌드는 임시 폴더에서(OneDrive 동기화·MAX_PATH 회피), 프로젝트엔 zip만 남김 |
+| `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
 | `po_generator/mailer.py` | 거래명세표 메일 발송 — 사업자번호로 `Customer_국내` 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). 새 Outlook은 COM 미지원이라 `auto`가 `.eml`로 전환 |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
 | `docs/DATA_STRUCTURE_DESIGN.md` | Excel schema (8 sheets), Power Query setup |

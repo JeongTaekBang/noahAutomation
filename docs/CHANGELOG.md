@@ -20,6 +20,43 @@
 
 ---
 
+## 2026-07-28: GUI 사내 배포판 (문서 생성 7종)
+
+### 배경
+문서 생성이 `create_po.bat` → `%PYTHON_PATH% create_*.py` 구조라 개발 PC에서만 동작.
+다른 담당자가 쓰려면 conda 환경 구성 + `user_settings.py` 작성 + `local_config.bat` 설정을 직접 해야 했다.
+Python 런타임까지 담은 무설치 배포판 + tkinter GUI로 "압축 풀고 설치.bat 더블클릭"까지 낮춘다.
+
+### 구현
+- `noah_gui.py` (신규) — tkinter 창 하나. 문서 종류 라디오 7종 → ID 멀티라인 입력 → 옵션 체크 → 실시간 로그
+  - **GUI는 문서를 직접 만들지 않는다.** 기존 `create_*.py`를 자식 프로세스로 실행하고 stdout을 화면에 흘린다.
+    덕분에 CLI 7개 파일을 한 줄도 고치지 않았고, Excel COM이 자식에 격리되어 COM 오류가 창을 죽이지 않는다
+  - 대화형 프롬프트 → 위젯 대응: 월합 `--merge`, 메일 초안 `--mail`, FI 발주번호 기준 `--po`, 검증 무시 `--force`
+  - 데이터 파일 지정 마법사 — OneDrive 자동 탐색(3초 제한) → 파일 선택 → `zipfile`로 시트 검증 → ini 기록
+- `po_generator/config.py` — `noah_config.ini` 폴백 추가.
+  우선순위는 `user_settings.py` → ini → 기본값이며, **user_settings.py에 이름이 있으면 값이 `None`이어도 그것이 최종값**.
+  `OUTPUT_BASE_DIR = None`(프로젝트 폴더 사용)을 ini가 덮어쓰면 개발 PC의 출력 위치가 조용히 바뀌기 때문
+- `cli_dist/build_portable_gui.py` (신규) — 배포 zip 빌드. `cli_dist/requirements.txt`로 버전 고정
+- `설치.bat` — `%LOCALAPPDATA%`로 복사 + 바탕화면 바로가기. `/XF noah_config.ini`로 업데이트 시 사용자 설정 보존
+
+### 빌드에서 확인한 것들
+- **임베디드 Python에는 tkinter가 없다** (`_tkinter.pyd`·`tcl/`·`Lib/tkinter` 전부 부재). NuGet CPython에도 없음(1773 엔트리 중 0건).
+  → tkinter·pythonw·pip을 모두 포함하는 python-build-standalone 배포본 사용
+- **빌드는 임시 폴더에서 한다** — (1) 프로젝트 폴더가 OneDrive 안이라 런타임 파일 9천 개가 동기화되고,
+  (2) 경로가 길어 `python/Lib/site-packages/...`에서 MAX_PATH(260자)를 넘겨 pip이 실패한다(실측). 프로젝트에는 zip 하나만 남긴다
+- 배포 크기: 트리밍(pdb·pandas/tests·idlelib) 후 191MB → zip 70MB
+- 검증: 배포판 런타임에서 Excel COM 왕복 + 실제 PI 1건 생성(10 아이템, 37KB) 성공
+
+### 버그 수정
+- **BOM이 붙은 `noah_config.ini`를 조용히 무시** — 메모장으로 편집·저장하면 UTF-8 BOM이 붙어
+  첫 섹션 헤더가 `﻿[paths]`가 되고 설정 전체가 버려졌다. `utf-8-sig`로 읽도록 수정 (배포판 검증 중 발견)
+
+### 배포 범위
+문서 생성 7종(PO/TS/PI/FI/OC/CI/PL)만. DB 동기화·월마감·대시보드·대사(8/9/D/R/S/I)는 제외.
+`create_po.bat` 콘솔 메뉴는 개발 PC용으로 그대로 유지.
+
+---
+
 ## 2026-07-27: 거래명세표 Outlook 메일 발송 (기본 y/N 확인)
 
 ### 배경
