@@ -58,7 +58,9 @@ from po_generator.mail_cli import (  # noqa: F401  (재노출)
     MailOptions,
     add_mail_arguments,
     confirm as _confirm,
+    report_mail_result,
     resolve_mail_mode,
+    show_recipient,
 )
 from po_generator.services import DocumentService, GenerationStatus
 
@@ -169,9 +171,7 @@ def _mail_ts(
     customer_po = _collect_customer_po(order_data, items_df)
 
     # 누구에게 나가는지 먼저 보여주고 확인받는다 (오발송 차단)
-    print(f"  받는사람: {recipient.to_line}")
-    if recipient.cc:
-        print(f"  참조    : {recipient.cc_line}")
+    show_recipient(recipient)
     print(f"  발주번호: {customer_po}")
 
     if opts.ask and not _confirm("  이메일을 발송하시겠습니까? [y/N]: "):
@@ -192,19 +192,7 @@ def _mail_ts(
         print(f"  [메일 오류] {e}")
         return False
 
-    if result.success:
-        attach_names = ', '.join(p.name for p in result.attachments)
-        if result.sent:
-            verb = "메일 발송 완료"
-        else:
-            verb = "메일 초안 생성 (메일 창에서 [보내기] 확인)"
-        print(f"  -> {verb}: {attach_names}")
-        if opts.send and not result.sent:
-            print("     [주의] 자동 발송이 안 되는 방식이라 초안까지만 진행했습니다.")
-        return True
-
-    print(f"  [메일 실패] {result.message}")
-    return False
+    return report_mail_result(result, want_send=opts.send)
 
 
 def detect_id_type(doc_id: str) -> str:

@@ -28,9 +28,11 @@
 
 분할 납기
 ---------
-한 주문 안에서 `EXW NOAH`가 갈리면 **날짜별로 행을 나눕니다.** 실제로 흔합니다
-(`SOD-2026-0264`는 32라인이 7개 날짜에 걸쳐 2027년까지). 나뉜 주문은 같은 Customer PO가
-여러 줄로 보이므로, 어느 품목이 어느 날짜인지 비고에 품목명을 덧붙입니다.
+한 주문 안에서 요청납기(`Requested delivery date`)나 출고 예정일(`EXW NOAH`)이 갈리면
+**날짜별로 행을 나눕니다.** 대표 날짜 하나로 접으면 나머지 납기 약속이 회신에서 사라집니다.
+실제로 흔합니다 (`SOD-2026-0264`는 32라인이 7개 출고일에 걸쳐 2027년까지).
+나뉜 주문은 같은 Customer PO가 여러 줄로 보이므로, **비고만으로 구분이 안 될 때만**
+품목명을 덧붙입니다.
 
 메일 회신
 ---------
@@ -60,6 +62,7 @@ import warnings
 from html import escape as html_escape
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
@@ -81,7 +84,9 @@ from po_generator.mail_cli import (
     MailOptions,
     add_mail_arguments,
     confirm,
+    report_mail_result,
     resolve_mail_mode,
+    show_recipient,
 )
 from po_generator.mailer import (
     MailConfigError,
@@ -179,8 +184,6 @@ def format_date(value) -> str:
     return ts.strftime('%Y-%m-%d') if ts is not None else ''
 
 
-
-
 def _clean_text(value) -> str:
     """셀 값 → 표시용 문자열 (NaN/None은 빈 문자열)"""
     if value is None or (isinstance(value, float) and pd.isna(value)):
@@ -239,7 +242,6 @@ def aggregate_dn(dn: pd.DataFrame) -> pd.DataFrame:
 
     한 SO 라인을 여러 번에 나눠 출고(분할 납품)하면 DN 행이 여러 개이므로 합산한다.
     """
-    columns = ['_so_id', '_line', '출고수량', '_last_ship', '_dn_match']
     if dn.empty:
         # dtype을 명시한다 — 빈 프레임을 columns만으로 만들면 전부 object가 되고,
         # merge 뒤 fillna에서 pandas 다운캐스팅 경고가 난다.
@@ -248,7 +250,6 @@ def aggregate_dn(dn: pd.DataFrame) -> pd.DataFrame:
             '_line': pd.Series(dtype='object'),
             '출고수량': pd.Series(dtype='float64'),
             '_last_ship': pd.Series(dtype='datetime64[ns]'),
-            '_dn_match': pd.Series(dtype='object'),
         })
 
     work = pd.DataFrame({
@@ -259,14 +260,10 @@ def aggregate_dn(dn: pd.DataFrame) -> pd.DataFrame:
         # groupby('max')가 object dtype에서 깨지지 않게 한다.
         '_ship_date': pd.to_datetime(dn['출고일'].map(as_date), errors='coerce'),
     })
-    grouped = work.groupby(['_so_id', '_line'], as_index=False).agg(
+    return work.groupby(['_so_id', '_line'], as_index=False).agg(
         출고수량=('출고수량', 'sum'),
         _last_ship=('_ship_date', 'max'),
     )
-    # DN 행의 '존재' 자체를 표시 — 파워쿼리의 `[출고수량] = null` 판정과 맞추기 위해서다.
-    # 수량 0짜리 DN 행이 있으면 '미출고'가 아니라 '부분 출고'가 맞다.
-    grouped['_dn_match'] = True
-    return grouped[columns]
 
 
 def attach_ship_status(so: pd.DataFrame, dn: pd.DataFrame) -> pd.DataFrame:
@@ -291,26 +288,24 @@ def attach_ship_status(so: pd.DataFrame, dn: pd.DataFrame) -> pd.DataFrame:
             SO_DOMESTIC_SHEET, dup,
         )
 
-    work = work.merge(dn_agg, on=['_so_id', '_line'], how='left')
+    # indicator — DN 행의 '존재'로 미출고를 가른다 (파워쿼리의 `[출고수량] = null` 판정과 동일).
+    # 수량 0짜리 DN 행(무상공급)이 있으면 '미출고'가 아니라 '부분 출고'가 맞으므로,
+    # 수량이 아니라 매칭 여부를 봐야 한다.
+    work = work.merge(dn_agg, on=['_so_id', '_line'], how='left', indicator='_dn_match')
+    work['_has_dn'] = work['_dn_match'] == 'both'
+    work = work.drop(columns=['_dn_match'])
     work['출고수량'] = pd.to_numeric(work['출고수량'], errors='coerce').fillna(0.0)
-    # merge 결과의 _dn_match는 True 아니면 NaN이라 notna()가 곧 '매칭됨'이다
-    # (object 컬럼에 fillna(False)를 쓰면 pandas 다운캐스팅 경고가 난다)
-    work['_has_dn'] = work['_dn_match'].notna()
     work['_미출고수량'] = (work['_주문수량'] - work['출고수량']).clip(lower=0.0)
 
-    def _status(row) -> str:
-        if not row['_has_dn']:
-            return '미출고'
-        if row['_주문수량'] - row['출고수량'] > 0.001:
-            return '부분 출고'
-        if pd.isna(row['_last_ship']):
-            return '공장 출고'
-        return '출고 완료'
-
-    # 빈 프레임에 apply(axis=1)을 걸면 Series가 아니라 DataFrame이 돌아와 대입이 깨진다
-    work['_출고상태'] = (
-        work.apply(_status, axis=1) if len(work)
-        else pd.Series(dtype='object', index=work.index)
+    # 판정식은 파워쿼리 `SO_통합[출고완료]`와 동일 (모듈 docstring 참조) — 위에서부터 첫 일치
+    work['_출고상태'] = np.select(
+        [
+            ~work['_has_dn'],
+            work['_주문수량'] - work['출고수량'] > 0.001,
+            work['_last_ship'].isna(),
+        ],
+        ['미출고', '부분 출고', '공장 출고'],
+        default='출고 완료',
     )
     work['_미출고금액'] = work['_단가'] * work['_미출고수량']
     return work
@@ -610,30 +605,30 @@ def write_output(
 
 
 def print_summary(summary: pd.DataFrame, customer_name: str, biz_no: str) -> None:
-    """콘솔 요약 출력"""
+    """콘솔 요약 출력 — 메일 평문 본문과 **같은 표**를 쓴다
+
+    보내기 전에 화면에서 확인하는 표가 실제로 나가는 표와 다르면 확인이 확인이 아니다.
+    (예전엔 콘솔 전용 표가 따로 있어 요청납기·지연 표식이 화면에서 안 보였다)
+    """
     print()
     print(f"납기현황 — {customer_name} ({format_biz_no(biz_no)})")
-    print("=" * 88)
 
     if summary.empty:
         print("  미출고 건이 없습니다.")
         return
 
-    print(f"  {_pad('Customer PO', 22)} {_pad('Remarks', 32)} {'수량':>6} {_pad('출고 예정일', 13)} {'Sales 금액':>14}")
-    print("  " + "-" * 86)
-    for _, row in summary.iterrows():
-        print(
-            f"  {_pad(row['Customer PO'], 22)} {_pad(row['Remarks'], 32)} {row['수량']:>6,.0f} "
-            f"{_pad(row[COL_EXW], 13)} {row['Sales 금액']:>14,.0f}"
-        )
-    print("  " + "-" * 86)
+    table_lines = build_text_table(summary).splitlines()
+    print("=" * (_display_width(table_lines[0]) + 2))
+    for line in table_lines:
+        print(f"  {line}")
+    print()
     print(
-        f"  {_pad('합계', 22)} {_pad('', 32)} {summary['수량'].sum():>6,.0f} "
-        f"{_pad('', 13)} {summary['Sales 금액'].sum():>14,.0f}"
+        f"  합계 {len(summary)}건 / 수량 {summary['수량'].sum():,.0f} / "
+        f"Sales 금액 {summary['Sales 금액'].sum():,.0f}"
     )
     tbd = int((summary[COL_EXW] == DATE_TBD_LABEL).sum())
     if tbd:
-        print(f"\n  출고 예정일 미정({DATE_TBD_LABEL}): {tbd}건 — EXW NOAH가 비어 있습니다.")
+        print(f"  출고 예정일 미정({DATE_TBD_LABEL}): {tbd}건 — EXW NOAH가 비어 있습니다.")
 
 
 def print_customer_list(listing: pd.DataFrame) -> None:
@@ -852,9 +847,7 @@ def mail_summary(
 
     # 누구에게 나가는지 먼저 보여주고 확인받는다 (오발송 차단)
     print()
-    print(f"  받는사람: {recipient.to_line}")
-    if recipient.cc:
-        print(f"  참조    : {recipient.cc_line}")
+    show_recipient(recipient)
     print(f"  내용    : 미출고 {len(summary)}건 / 첨부 {output_file.name}")
 
     if opts.ask and not confirm("  이메일을 발송하시겠습니까? [y/N]: "):
@@ -897,16 +890,7 @@ def mail_summary(
         print(f"  [메일 오류] {e}")
         return False
 
-    if result.success:
-        attach_names = ', '.join(p.name for p in result.attachments)
-        verb = "메일 발송 완료" if result.sent else "메일 초안 생성 (메일 창에서 [보내기] 확인)"
-        print(f"  -> {verb}: {attach_names}")
-        if opts.send and not result.sent:
-            print("     [주의] 자동 발송이 안 되는 방식이라 초안까지만 진행했습니다.")
-        return True
-
-    print(f"  [메일 실패] {result.message}")
-    return False
+    return report_mail_result(result, want_send=opts.send)
 
 
 def warn_if_stale(stale_count: int) -> None:

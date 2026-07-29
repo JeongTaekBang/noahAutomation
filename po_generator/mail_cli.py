@@ -21,7 +21,7 @@ from enum import Enum
 import pandas as pd
 
 from po_generator.config import CUSTOMER_DOMESTIC_SHEET
-from po_generator.mailer import MailBackend
+from po_generator.mailer import MailBackend, MailResult, Recipient
 from po_generator.utils import load_customer_domestic, resolve_column
 
 
@@ -134,6 +134,39 @@ def resolve_mail_mode(args: argparse.Namespace, is_tty: bool) -> MailMode:
     if args.mail:
         return MailMode.DRAFT
     return MailMode.ASK if is_tty else MailMode.OFF
+
+
+def show_recipient(recipient: Recipient) -> None:
+    """수신자/참조를 화면에 보여준다 — 발송 확인 직전의 오발송 차단 장치
+
+    고객에게 나가는 메일은 항상 사람이 "누구에게"를 눈으로 한 번 본다.
+    CLI마다 이 표시가 갈리면 확인 습관도 갈리므로 한 곳에 둔다.
+    """
+    print(f"  받는사람: {recipient.to_line}")
+    if recipient.cc:
+        print(f"  참조    : {recipient.cc_line}")
+
+
+def report_mail_result(result: MailResult, want_send: bool) -> bool:
+    """메일 생성/발송 결과를 콘솔에 보고
+
+    Args:
+        result: mailer가 돌려준 결과
+        want_send: 사용자가 즉시 발송을 원했는지 (.eml은 초안으로 강등되므로 안내가 필요)
+
+    Returns:
+        성공 여부 (호출부의 반환값으로 그대로 쓴다)
+    """
+    if result.success:
+        attach_names = ', '.join(p.name for p in result.attachments)
+        verb = "메일 발송 완료" if result.sent else "메일 초안 생성 (메일 창에서 [보내기] 확인)"
+        print(f"  -> {verb}: {attach_names}")
+        if want_send and not result.sent:
+            print("     [주의] 자동 발송이 안 되는 방식이라 초안까지만 진행했습니다.")
+        return True
+
+    print(f"  [메일 실패] {result.message}")
+    return False
 
 
 def add_mail_arguments(parser: argparse.ArgumentParser, doc_label: str) -> None:
