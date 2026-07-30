@@ -1,11 +1,17 @@
 -- ═══════════════════════════════════════════════════════════════
 -- Order Book (수주잔고 이벤트 기반 원장)
--- 이벤트 기반: SO 등록(Input), DN 출고(Output) 발생 월만 행 생성
+-- 이벤트 기반: SO 등록(Input), DN 매출(Output) 발생 월만 행 생성
 -- DB Browser for SQLite > Execute SQL 탭에서 실행
 -- ═══════════════════════════════════════════════════════════════
--- 동작: SO(수주) Input + DN(출고) Output 이벤트 → 롤링 잔고 계산
+-- 동작: SO(수주) Input + DN(매출) Output 이벤트 → 롤링 잔고 계산
 -- 빈 월(활동 없는 월)은 행을 생성하지 않음
--- 전제: sync_db.py로 동기화된 noah_data.db 사용
+-- 전제: sync_db.py로 동기화된 noah_data.db 사용 (fx 테이블 + v_dn_revenue 뷰 포함)
+--
+-- Output 귀속월/금액은 `v_dn_revenue` 뷰가 단일 정의한다 (db_schema.py):
+--   국내 = 세금계산서 발행월 (N/A=발행불필요면 출고월, 선수금+출고면 출고월)
+--   해외 = 선적월, KRW는 선적월 환율로 재환산
+-- Variance = 환율 재평가분(재환산액 − 시트 KRW) → Ending은 재환산 전과 동일하게 유지된다.
+-- Period 필터 → SUM(Value_Output_amount)는 Excel `AX_매출대사` 같은 월 합계와 일치한다.
 
 WITH
 -- ─── 1. SO 통합 (국내 + 해외, Cancelled·Hold·빈 Period 제외) ───
@@ -55,46 +61,8 @@ so_combined AS (
       AND Period IS NOT NULL AND TRIM(Period) != ''
 ),
 
--- ─── 2. DN 통합 (출고월 계산: 국내=출고일, 해외=선적일) ───
-dn_combined AS (
-    SELECT
-        SO_ID,
-        CAST([Line item] AS INTEGER) AS [Line item],
-        CAST(Qty AS REAL)            AS Qty,
-        ROUND(CAST([Total Sales] AS REAL)) AS 출고금액,
-        SUBSTR([출고일], 1, 7)        AS 출고월,
-        [Customer name] AS dn_cust, [Item] AS dn_item,
-        [Customer PO] AS dn_po, [Business registration number] AS dn_brn,
-        '국내' AS dn_market
-    FROM dn_domestic
-    WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
-
-    UNION ALL
-
-    SELECT
-        SO_ID,
-        CAST([Line item] AS INTEGER),
-        CAST(Qty AS REAL),
-        ROUND(CAST([Total Sales KRW] AS REAL)),
-        SUBSTR([선적일], 1, 7),
-        [Customer name], [Item], [Customer PO], '', '해외'
-    FROM dn_export
-    WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''
-),
-
--- ─── 3. DN 월별 집계 (분할 출고 대응) ───
-dn_by_month AS (
-    SELECT SO_ID, [Line item], 출고월,
-           SUM(Qty)    AS Output_qty,
-           SUM(출고금액) AS Output_amount,
-           MIN(dn_cust) AS dn_cust, MIN(dn_item) AS dn_item,
-           MIN(dn_po) AS dn_po, MIN(dn_brn) AS dn_brn, MIN(dn_market) AS dn_market
-    FROM dn_combined
-    WHERE 출고월 IS NOT NULL AND 출고월 != ''
-    GROUP BY SO_ID, [Line item], 출고월
-),
-
--- ─── 4. 이벤트 통합 (Input: SO 등록 + Output: DN 출고) ───
+-- ─── 2. 이벤트 통합 (Input: SO 등록 + Output: DN 매출) ───
+-- DN 월별 집계는 v_dn_by_month 뷰 (매출 인식 필터 + 분할 출고 합산의 단일 정의)
 events_line_item AS (
     -- Input: SO 등록 이벤트
     SELECT
@@ -107,12 +75,13 @@ events_line_item AS (
         s.[Item qty]          AS Value_Input_qty,
         s.[Sales amount KRW]  AS Value_Input_amount,
         0 AS Value_Output_qty,
-        0 AS Value_Output_amount
+        0 AS Value_Output_amount,
+        0 AS Value_Variance_amount
     FROM so_combined s
 
     UNION ALL
 
-    -- Output: DN 출고 이벤트 (LEFT JOIN — 취소/누락 SO의 DN도 보존)
+    -- Output: DN 매출 이벤트 (LEFT JOIN — 취소/누락 SO의 DN도 보존)
     SELECT
         dm.SO_ID,
         COALESCE(s.[Customer name], NULLIF(dm.dn_cust, '0'), 'UNKNOWN') AS [Customer name],
@@ -130,15 +99,16 @@ events_line_item AS (
         COALESCE(s.[Industry code], '')         AS [Industry code],
         COALESCE(s.[Expected delivery date], '') AS [Expected delivery date],
         COALESCE(s.구분, dm.dn_market, '')      AS 구분,
-        dm.출고월 AS event_period,
+        dm.매출월 AS event_period,
         0, 0,
         dm.Output_qty,
-        dm.Output_amount
-    FROM dn_by_month dm
+        dm.Output_amount,
+        dm.Output_fx
+    FROM v_dn_by_month dm
     LEFT JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
 ),
 
--- ─── 5. OS name 그룹화 (같은 제품+납기일 합산) ───
+-- ─── 3. OS name 그룹화 (같은 제품+납기일 합산) ───
 os_grouped AS (
     SELECT
         SO_ID, [OS name], [Expected delivery date], event_period AS Period,
@@ -155,12 +125,15 @@ os_grouped AS (
         SUM(Value_Input_qty)     AS Value_Input_qty,
         SUM(Value_Input_amount)  AS Value_Input_amount,
         SUM(Value_Output_qty)    AS Value_Output_qty,
-        SUM(Value_Output_amount) AS Value_Output_amount
+        SUM(Value_Output_amount) AS Value_Output_amount,
+        SUM(Value_Variance_amount) AS Value_Variance_amount
     FROM events_line_item
     GROUP BY SO_ID, [OS name], [Expected delivery date], event_period
 )
 
--- ─── 6. 롤링 계산 (Window function: Start/Ending 전파) ───
+-- ─── 4. 롤링 계산 (Window function: Start/Ending 전파) ───
+-- 금액 Ending = 누적(Input − Output + Variance) — Variance가 환율차를 상쇄하므로
+-- 재환산 도입 전과 같은 값이 나온다 (수량엔 환율 영향이 없어 Variance 없음)
 SELECT
     Period,
     등록Period,
@@ -189,14 +162,14 @@ SELECT
         PARTITION BY SO_ID, [OS name], [Expected delivery date]
         ORDER BY Period ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     ) AS Value_Ending_qty,
-    COALESCE(SUM(Value_Input_amount - Value_Output_amount) OVER (
+    COALESCE(SUM(Value_Input_amount - Value_Output_amount + Value_Variance_amount) OVER (
         PARTITION BY SO_ID, [OS name], [Expected delivery date]
         ORDER BY Period ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
     ), 0) AS Value_Start_amount,
     Value_Input_amount,
     Value_Output_amount,
-    0 AS Value_Variance_amount,
-    SUM(Value_Input_amount - Value_Output_amount) OVER (
+    Value_Variance_amount,
+    SUM(Value_Input_amount - Value_Output_amount + Value_Variance_amount) OVER (
         PARTITION BY SO_ID, [OS name], [Expected delivery date]
         ORDER BY Period ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
     ) AS Value_Ending_amount

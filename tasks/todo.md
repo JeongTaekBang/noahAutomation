@@ -1,4 +1,224 @@
-# Current Tasks — 납기현황 메일 발송 [2026-07-29]
+# Current Tasks — Order Book 환율 임팩트(Value Variance) [2026-07-30]
+
+Order Book Output을 `AX_매출대사`와 같은 기준으로 맞춘다. 두 축이 어긋나 있었다:
+1. **해외 환율** — Output이 DN 시트의 `Total Sales KRW`(수주시점 환율)였다. 매출은 선적월 환율로 인식되므로 재환산하고, 차액을 **Value_Variance_amount**로 흡수한다.
+2. **국내 귀속월** — Output이 출고월이었다. `AX_매출대사`는 세금계산서 발행월이다 → 매출인식월로 통일 (사용자 결정).
+
+**실측 (2026-07-30, 재환산 전 기준)**
+- 해외 P07: Order_book 742,220,578 vs AX_매출대사 789,883,397 → **환율차 47,662,819원**. 누적(P01~P07) 115,496,363원
+- 국내 P07: 465,403,120(출고월) vs 464,170,700(세금계산서월) → 월 밀림. P04 −86.5백만 / P05 +84.4백만이 최대. **누적 순차이는 1,232,420원(미발행 4라인)뿐**
+- 예시 SOO-2026-0188: USD 1,276 · 6월 수주(1,500.036) · 7월 선적(1,548.608) → Input 1,914,046 / Output 1,976,024 / Variance 61,978 → Ending 0
+- 누락 점검: SO 조인 실패·Cancelled/Hold·Period 공란으로 Output이 사라지는 DN 라인 0건. DN_해외 통화 USD/EUR뿐, 선적월 환율 결측 0건
+
+## 설계
+- **Variance = 출고(선적)된 부분의 환율 재평가분**. Input은 수주시점 환율 그대로 → `Ending = Start + Input − Output + Variance`가 **재환산 도입 전과 완전히 동일**하다 (검증: 불일치 0건).
+  덕분에 "Ending ≠ 0 = SO-DN 금액 불일치" 진단이 환율 노이즈에 오염되지 않는다.
+- 재환산은 **DN 라인 단위로 반올림** — `AX_매출대사`와 grain·반올림이 같아야 합계가 원 단위로 일치한다.
+- 환율·외화금액 결측 시 **시트 KRW로 폴백**(Variance 0). Output이 조용히 0이 되는 것을 막는다.
+- 국내 매출인식일 = 세금계산서 발행일 → 없으면 (선수금 세금계산서 있고 출고됐으면) 출고일 → 둘 다 없으면 **매출 미인식 = Backlog에 남긴다**.
+- **SQLite는 `v_dn_revenue` 뷰 하나로 통일** — dn_combined CTE가 6곳(sql 4개 + snapshot.py + dashboard.py)에 복제돼 있어, 그대로 두면 6곳이 갈라진다.
+
+## 구현
+- [x] 1. PQ: FX 언피벗 + 해외 Output 선적월 환율 재환산 + `Value_Variance_amount` 노출
+- [x] 2. PQ: 국내 Output 귀속월 → 매출인식월 (컬럼명 `출고월` → `매출월`)
+- [x] 3. DB: `fx(currency, ym, rate)` 테이블 + FX 시트 언피벗 동기화 (db_schema/db_sync/sync_db)
+- [x] 4. DB: `v_dn_revenue` 뷰 — 매출월·재환산액·fx_variance를 한 곳에서 정의
+- [x] 5. SQL 4종을 뷰 기반으로 교체 + Variance 반영 (order_book / _backlog / _snapshot / _snapshot_backlog)
+- [x] 6. snapshot.py `_ORDER_BOOK_BASE_SQL` + dashboard.py `load_backlog()` 인라인 SQL → 뷰 사용
+- [x] 7. 테스트 — 뷰 산식(재환산·폴백·국내 귀속월), FX 동기화, 원장 항등식 (21건 신설)
+- [x] 8. 문서 — POWER_QUERY.md / CLAUDE.md / CHANGELOG
+- [x] 9. (추가 요청) DN 테이블 PK에 `_row_seq` — 분할출고 중복키 행 보존 + 재적재 로그 억제
+- [x] 10. (커밋 전 리파인) 4관점 병렬 리뷰(재사용/단순화/효율/깊이) → 적용:
+  - `v_dn_by_month` 뷰 추가 — 소비처 6곳의 인식 필터+월별 집계 CTE 복제 제거 (3개 관점 교차 지적)
+  - `load_dn_tax_pending`을 뷰 기반으로 — 'N/A' 의미론이 뷰와 로더 두 곳에 수제 구현되던 것 통합 (신구 결과 동치 실측)
+  - `SYNC_LOG_CHANGE_TYPES`를 db_schema로 — writer만 알던 '재적재'를 대시보드 필터/메트릭/이모지도 인식
+  - `KNOWN_SYNC_SHEETS`를 db_schema로 — FX 특수 케이스가 db_sync 필터 로직에 새던 것 회수
+  - 재적재 시 행별 상세 dict 수집 생략 (2,146건 × 전 컬럼 낭비 + --changes 폭주 방지)
+  - `load_dn` docstring 교정 — "매출 기준"이 아니라 **출고 흐름 기준**임을 명시 (대시보드 매출 KPI를 인식 기준으로 옮길지는 제품 결정으로 보류)
+  - 워터폴 Opening 역산식·figure 생성 단일화, reconcile_so `FX_SHEET` config 공유 + 기준 차이 상호참조, CLAUDE.md 산문 사본 축소, cli_dist 핀 대조 루프 통합
+  - 스킵(판단): M 코드 FX 스테이징 쿼리 공유(자기완결 우선), Value_FX/Variance 명명 통일(원장 계열별 의미 반영), `_sync_fx` 골격 추출(이종 2곳에 간접화 손해), so_combined 뷰화(다음 이음새로 기록만)
+
+## 원칙
+- Ending은 건드리지 않는다 — 환율차는 Variance로만 흐른다 (진단 기능 보존)
+- 같은 산식을 두 번 쓰지 않는다 — DN 매출월/재환산은 `v_dn_revenue` 한 곳
+- 결측(환율·외화금액·세금계산서)은 **0이 아니라 폴백 또는 Backlog 잔류**로 처리 — 매출이 조용히 사라지면 안 된다
+
+## Review
+
+**결과**: P01~P07 × 국내/해외 **14개 조합 전부 `AX_매출대사`와 차이 0원**. `Period` 필터로 `Value_Output_amount`를 합치면 그 달 `매출금액_KRW` 합과 같다.
+
+**Ending 영향은 딱 하나**: 세금계산서 미발행 4라인(SOD-2026-0386, 월합세금계산서 대기)이 Backlog에 남아 국내 **+4개 / +1,232,420원**. 환율 재환산은 Variance가 전부 흡수해 **전 그룹 Ending 불변**(불일치 0건). 해외 Backlog 변동 0.
+
+**작업 중 발견**
+1. **DN 테이블 PK가 분할출고를 삼켰다 → 이 세션에서 수정 완료 (9번)** — `(DN_ID, SO_ID, Line item)`이 겹치는 정상 데이터 2쌍(`DND-2026-0511/SOD-2026-0232/2` Qty 11+12, `DND-2026-0560/SOD-2026-0301/9` Qty 8+212)이 SQLite 동기화에서 1행으로 덮어써져 **6월 국내 매출 18,656,000원 + 수량 19가 누락**돼 있었다. PO와 동일하게 `_row_seq`를 PK에 추가. 결과: SQLite Order Book이 Excel과 14개 조합 전부 일치(2026-06 국내 679,679,520 → 698,335,520), 대시보드 출고상태도 교정(`SOD-2026-0232/2` 부분출고 12/54 → 출고완료 54/54). 고객 발송물·문서 생성 CLI·매출대사는 Excel을 직접 읽어 애초에 정확했다.
+2. **워크북의 Order_book·AX_매출대사 시트가 stale** — 파워쿼리 산출물이라 새로고침 전 값이었다. 그래서 **로직 검증은 시트 값이 아니라 원본에서 재계산해 대조**했다.
+3. **기존 마감 스냅샷(2026-01~06)은 옛 기준** — 새 기준 재계산 시 2026-06 Ending이 50그룹/220,112,337원 달라진다. 그대로 P07을 마감하면 한 번에 Variance로 계상된다. 소급 반영하려면 `--undo` 후 재마감 (회계 판단이라 자동 실행 안 함).
+4. `reconcile_so.py`는 여전히 국내를 출고일 기준으로 월 귀속한다 — Order Book과 기준이 갈렸다. 매출대사 목적상 세금계산서 기준으로 옮길지 별도 판단 필요.
+
+**설계 판단 기록**
+- **'N/A' 세금계산서 = 발행 불필요**(무상공급·FOC·반품)로 보고 출고월에 인식했다. 미인식으로 두면 0원 무상공급 수량 109개가 Backlog에 영구히 남는다. 금액은 0이거나 같은 달 안에서 상쇄되므로 월별 매출 합계는 그대로 → 대사 일치도 유지.
+- **결측은 폴백, 침묵 금지**: 선적월 환율·외화금액이 없으면 시트 KRW 유지(Variance 0). 반대로 FX 시트에서 월 컬럼을 못 찾으면 **에러로 세운다** — fx가 비면 전 건이 조용히 시트 KRW로 떨어져 "틀린 숫자로 잘 도는" 최악이 된다.
+- **뷰로 모은 이유**: 같은 DN 산식이 6곳에 복제돼 있었다. 뷰가 아니면 이번 변경을 6번 복붙해야 하고, 다음 변경에서 갈라진다.
+- **PK 마이그레이션 로그는 억제**: 재적재 2,146행을 '신규'로 남기면 변경 이력이 가짜 데이터 유입으로 보인다. `pk_migrated` 플래그로 '재적재' 1건만 기록 — 기존 재키잉 억제와 같은 취지(로그는 **무슨 일이 일어났는지**를 말해야 한다).
+- SQLite `ROUND`(올림)와 PQ `Number.Round`(짝수 반올림)가 .5인 2라인에서 갈려 월 최대 ±1원. `AX_매출대사` 일치가 목적이라 Excel 기준 유지.
+
+---
+
+# 완료: cli_dist 전면 정비 [2026-07-30]
+
+배포판 빌드의 재현성·크기·버전 정체성·설치 스크립트를 한 번에 정비한다.
+사용자 선택 기능: 버전 스탬프 + 런타임 다이어트 + 제거.bat (업데이트 알림은 제외).
+
+**발견한 문제** (계획 단계 실측)
+- transitive 미고정: 배포판 numpy 2.4.6 vs 개발 env 2.4.3 — "테스트한 그대로"가 거짓
+- 설치.bat robocopy `/R /W` 부재 → 기본 재시도 100만×30초 — 앱 켠 채 업데이트하면 무한 대기
+- 런타임 미사용 ~60MB (pip 12.7 + pythonwin 10.9 + setuptools 9 + numpy tests 16.9 + ...)
+- 버전 정체성 전무 — GUI·zip·README 어디에도 없음
+
+## 구현
+- [x] 1. requirements.txt — transitive 6종 핀 추가 (개발 env 기준)
+- [x] 2. 핀 3자 대조 — parse_pins/canon(PEP 503) + 배포 런타임·개발 env 대조, 어긋나면 실패
+- [x] 3. 트리밍 확장 + 디렉터리 분기 (기존 루프는 파일만 지웠다)
+- [x] 4. verify() — BUILD_INFO 검사 + CLI 8종 `--help` 전수 스모크
+- [x] 5. 버전 스탬프 — compute_version(날짜+sha[.dirty]) → BUILD_INFO.txt → GUI 타이틀
+- [x] 6. 설치.bat `/R:1 /W:1` + 실행 중 안내 / 제거.bat 신설 (%TEMP% 자기복사 + start)
+- [x] 7. 테스트 — read_build_info 3종 / parse_pins·canon 4종 (30개)
+- [x] 8. 문서 — CLAUDE.md / CHANGELOG / README.txt(버전·제거 섹션)
+- [x] 9. 전체 빌드 + 검증 (드리프트 통과, 트리밍 167MB, zip 47MB, 스테이징 CLI 실행)
+- [x] 10. 설치/제거 왕복 — 설치 → 바로가기·버전 확인 → 켠 채 재설치(안내 확인) → 제거
+
+## 원칙
+- 모듈 최상위는 상수·함수 정의만 — 테스트가 경로로 로드한다 (로드가 빌드를 돌리면 안 됨)
+- 트리밍은 "repo grep 0건" 확인분만, 안전은 verify가 증명한다 (전수 --help)
+- 제거는 안내 우선 — taskkill 금지 (개발 PC의 무관한 python까지 잡는다)
+
+## Review
+
+계획 항목은 전부 계획대로 갔고, **왕복 테스트가 계획에 없던 잠복 버그를 잡았다** —
+이게 이번 작업의 최대 수확이다.
+
+**설치.bat 바로가기가 이 PC에서 처음부터 생성 실패하고 있었다.** 회사 PC 시스템 로캘이
+en-US(CP1252)라 WScript.Shell(WshShortcut)이 한글 경로("바탕 화면" KFM 경로, 바로가기
+이름)를 ANSI 변환에서 `?`로 뭉갠다. 두 단계로 파고들었다:
+1. 처음엔 PowerShell 5.1의 chcp 65001 인자 뭉갬으로 보고 `-EncodedCommand`(base64)로
+   고쳤다 → 스크립트 원문은 온전히 도착했는데 **COM 안에서 다시 깨졌다**
+2. 격리 테스트(도구 PS에서 직접 실행)로 로캘 문제임을 확정 → WScript.Shell 자체를 버리고
+   동봉 python의 pywin32 `IShellLinkW`로 교체 (`_make_shortcut.py`, 전 구간 유니코드).
+   `win32com.shell` import를 verify()에 추가해 트리밍으로부터 보호 —
+   win32comext를 "보수적으로 유지"했던 결정이 여기서 값을 했다
+
+2026-07-28 최초 배포판 구축 때 "남은 것: 타 PC 검증"으로 미뤄둔 설치 경로가
+한 번도 실제로 돌지 않았던 것 — **생성 코드가 아니라 설치 스크립트도 실행 검증 대상**이다.
+
+수치:
+- zip **70MB → 47MB** (압축 전 190→135MB, 파일 9,248→5,936), 트리밍 112→167MB
+- 핀 10개 3자 대조 통과 (numpy 2.4.6 표류 → 2.4.3 고정 확인, BUILD_INFO에 기록)
+- verify: 런타임 import + DOC_TYPES·BUILD_INFO 대조 + CLI 8종 --help 전수 통과
+- 스테이징 런타임으로 납기현황 실데이터 2건(목록/거래처) 생성 확인
+- 설치/제거 왕복: 바로가기 생성·대상 판독(IShellLinkW) → 켠 채 재설치 **1초 실패+안내**
+  (기존 robocopy 기본값이면 사실상 무한 대기) → 제거 후 폴더·바로가기 소멸 확인
+- `pytest tests/` — 533 passed, 2 skipped
+
+테스트 하네스 함정 둘 (다음에 또 만난다):
+- PowerShell `Set-Location`은 자식 프로세스 CWD에 반영 안 됨 — cmd /c에 상대경로 bat을
+  주면 엉뚱한 데서 찾는다. 절대경로로 넘길 것
+- `Start-Process -ArgumentList '-c','import time; ...'`는 인용이 풀려 python이 즉사 —
+  코드 전체를 한 문자열로 (`'-c "import ..."'`)
+
+남은 것: 타 PC(설치 대상 PC)에서 설치.bat → 문서 1건 → 제거.bat 왕복 1회.
+이 PC 검증으로 로캘·KFM 계열은 잡았지만, 받는 쪽 환경 고유 변수(권한, AV)는 남아 있다.
+
+### 후속 (같은 날): 사용자 설치 테스트가 잡은 두 번째 회귀 — 메일 초안이 클래식 Outlook으로
+
+사용자가 배포판에서 TS 메일 초안을 만들자 **클래식(옛) Outlook** 창이 떴다.
+- 개발 PC CLI는 user_settings의 `TS_MAIL_BACKEND='eml'` 고정이라 못 보던 문제 —
+  **배포판엔 user_settings가 없어 auto**가 굴렀고, 그 사이 클래식 Outlook이 설치되며
+  COM이 살아나 auto("COM 되면 COM")가 클래식 창을 띄웠다
+- 7/27 기록엔 COM이 olkexthost 유무 따라 **비결정적**이기까지 했다 — 초안을 COM 가용성에
+  거는 한 실행 시점마다 다른 창이 뜬다. 판정 기준을 환경에서 **용도**로 바꿈:
+  `auto` = 초안 → 항상 .eml (사용자 기본 메일 앱 = 새 Outlook, X-Unsent 편집 초안 실측) /
+  즉시 발송(--send) → COM 가능 시만
+- 프로브 .eml로 새 Outlook 편집 초안 확인 후 적용. user_settings 고정도 auto로 되돌림
+  (배포판과 동일 경로 + --send 시 COM 사용 가능). 회귀 테스트
+  `test_auto_draft_is_eml_even_with_com`
+
+---
+
+# 완료: 배포판 GUI에 납기현황 [2026-07-30]
+
+납기현황 회신을 배포판(`noah_gui.py` + `cli_dist/`)에서도 쓰게 한다.
+직전 계획이 "GUI 편입은 이번 범위 밖"으로 남겨둔 항목이다.
+
+**문제**: `delivery_status.py`가 `APP_FILES`에 없어 zip에 아예 안 들어갔고, GUI에도 항목이 없었다.
+정작 이 기능을 가장 자주 쓸 사람은 Python이 없는 PC에서 배포판을 쓰는 영업 담당자다.
+
+## 설계
+
+납기현황만 성격이 다르다 — **문서 ID가 아니라 거래처로 조회**하고, CLI가 한 곳만 받는다
+(`customer` positional, `nargs='?'`). DOC_TYPES에 `multi` 표식을 두고 GUI가 여러 줄 입력을 막는다.
+그냥 넘기면 argparse가 `unrecognized arguments`로 죽고, 사용자는 이유를 알 수 없다.
+
+`--list`는 `fi_mode`와 같은 라디오 패턴으로. 사업자번호를 모를 때 목록으로 찾고 돌아오는 흐름이라
+체크박스보다 모드가 맞고, 입력란 라벨이 함께 바뀌어야 "입력 불필요"가 보인다.
+
+## 구현
+- [x] 1. `noah_gui.py` — DOC_TYPES에 `ds` 추가 (8번째, 라디오 그리드 4×2로 정확히 참)
+- [x] 2. `noah_gui.py` — `ds_mode` 라디오 / `ds_all`·`mail` 체크박스, `_on_ds_mode` 라벨 갱신
+- [x] 3. `noah_gui.py` — `list_mode_selected()` 추출, 메일 플래그를 "`mail` 옵션이 있는 문서"로 일반화,
+      `multi: False` 문서의 여러 줄 입력 차단
+- [x] 4. `cli_dist/build_portable_gui.py` — `APP_FILES` + README 납기현황 사용법
+- [x] 5. `cli_dist/build_portable_gui.py` — `verify()`를 DOC_TYPES ↔ 복사된 CLI 대조로 승격
+- [x] 6. `tests/test_noah_gui.py` (신규) — 명령 조립 + **DOC_TYPES ⊆ APP_FILES 회귀 테스트**
+- [x] 7. 문서 — `CLAUDE.md` / `docs/CHANGELOG.md`
+- [x] 8. 배포 zip 재빌드 + 배포판 런타임으로 납기현황 실행 검증
+
+## 원칙
+- CLI는 한 줄도 고치지 않는다 — GUI는 인자만 조립한다 (기존 7종과 같은 구조)
+- 배포판에서만 죽는 실패는 만들지 않는다 — 빌드와 테스트 **두 군데**에서 대조한다
+- 고객에게 나가는 메일은 배포판에서도 사람이 [보내기]를 누른다 (`--mail`은 초안까지)
+
+## Review
+
+계획대로 갔다. 코드 변경은 작았고(GUI +60줄, 빌드 +20줄), 정작 값이 있는 건 **대조 장치**다.
+
+구현 후 refine 패스(4각도 리뷰: 재사용/단순화/효율/깊이)에서 다듬은 것:
+- 체크박스 옵션 4종(force/merge/mail/ds_all)이 같은 5줄 블록의 복제 4벌이 됐다 →
+  `CHECKBOX_OPTIONS` 표 + 공용 분기 하나로 (라디오 모드는 기본값·콜백이 달라 코드로 남김)
+- `multi`를 첫 선택 키로 넣었더니 기본값 True가 세 곳에 다시 새겨졌다 → 모든 항목에 명시하고
+  직접 인덱싱. 스키마 균일성 테스트가 고정 레코드 표라는 성질 자체를 지킨다
+- 빌드 `verify()`의 한 줄짜리 `-c` 골프가 `test_doc_scripts_exist`와 같은 판정을 두 벌로 —
+  `noah_gui.missing_scripts()` 하나로 합치고 스니펫은 진짜 여러 줄 스크립트로
+- fi `--po` 분기의 조기 반환이 공유 꼬리(메일 플래그)를 몰래 건너뛰는 구조였다 →
+  fall-through로 바꿔 ds `--list`만 유일한 조기 반환으로
+- `wrap_body_html` 구조 검증이 테스트 두 파일에 마크업 복제로 있었다 → 구조는 mailer 테스트
+  한 곳, 소비처(TS eml·납기현황)는 "래퍼를 그대로 쓴다" 위임 등식만
+- `multi: False`가 CLI `nargs='?'`의 미러인데 원본과 묶는 테스트가 없었다 → GUI가 만든 명령을
+  실제 `create_argument_parser()`에 통과시키는 왕복 테스트 추가
+
+계획에 없던 판단 둘:
+
+1. **`build_command`의 메일 플래그를 일반화.** ts 블록 안에 `--mail`/`--no-mail`이 박혀 있었는데,
+   ds에도 그대로 복사하면 세 번째 메일 문서가 생길 때 또 복사된다.
+   `'mail' in DOC_BY_KEY[doc_key]['options']` 한 줄로 바꿨다 — 옵션 정의가 곧 동작이 된다.
+   (`mail_cli.py`를 만든 것과 같은 이유다. 메일 경로에서 갈라지면 고객에게 티가 난다)
+2. **`verify()`의 자식 환경에 UTF-8 강제.** 파이프로 받는 자식 stdout은 기본이 cp949인데
+   부모는 `encoding="utf-8"`로 읽는다. 새로 넣은 대조 메시지가 깨져 보이면
+   통과/실패를 읽을 수 없으니 검증이 검증이 아니다. `verify_env()`로 두 검증 모두에 적용.
+
+검증:
+- `pytest tests/` — **526 passed, 2 skipped** (신규 24개 포함, 회귀 0). 직전 502 → 526
+- GUI 위젯 트리 — 8종 옵션 패널 전환 / ds 모드 전환 라벨 / 명령 조립 / 출력 폴더 매핑 OK
+- GUI의 subprocess 경로(`stdin=DEVNULL`) 그대로 `--list` 실행 — 종료 0, 메일 프롬프트 안 걸림
+- 빌드 7단계 통과, 새 대조에서 `OK 문서 종류 8 종 — CLI 전부 포함`
+- **배포판 런타임으로 실제 회신표 생성** — 엔이에스 14건 / 1억 8,492만, 요청납기 초과 5건에 `*` 표식
+- zip 70MB (9,248 파일) / `noah_config.ini`·`user_settings.py` 미포함 확인
+
+남은 것: 타 PC에서 `설치.bat` → 납기현황 1건 → 메일 초안까지. 이 PC는 새 Outlook이라
+`.eml` 경로만 확인 가능하고, Outlook COM이 되는 PC에서는 즉시 발송 경로가 다르다.
+
+---
+
+# 완료: 납기현황 메일 발송 [2026-07-29]
 
 납기현황을 만든 뒤 거래명세표(TS)와 같은 방식으로 고객에게 메일 발송한다.
 수신자는 `Customer_국내`(사업자번호 조인), 본문에 표를 넣고 xlsx를 첨부한다.

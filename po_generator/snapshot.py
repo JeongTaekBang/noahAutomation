@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 # order_book.sql의 이벤트 기반 CTE (os_grouped까지)
 # 특정 period의 결과를 누적 SUM 패턴으로 추출
+#
+# Output 귀속월/금액과 환율 재평가분(Value_FX_amount)은 `v_dn_revenue`/`v_dn_by_month`
+# 뷰가 단일 정의한다 (po_generator/db_schema.py). 금액 롤링은 `Input − Output + FX`로
+# 계산해야 선적월 환율 재환산 도입 전과 같은 Ending이 나온다.
 _ORDER_BOOK_BASE_SQL = """
 WITH
 so_combined AS (
@@ -49,31 +53,6 @@ so_combined AS (
     WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
 ),
-dn_combined AS (
-    SELECT SO_ID, CAST([Line item] AS INTEGER) AS [Line item],
-        CAST(Qty AS REAL) AS Qty, ROUND(CAST([Total Sales] AS REAL)) AS 출고금액,
-        SUBSTR([출고일], 1, 7) AS 출고월,
-        [Customer name] AS dn_cust, [Item] AS dn_item,
-        [Customer PO] AS dn_po, [Business registration number] AS dn_brn,
-        '국내' AS dn_market
-    FROM dn_domestic
-    WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
-    UNION ALL
-    SELECT SO_ID, CAST([Line item] AS INTEGER),
-        CAST(Qty AS REAL), ROUND(CAST([Total Sales KRW] AS REAL)),
-        SUBSTR([선적일], 1, 7),
-        [Customer name], [Item], [Customer PO], '', '해외'
-    FROM dn_export
-    WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''
-),
-dn_by_month AS (
-    SELECT SO_ID, [Line item], 출고월,
-        SUM(Qty) AS Output_qty, SUM(출고금액) AS Output_amount,
-        MIN(dn_cust) AS dn_cust, MIN(dn_item) AS dn_item,
-        MIN(dn_po) AS dn_po, MIN(dn_brn) AS dn_brn, MIN(dn_market) AS dn_market
-    FROM dn_combined WHERE 출고월 IS NOT NULL AND 출고월 != ''
-    GROUP BY SO_ID, [Line item], 출고월
-),
 events_line_item AS (
     SELECT s.SO_ID, s.[Customer name], s.[Customer PO], s.[Item name],
         s.[OS name], s.[Line item], s.[Item qty], s.[Sales amount KRW],
@@ -82,7 +61,7 @@ events_line_item AS (
         s.[Expected delivery date], s.구분,
         s.Period AS event_period,
         s.[Item qty] AS Value_Input_qty, s.[Sales amount KRW] AS Value_Input_amount,
-        0 AS Value_Output_qty, 0 AS Value_Output_amount
+        0 AS Value_Output_qty, 0 AS Value_Output_amount, 0 AS Value_FX_amount
     FROM so_combined s
     UNION ALL
     SELECT dm.SO_ID,
@@ -101,8 +80,8 @@ events_line_item AS (
         COALESCE(s.[Industry code], '')         AS [Industry code],
         COALESCE(s.[Expected delivery date], '') AS [Expected delivery date],
         COALESCE(s.구분, dm.dn_market, '')      AS 구분,
-        dm.출고월, 0, 0, dm.Output_qty, dm.Output_amount
-    FROM dn_by_month dm
+        dm.매출월, 0, 0, dm.Output_qty, dm.Output_amount, dm.Output_fx
+    FROM v_dn_by_month dm
     LEFT JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
 ),
 os_grouped AS (
@@ -115,7 +94,8 @@ os_grouped AS (
         GROUP_CONCAT(DISTINCT [AX Period]) AS [AX Period],
         GROUP_CONCAT(DISTINCT [Model code]) AS [Model code],
         SUM(Value_Input_qty) AS Value_Input_qty, SUM(Value_Input_amount) AS Value_Input_amount,
-        SUM(Value_Output_qty) AS Value_Output_qty, SUM(Value_Output_amount) AS Value_Output_amount
+        SUM(Value_Output_qty) AS Value_Output_qty, SUM(Value_Output_amount) AS Value_Output_amount,
+        SUM(Value_FX_amount) AS Value_FX_amount
     FROM events_line_item
     GROUP BY SO_ID, [OS name], [Expected delivery date], event_period
 )
@@ -233,15 +213,16 @@ class SnapshotEngine:
                     SUM(CASE WHEN og.Period = t.p THEN og.Value_Input_amount ELSE 0 END) AS Value_Input_amount,
                     SUM(CASE WHEN og.Period = t.p THEN og.Value_Output_qty ELSE 0 END) AS Value_Output_qty,
                     SUM(CASE WHEN og.Period = t.p THEN og.Value_Output_amount ELSE 0 END) AS Value_Output_amount,
+                    SUM(CASE WHEN og.Period = t.p THEN og.Value_FX_amount ELSE 0 END) AS Value_FX_amount,
                     SUM(CASE WHEN og.Period < t.p THEN og.Value_Input_qty - og.Value_Output_qty ELSE 0 END) AS Value_Start_qty,
-                    SUM(CASE WHEN og.Period < t.p THEN og.Value_Input_amount - og.Value_Output_amount ELSE 0 END) AS Value_Start_amount,
+                    SUM(CASE WHEN og.Period < t.p THEN og.Value_Input_amount - og.Value_Output_amount + og.Value_FX_amount ELSE 0 END) AS Value_Start_amount,
                     SUM(og.Value_Input_qty - og.Value_Output_qty) AS Value_Ending_qty,
-                    SUM(og.Value_Input_amount - og.Value_Output_amount) AS Value_Ending_amount
+                    SUM(og.Value_Input_amount - og.Value_Output_amount + og.Value_FX_amount) AS Value_Ending_amount
                 FROM os_grouped og, target t
                 WHERE og.Period <= t.p
                 GROUP BY og.SO_ID, og.[OS name], og.[Expected delivery date]
                 HAVING ABS(SUM(og.Value_Input_qty - og.Value_Output_qty)) > 0.001
-                    OR ABS(SUM(og.Value_Input_amount - og.Value_Output_amount)) > 0.5
+                    OR ABS(SUM(og.Value_Input_amount - og.Value_Output_amount + og.Value_FX_amount)) > 0.5
                     OR SUM(CASE WHEN og.Period = t.p THEN og.Value_Input_qty + og.Value_Output_qty ELSE 0 END) > 0
             """
             rows = conn.execute(rolling_sql, (period,)).fetchall()
@@ -260,7 +241,7 @@ class SnapshotEngine:
                     SELECT
                         og.SO_ID, og.[OS name], og.[Expected delivery date],
                         SUM(og.Value_Input_qty - og.Value_Output_qty) AS Value_Ending_qty,
-                        SUM(og.Value_Input_amount - og.Value_Output_amount) AS Value_Ending_amount
+                        SUM(og.Value_Input_amount - og.Value_Output_amount + og.Value_FX_amount) AS Value_Ending_amount
                     FROM os_grouped og, target t
                     WHERE og.Period <= t.p
                     GROUP BY og.SO_ID, og.[OS name], og.[Expected delivery date]
@@ -306,12 +287,17 @@ class SnapshotEngine:
                 # Variance를 반영한 Ending 계산
                 # Start = 이전 스냅샷 ending (또는 롤링 Start)
                 # Ending = Start + Input + Variance - Output
+                # Variance = 환율 재평가분(당월 Output에 대한) + 소급 변경분 — AX처럼 한 컬럼에 합산
                 start_qty = r['Value_Start_qty'] or 0
                 start_amt = r['Value_Start_amount'] or 0
                 input_qty = r['Value_Input_qty'] or 0
                 input_amt = r['Value_Input_amount'] or 0
                 output_qty = r['Value_Output_qty'] or 0
                 output_amt = r['Value_Output_amount'] or 0
+                fx_amt = r['Value_FX_amount'] or 0
+                if abs(fx_amt) > 0.5 and key not in variance_map:
+                    variance_count += 1  # 환율 재평가만으로 Variance가 생긴 행
+                var_amt += fx_amt
 
                 if last_closed is not None:
                     # Start는 이전 스냅샷의 ending으로 고정
@@ -321,7 +307,7 @@ class SnapshotEngine:
                     ending_qty = start_qty + input_qty + var_qty - output_qty
                     ending_amt = start_amt + input_amt + var_amt - output_amt
                 else:
-                    # 첫 스냅샷: 롤링 결과 그대로
+                    # 첫 스냅샷: 롤링 결과 그대로 (Start/Ending 모두 환율 재평가 반영됨)
                     ending_qty = r['Value_Ending_qty'] or 0
                     ending_amt = r['Value_Ending_amount'] or 0
 

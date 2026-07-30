@@ -8,6 +8,10 @@ Excel→SQLite 동기화에서, 위치성 키 컬럼(Line item 등)을 비운 �
 
 1. 미완성 행 보류 — _row_seq 외 PK(자연키) 컬럼이 비면 채워질 때까지 동기화 제외
 2. 재키잉 인식 — 같은 sync 안 '내용 동일' 삭제+신규 쌍을 '키변경(수정)' 1건으로 합침
+3. 중복 자연키 보존 — PO/DN은 자연키가 유일하지 않다(분할출고). _row_seq가 없으면
+   뒤 행이 앞 행을 덮어써 매출·수량이 조용히 사라진다
+4. PK 마이그레이션 로그 — PK 정의를 바꿔 전 행을 재적재할 때 수천 건의 가짜 '신규'로
+   변경 이력을 덮지 않는다
 """
 
 import sqlite3
@@ -141,3 +145,92 @@ def test_write_log_records_rekey_as_single_update(tmp_path):
     assert types == ['수정'], f"기대=['수정'] 실제={types}"
     assert 'TEST-1 | 12 | 1' == rows[0][1]
     assert 'Line item' in rows[0][2]
+
+
+# ── 4. 중복 자연키 보존 (분할출고) ────────────────────────────────────────
+
+def _write_dn_sheet(path, rows):
+    """DN_국내 시트 생성. rows = [(line_item, qty, total_sales), ...]"""
+    df = pd.DataFrame([{
+        'DN_ID': 'DND-1', 'SO_ID': 'S1', 'Line item': li,
+        'Item': 'NOS160-MS-FC', 'Qty': qty, 'Total Sales': amt,
+        'Customer name': 'ACME', '출고일': '2026-06-05',
+    } for li, qty, amt in rows])
+    with pd.ExcelWriter(path) as w:
+        df.to_excel(w, sheet_name='DN_국내', index=False)
+
+
+def test_dn_duplicate_natural_key_rows_both_survive(tmp_path):
+    """같은 (DN_ID, SO_ID, Line item)을 두 행으로 나눈 분할출고가 둘 다 남는다.
+
+    실측 사례: DND-2026-0511/SOD-2026-0232/2 가 Qty 11 + 12 두 행이었는데
+    _row_seq 없던 시절 뒤 행이 앞 행을 덮어써 18,656,000원이 사라졌다.
+    """
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    _write_dn_sheet(xlsx, [('2', '11', '18656000'), ('2', '12', '20352000')])
+    r = SyncEngine(xlsx, db).sync_all(sheet_filter=['DN_국내']).results[0]
+    assert r.inserted == 2, f'두 행 모두 들어와야 한다 (실제 {r.inserted})'
+
+    rows = sqlite3.connect(db).execute(
+        'SELECT _row_seq, Qty, [Total Sales] FROM dn_domestic ORDER BY _row_seq'
+    ).fetchall()
+    assert [x[0] for x in rows] == ['1', '2']
+    assert [x[1] for x in rows] == ['11', '12']
+    assert sum(int(x[2]) for x in rows) == 39008000   # 금액 누락 없음
+
+
+def test_dn_export_duplicate_natural_key_rows_both_survive(tmp_path):
+    """DN_해외도 같은 처방 (선적 분할)."""
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    pd.DataFrame([{
+        'DN_ID': 'DNO-1', 'SO_ID': 'S1', 'Line item': '1', 'Item': 'IQ3',
+        'Qty': q, 'Currency': 'USD', 'Total Sales': '100',
+        'Total Sales KRW': '150000', '선적일': '2026-07-21',
+    } for q in ('3', '7')]).to_excel(xlsx, sheet_name='DN_해외', index=False)
+    r = SyncEngine(xlsx, db).sync_all(sheet_filter=['DN_해외']).results[0]
+    assert r.inserted == 2
+    assert sqlite3.connect(db).execute('SELECT COUNT(*) FROM dn_export').fetchone()[0] == 2
+
+
+def test_dn_second_sync_is_unchanged_not_rekeyed(tmp_path):
+    """분할출고 행이 있어도 재동기화는 '동일' — _row_seq가 안정적으로 재부여된다."""
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    _write_dn_sheet(xlsx, [('2', '11', '18656000'), ('2', '12', '20352000')])
+    SyncEngine(xlsx, db).sync_all(sheet_filter=['DN_국내'])
+    r = SyncEngine(xlsx, db).sync_all(sheet_filter=['DN_국내']).results[0]
+    assert (r.inserted, r.updated, r.pruned) == (0, 0, 0)
+    assert r.unchanged == 2
+
+
+# ── 5. PK 마이그레이션 로그 ───────────────────────────────────────────────
+
+def test_pk_migration_logs_single_reload_not_mass_insert(tmp_path):
+    """PK 정의 변경 재적재는 '재적재' 1행만 남긴다 (행별 가짜 '신규' 금지).
+
+    상세가 남아 있어도(엔진이 수집을 건너뛰지만, 방어) 접는지 확인한다.
+    """
+    db = tmp_path / 'log.db'
+    res = SheetSyncResult(sheet_name='DN_국내', table_name='dn_domestic', total_rows=1370)
+    res.pk_migrated = True
+    res.inserted = 1370
+    res.inserted_details = [{'pk': ('D1', 'S1', '1', str(i)), 'values': {'Qty': '11'}}
+                            for i in range(1, 4)]
+    write_sync_log_to_db(SyncSummary(results=[res], started_at='2026-07-30 21:00:00'),
+                         db_path=db)
+    rows = sqlite3.connect(db).execute(
+        'SELECT change_type, pk_display, changes_json FROM _sync_log').fetchall()
+    assert len(rows) == 1, f'1행이어야 한다 (실제 {len(rows)})'
+    assert rows[0][0] == '재적재'
+    assert '1370' in rows[0][2]
+
+
+def test_normal_sync_still_logs_per_row(tmp_path):
+    """마이그레이션이 아니면 종전대로 행별 기록 — 억제가 새다가 감사 이력을 먹지 않는다."""
+    db = tmp_path / 'log.db'
+    res = SheetSyncResult(sheet_name='DN_국내', table_name='dn_domestic', total_rows=2)
+    res.inserted_details = [{'pk': ('D1', 'S1', '1', '1'), 'values': {'Qty': '11'}},
+                            {'pk': ('D1', 'S1', '1', '2'), 'values': {'Qty': '12'}}]
+    write_sync_log_to_db(SyncSummary(results=[res], started_at='2026-07-30 21:00:00'),
+                         db_path=db)
+    rows = sqlite3.connect(db).execute('SELECT change_type FROM _sync_log').fetchall()
+    assert [r[0] for r in rows] == ['신규', '신규']

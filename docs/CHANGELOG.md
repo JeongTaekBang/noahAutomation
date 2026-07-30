@@ -4,6 +4,117 @@
 
 ---
 
+## 2026-07-30: DN 테이블 PK — 분할출고 중복키 행이 조용히 사라지던 버그
+
+### 증상
+Excel `DN_국내`는 1,370행인데 SQLite `dn_domestic`은 **1,368행**. Order Book 환율 작업 중
+Excel↔SQLite 대사에서 **6월 국내 매출 18,656,000원 + 수량 19**가 비어 발견됐다.
+
+### 원인
+동기화 PK가 `(DN_ID, SO_ID, Line item)`이었는데 이 조합이 **유일하지 않다**. 같은 DN 문서·같은
+SO 라인을 두 행으로 나눠 적는 **분할출고가 정상 데이터로 존재**한다. upsert라 뒤 행이 앞 행을
+덮어써 한 행이 소리 없이 사라졌다.
+
+```
+DND-2026-0511 / SOD-2026-0232 / 2   NOS160-MS-FC   Qty 11 (18,656,000) + Qty 12 (20,352,000)
+DND-2026-0560 / SOD-2026-0301 / 9   Eye bolt       Qty 8 + Qty 212 (금액 0)
+```
+
+`PO_국내`/`PO_해외`는 이미 같은 이유로 `_row_seq`를 PK에 넣어 뒀는데 DN은 빠져 있었다.
+
+### 수정
+`dn_domestic`/`dn_export` PK를 `(DN_ID, SO_ID, Line item, _row_seq)`로, PO와 동일한 처방
+(`needs_row_seq=True`, `row_seq_group=(DN_ID, SO_ID, Line item)`).
+
+`migrate_pk_if_changed`가 PK 변경을 감지해 기존 테이블을 `_bak`으로 백업하고 재생성한다.
+재적재는 전 행이 '신규'로 잡히지만 데이터가 들어온 게 아니라 키 체계가 바뀐 것이므로,
+`SheetSyncResult.pk_migrated`를 두고 `write_sync_log_to_db`가 **'재적재' 1건만 기록**한다
+(2,146건의 가짜 '신규'로 변경 이력을 덮지 않는다 — 재키잉 억제와 같은 취지).
+
+### 영향 (개선)
+- SQLite Order Book이 Excel `Order_book`·`AX_매출대사`와 **14개 월×구분 조합 전부 일치**
+  (2026-06 국내 679,679,520 → **698,335,520**)
+- 대시보드 출고 상태 판정 교정: `SOD-2026-0232/2`가 **부분 출고(12/54) → 출고 완료(54/54)**.
+  DN 수량 누계로 판정하는데 한 행이 빠져 미출고로 잡히고 있었다
+- 고객 발송물은 무영향 — `delivery_status.py`·`reconcile_so.py`·문서 생성 CLI는 Excel을
+  직접 읽으므로 애초에 정확했다. SQLite 기반 산출물(대시보드·Order Book·스냅샷)만 달라진다
+
+### 테스트
+`tests/test_db_sync_rekey.py` 5건 추가 — 국내/해외 중복키 보존, 재동기화 시 '동일' 판정,
+재적재 로그 1건 억제, 일반 동기화는 종전대로 행별 기록. 전체 **561 passed / 2 skipped**.
+
+---
+
+## 2026-07-30: Order Book — 환율 임팩트(Value Variance) + 매출 귀속월 통일
+
+### 배경
+Order Book Output이 `AX_매출대사`와 두 축에서 어긋나 있었다.
+
+1. **해외 환율** — Output이 DN 시트의 `Total Sales KRW`(수주시점 환율)였다.
+   예: `SOO-2026-0188` USD 1,276을 6월에 수주(환율 1,500.036)하고 7월에 선적 →
+   매출은 7월 환율(1,548.608)로 인식돼야 하는데 6월 환율 금액이 Output에 잡혔다.
+   P07 해외 기준 **47,662,819원** 차이 (누적 P01~P07 115,496,363원).
+2. **국내 귀속월** — Output이 출고월이었고 `AX_매출대사`는 세금계산서 발행월.
+   금액이 사라지는 게 아니라 월이 밀렸다 (P04 −86.5백만 / P05 +84.4백만).
+
+### 수정
+**Output = 매출 인식 기준으로 통일** (`AX_매출대사`와 동일 산식):
+- 국내 = 세금계산서 발행월 → `N/A`(발행 불필요)면 출고월 → 선수금+출고면 출고월 → 없으면 미인식
+- 해외 = 선적월, KRW는 `외화금액 × 선적월 환율`로 DN 라인 단위 재환산
+
+**Variance = 환율 재평가분** (`재환산액 − 시트 KRW`)을 도입해 `Ending = Start + Input −
+Output + Variance`가 **재환산 전과 완전히 동일**하게 유지된다(불일치 0건 실측).
+환율 노이즈가 Variance로 빠지므로 "Ending ≠ 0 = SO-DN 금액 불일치" 진단이 살아 있다.
+
+### 범위
+- Power Query `Order_Book` (`docs/POWER_QUERY.md`) — FX 언피벗 + 재환산 + Variance,
+  `출고월` → `매출월` 개칭
+- SQLite: `fx(currency, ym, rate)` 테이블 + **`v_dn_revenue` 뷰**. 같은 DN 산식이 6곳
+  (sql 4종 + `snapshot.py` + `dashboard.py`)에 복제돼 있어 뷰 하나로 모았다
+- `FX` 시트 언피벗 동기화(`db_sync._sync_fx`) — 환율 변경을 `_sync_log`에 신규/수정/삭제로 기록.
+  월 컬럼(`YYYY-MM`)을 못 찾으면 **에러로 세운다** (fx가 비면 뷰가 조용히 시트 KRW로 폴백해
+  숫자가 틀린 채 돌아간다)
+- `sql/order_book_snapshot*.sql`·`snapshot.py`는 환율 재평가분을 기존 소급변경 Variance에
+  합산 (AX Order Book처럼 조정분 단일 컬럼)
+
+### 검증 (2026-07-30 실측)
+- **P01~P07 × 국내/해외 14개 조합 전부 `AX_매출대사`와 차이 0원**
+- 귀속월 변경의 Backlog 영향: 국내 **+4개 / +1,232,420원**(월합세금계산서 대기 4라인),
+  해외 변동 없음. 그 외 전 그룹 Ending 동일
+- 결측 방어: 선적월 환율·외화금액이 없으면 시트 KRW 폴백(Variance 0) → Output이 0으로
+  사라지지 않는다
+- 테스트 21건 신설 (`tests/test_order_book_fx.py`), 전체 556 passed / 2 skipped
+
+### 알려진 잔여 차이
+- **DN 테이블 PK**: `(DN_ID, SO_ID, Line item)`이 겹치는 정상 분할출고 2행이 SQLite에서
+  조용히 1행으로 덮어써진다 → SQLite 쪽 6월 국내가 18,656,000원 적다. Excel Order_book은
+  정상. PO 테이블처럼 `_row_seq`를 PK에 넣어야 하는 별건 이슈
+  **(→ 당일 후속 작업으로 해결 — 위 "DN 테이블 PK" 항목 참조)**
+- Power Query `Number.Round`(짝수 반올림)와 SQLite `ROUND`(올림)가 정확히 .5인 2라인에서
+  갈려 월 합계 최대 ±1원 차이. `AX_매출대사` 일치가 목적이라 Excel 기준 유지
+
+---
+
+## 2026-07-30: 메일 auto 백엔드 — 초안은 .eml, 즉시 발송만 COM
+
+### 배경
+배포판 GUI 테스트에서 거래명세표 메일 초안이 **클래식(옛) Outlook** 창으로 떴다.
+원인: `auto` 판정이 "COM 되면 COM"이었는데, 이 PC에 클래식 Outlook이 설치·구성되면서
+(7/29까지는 없어서 `.eml` 경로였음) COM이 살아났고, COM은 항상 클래식 창을 띄운다.
+사용자가 평소 쓰는 건 새 Outlook — 초안이 낯선 옛 창으로 뜨는 회귀.
+
+### 수정 (`mailer.resolve_backend`)
+`auto`의 의미를 용도별로 분리:
+- **초안** → 항상 `.eml`. OS 연결 프로그램을 따르므로 그 자체가 "사용자가 평소 쓰는
+  메일 앱"이다. 새 Outlook이 X-Unsent `.eml`을 편집 가능한 초안으로 여는 것 실측 확인
+- **즉시 발송(--send)** → COM 가능할 때만 OUTLOOK (창 없이 보내는 유일한 방법),
+  없으면 `.eml` 초안으로 강등 + 안내 (기존과 동일)
+
+명시 설정(`TS_MAIL_BACKEND='outlook'|'eml'`)은 여전히 auto 규칙보다 우선.
+회귀 테스트: `test_auto_draft_is_eml_even_with_com` (COM이 있어도 초안은 .eml).
+
+---
+
 ## TODO (미완료 항목)
 
 ### 템플릿 확장
@@ -17,6 +128,102 @@
 - [x] NOAH_SO_PO_DN.xlsx → SQLite DB 동기화 구현 완료 ✓
   - **배경**: Excel 형식의 데이터 유실/변형 취약점 → SQLite 백업
   - DuckDB 분석 연동은 추후 확장 예정
+
+---
+
+## 2026-07-30: cli_dist 전면 정비 (재현성·다이어트·버전·제거)
+
+### 배경
+배포판 빌드를 점검하니 네 가지가 나왔다. ① 직접 의존성 4개만 핀이라 transitive가
+빌드마다 떠다녔다(배포판 numpy 2.4.6 vs 개발 env 2.4.3 실측 — "여기서 테스트한 그대로"가
+거짓). ② 설치.bat의 robocopy에 `/R /W`가 없어 기본값(재시도 100만×30초) — 앱 실행 중
+업데이트하면 무한 대기로 보인다. ③ pip·pythonwin(IDE)·numpy tests 등 런타임 미사용
+~60MB가 실려 나갔다. ④ 버전 정체성이 없어 "어느 빌드 쓰세요?" 문의에 답할 수 없었다.
+
+### 구현 (cli_dist/build_portable_gui.py, requirements.txt, noah_gui.py)
+- **핀 3자 대조**: requirements.txt에 transitive까지 전부 `==` 고정(개발 env 기준).
+  빌드가 핀 = 배포 런타임 설치본 = 개발 env를 대조하고 하나라도 어긋나면 실패
+  (PEP 503 정규화로 `et_xmlfile`/`et-xmlfile` 표기 차이 흡수, `parse_pins`는 `>=` 거부)
+- **트리밍 확장**: pip/setuptools(+`distutils-precedence.pth`·`_distutils_hack` 세트 —
+  고아 .pth는 매 실행 stderr 오류), pythonwin, numpy tests·distutils·f2py, ensurepip,
+  Scripts, tix, include, 지운 패키지의 dist-info(유령 패키지 보고 방지).
+  트림 루프에 디렉터리 분기 추가 (기존은 파일만 지웠다)
+- **CLI 전수 스모크**: verify()가 8종 CLI를 `--help`로 실행 — 트리밍/의존성 문제가
+  받는 사람 PC가 아니라 빌드에서 터지게
+- **버전 스탬프**: `날짜+git sha[.dirty]` (예: 2026.07.30+326b87e) → `BUILD_INFO.txt`
+  (기계가 읽는 건 `version:` 줄 하나 — `noah_gui.read_build_info`), GUI 타이틀·설치.bat
+  헤더·README에 표시
+- **설치.bat**: `/R:1 /W:1` + 실패 시 "실행 중이면 닫고" 안내
+- **제거.bat 신설**: 설치 폴더+바탕화면 바로가기 삭제. 자기 자신이 삭제 대상 안에 있어
+  `%TEMP%` 복사 후 `start`(비동기 — `call`이면 부모 cmd의 CWD가 폴더를 잡아 rd 실패).
+  taskkill은 안 쓴다(무관한 python까지 잡는다) — 잠기면 안내만
+- step 번호 자동화 (`itertools.count` — 하드코딩 "N/7" 제거)
+
+### 설치 왕복 테스트가 잡은 잠복 버그: 바로가기가 en-US 로캘에서 생성 실패
+설치.bat의 WScript.Shell(WshShortcut) 바로가기 생성이 **이 PC에서 처음부터 실패**하고
+있었다 (2026-07-28 배포판 최초 구축 때 타 PC 검증을 안 해 놓친 것). 회사 PC는 시스템
+로캘이 en-US(ANSI CP1252)인데, WshShortcut은 경로를 ANSI로 변환해서 한글("바탕 화면"
+KFM 경로, 바로가기 이름)이 전부 `?`가 되어 E_INVALIDARG로 죽는다.
+PowerShell `-EncodedCommand`로 인자 전달을 고쳐도 COM 내부에서 다시 깨진다 (실측).
+
+→ 배치의 PowerShell을 버리고 **동봉된 python의 pywin32 `IShellLinkW`**로 교체
+(`_make_shortcut.py` — 빌드가 생성해 app/에 동봉, 설치/제거.bat이 호출).
+전 구간 유니코드라 로캘 무관, 바탕화면 경로도 `SHGetFolderPath`로 KFM을 따라간다.
+`win32com.shell` import를 verify()의 런타임 검사에 추가해 트리밍으로부터 보호.
+
+검증(이 PC에서 실제 왕복): 설치 → 바로가기 생성·대상 확인(IShellLinkW로 판독) →
+앱 켠 채 재설치 → **1초 만에** "실행 중이면 닫고" 안내(기존 기본값이면 사실상 무한 대기)
+→ 제거.bat → 폴더·바로가기 모두 삭제 확인.
+
+---
+
+## 2026-07-30: 배포판 GUI에 납기현황 추가
+
+### 배경
+납기현황 회신(`delivery_status.py`)은 CLI로만 쓸 수 있었다. 사내 배포판에는 파일 자체가
+들어가지 않았고(`build_portable_gui.APP_FILES`), GUI에도 항목이 없었다. 정작 이 기능을
+가장 자주 쓸 사람은 Python이 없는 PC에서 배포판을 쓰는 영업 담당자다.
+
+### 구현
+- `noah_gui.py` — 문서 종류에 **납기현황** 추가 (8번째, 라디오 그리드가 4×2로 정확히 참).
+  거래처 조회 / 거래처 목록(`--list`) 라디오, `--all`·`--mail` 체크박스
+  - 유일하게 문서 ID가 아니라 **거래처**로 조회하고, CLI가 한 곳만 받으므로
+    `multi: False` 표식을 두고 여러 줄 입력을 messagebox로 막는다
+    (그냥 넘기면 argparse `unrecognized arguments`로 죽는다)
+  - `build_command`의 메일 플래그를 ts 전용에서 "`mail` 옵션이 있는 문서"로 일반화
+- `cli_dist/build_portable_gui.py` — `APP_FILES`에 `delivery_status.py`,
+  README에 납기현황 사용법. 의존성 추가는 없다 (첨부가 xlsx라 PDF 변환용 Excel COM 불필요)
+
+### 재발 방지
+GUI에 문서를 추가하고 `APP_FILES`에 넣는 걸 잊으면 **배포판에서 그 버튼만 조용히 실패**한다.
+판정은 `noah_gui.missing_scripts()` 한 곳이 소유하고, 두 시점에서 막는다.
+- 빌드 `verify()` — 복사된 앱에서 `DOC_TYPES`의 모든 script가 존재하는지 대조 (zip 만들기 전)
+- `tests/test_noah_gui.py::test_doc_scripts_are_packaged` — DOC_TYPES ⊆ APP_FILES
+
+같은 패턴의 대조 테스트 하나 더: GUI가 만든 ds 명령을 `delivery_status.create_argument_parser()`에
+그대로 통과시킨다 — `multi: False`는 CLI `customer`(nargs='?')의 미러라서, CLI 인자 정의가
+바뀌어 미러가 어긋나면 테스트가 잡는다.
+
+---
+
+## 2026-07-29: 거래명세표 메일도 서명 없이 (무서명 구조를 공용 래퍼로)
+
+### 배경
+납기현황 메일은 본문을 `<table><tr><td>` 한 칸에 담는 구조인데, 이 구조에서는 Outlook이
+.eml 초안에 **자동 서명을 붙이지 않는 것**이 실측으로 확인됐다. 사용자 결정: 서명 없는 쪽이
+낫다 (본문이 이미 "본 메일은 자동 발송된 메일입니다."로 끝난다). 거래명세표 메일은 아직
+인라인 `<br>` 본문이라 서명이 끼던 상태 — 같은 구조로 맞춘다.
+
+### 구현
+- `mailer.wrap_body_html()` 신설 — 단일 최상위 블록 래퍼를 한 곳에 정의.
+  왜 이 구조인지(서명 삽입 위치 실측 이력)도 여기 docstring에 남긴다
+- `body_to_html()`(TS 기본 경로)이 래퍼를 쓰고, 납기현황 `build_html_body()`는
+  하드코딩돼 있던 래퍼를 같은 함수로 위임 — **구조 정의가 한 곳**이라 두 메일이 갈릴 수 없다
+- 회귀 테스트: TS `.eml`의 `<body>` 직계 자식이 1개인지 + `body_to_html == wrap_body_html(...)`
+
+### 주의
+서명 억제는 Outlook의 관찰된 동작에 기대는 것이라 보증은 아니다. Outlook 업데이트로
+동작이 바뀌면, 확실한 해법은 자동 서명을 끄고 서명 텍스트를 본문 템플릿에 직접 넣는 것.
 
 ---
 

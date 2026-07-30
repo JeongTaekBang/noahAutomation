@@ -37,31 +37,7 @@ so_combined AS (
     WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
 ),
-dn_combined AS (
-    SELECT SO_ID, CAST([Line item] AS INTEGER) AS [Line item],
-        CAST(Qty AS REAL) AS Qty, ROUND(CAST([Total Sales] AS REAL)) AS 출고금액,
-        SUBSTR([출고일], 1, 7) AS 출고월,
-        [Customer name] AS dn_cust, [Item] AS dn_item,
-        [Customer PO] AS dn_po, [Business registration number] AS dn_brn,
-        '국내' AS dn_market
-    FROM dn_domestic
-    WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
-    UNION ALL
-    SELECT SO_ID, CAST([Line item] AS INTEGER),
-        CAST(Qty AS REAL), ROUND(CAST([Total Sales KRW] AS REAL)),
-        SUBSTR([선적일], 1, 7),
-        [Customer name], [Item], [Customer PO], '', '해외'
-    FROM dn_export
-    WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''
-),
-dn_by_month AS (
-    SELECT SO_ID, [Line item], 출고월,
-        SUM(Qty) AS Output_qty, SUM(출고금액) AS Output_amount,
-        MIN(dn_cust) AS dn_cust, MIN(dn_item) AS dn_item,
-        MIN(dn_po) AS dn_po, MIN(dn_brn) AS dn_brn, MIN(dn_market) AS dn_market
-    FROM dn_combined WHERE 출고월 IS NOT NULL AND 출고월 != ''
-    GROUP BY SO_ID, [Line item], 출고월
-),
+-- DN 월별 집계는 v_dn_by_month 뷰 (매출 인식 필터 + 분할 출고 합산의 단일 정의)
 events_line_item AS (
     SELECT s.SO_ID, s.[Customer name], s.[Customer PO], s.[Item name],
         s.[OS name], s.[Line item], s.[Item qty], s.[Sales amount KRW],
@@ -70,7 +46,7 @@ events_line_item AS (
         s.[Expected delivery date], s.구분,
         s.Period AS event_period,
         s.[Item qty] AS Value_Input_qty, s.[Sales amount KRW] AS Value_Input_amount,
-        0 AS Value_Output_qty, 0 AS Value_Output_amount
+        0 AS Value_Output_qty, 0 AS Value_Output_amount, 0 AS Value_FX_amount
     FROM so_combined s
     UNION ALL
     SELECT dm.SO_ID,
@@ -89,8 +65,8 @@ events_line_item AS (
         COALESCE(s.[Industry code], '')         AS [Industry code],
         COALESCE(s.[Expected delivery date], '') AS [Expected delivery date],
         COALESCE(s.구분, dm.dn_market, '')      AS 구분,
-        dm.출고월, 0, 0, dm.Output_qty, dm.Output_amount
-    FROM dn_by_month dm
+        dm.매출월, 0, 0, dm.Output_qty, dm.Output_amount, dm.Output_fx
+    FROM v_dn_by_month dm
     LEFT JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
 ),
 os_grouped AS (
@@ -103,16 +79,18 @@ os_grouped AS (
         GROUP_CONCAT(DISTINCT [AX Period]) AS [AX Period],
         GROUP_CONCAT(DISTINCT [Model code]) AS [Model code],
         SUM(Value_Input_qty) AS Value_Input_qty, SUM(Value_Input_amount) AS Value_Input_amount,
-        SUM(Value_Output_qty) AS Value_Output_qty, SUM(Value_Output_amount) AS Value_Output_amount
+        SUM(Value_Output_qty) AS Value_Output_qty, SUM(Value_Output_amount) AS Value_Output_amount,
+        SUM(Value_FX_amount) AS Value_FX_amount
     FROM events_line_item
     GROUP BY SO_ID, [OS name], [Expected delivery date], event_period
 ),
+-- 금액 롤링에는 환율 재평가분(Value_FX_amount)을 더한다 — 그래야 Ending이 재환산 전과 같다
 rolling AS (
     SELECT *,
         COALESCE(SUM(Value_Input_qty - Value_Output_qty) OVER w_prev, 0) AS Value_Start_qty,
         SUM(Value_Input_qty - Value_Output_qty) OVER w_curr AS Value_Ending_qty,
-        COALESCE(SUM(Value_Input_amount - Value_Output_amount) OVER w_prev, 0) AS Value_Start_amount,
-        SUM(Value_Input_amount - Value_Output_amount) OVER w_curr AS Value_Ending_amount
+        COALESCE(SUM(Value_Input_amount - Value_Output_amount + Value_FX_amount) OVER w_prev, 0) AS Value_Start_amount,
+        SUM(Value_Input_amount - Value_Output_amount + Value_FX_amount) OVER w_curr AS Value_Ending_amount
     FROM os_grouped
     WINDOW
         w_prev AS (PARTITION BY SO_ID, [OS name], [Expected delivery date] ORDER BY Period ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),
@@ -141,7 +119,7 @@ cumul_at_snapshot AS (
     SELECT
         SO_ID, [OS name], [Expected delivery date],
         SUM(Value_Input_qty - Value_Output_qty) AS recalc_ending_qty,
-        SUM(Value_Input_amount - Value_Output_amount) AS recalc_ending_amount
+        SUM(Value_Input_amount - Value_Output_amount + Value_FX_amount) AS recalc_ending_amount
     FROM os_grouped
     WHERE Period <= (SELECT last_period FROM last_snapshot)
     GROUP BY SO_ID, [OS name], [Expected delivery date]
@@ -182,15 +160,19 @@ open_periods AS (
             - r.Value_Output_qty
         AS Value_Ending_qty,
         -- Amount
+        -- Variance = 환율 재평가분(당월 Output에 대한) + 소급 변경분(첫 open period에만)
+        -- 둘 다 AX Order Book의 '조정분'이라 한 컬럼으로 합산한다
         COALESCE(snap.ending_amount, r.Value_Start_amount) AS Value_Start_amount,
         r.Value_Input_amount,
         r.Value_Output_amount,
-        CASE WHEN r.Period = (SELECT period FROM next_open_period)
+        r.Value_FX_amount
+        + CASE WHEN r.Period = (SELECT period FROM next_open_period)
         THEN COALESCE(c2.recalc_ending_amount - COALESCE(snap.ending_amount, 0), 0)
         ELSE 0
         END AS Value_Variance_amount,
         COALESCE(snap.ending_amount, r.Value_Start_amount)
             + r.Value_Input_amount
+            + r.Value_FX_amount
             + CASE WHEN r.Period = (SELECT period FROM next_open_period)
               THEN COALESCE(c2.recalc_ending_amount - COALESCE(snap.ending_amount, 0), 0)
               ELSE 0 END

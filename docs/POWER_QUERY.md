@@ -1504,10 +1504,10 @@ SOD-0001 × 2월: 들어옴 0,     나감 350만 → 남음 0
 
 | 단계 | 하는 일 | 비유 |
 |------|---------|------|
-| ① 마지막 출고월 붙이기 | "이 주문 언제 끝나?" 끝점 파악 | 달력을 어디까지 펼칠지 |
+| ① 마지막 매출월 붙이기 | "이 주문 언제 끝나?" 끝점 파악 | 달력을 어디까지 펼칠지 |
 | ② Period 확장 | 1줄을 등록~현재월까지 복제 | 빈 달력 만들기 |
 | ③ Input 채우기 | 등록월에만 수주 금액 기록 | 입금 기록 |
-| ④ Output 채우기 | DN 출고를 해당 월에 매칭 | 출금 기록 |
+| ④ Output 채우기 | DN 매출(세금계산서/선적)을 해당 월에 매칭 + 환율 재환산 | 출금 기록 |
 | ⑤ Line item 합치기 | 같은 제품+납기일끼리 합산 | 정리 |
 | ⑥ 잔고 계산 | Start + Input - Output = Ending | 통장 잔고 |
 
@@ -1519,11 +1519,28 @@ SOD-0001 × 2월: 들어옴 0,     나감 350만 → 남음 0
 수주잔고 Order Book = 오더의 흐름을 월별로 추적하는 원장
 
   Start (전월 이월)
-+ Input (당월 수주 = SO 등록)
-- Output (당월 매출 = DN 출고/선적)
-+ Variance (조정분, 현재 0)
++ Input (당월 수주 = SO 등록, 수주시점 환율)
+- Output (당월 매출 = DN 출고/선적, 해외는 선적월 환율 재환산)
++ Variance (환율 재평가 = Output 재환산액 − 시트 KRW)
 = Ending (당월 잔고 → 다음 달 Start로 이월)
 ```
+
+**Variance가 왜 필요한가** — Input과 Output의 환율 시점이 다르기 때문입니다.
+
+```
+SOO-2026-0188: USD 1,276 · 6월 수주 · 7월 선적
+
+P06: Input  = 1,914,046  (6월 환율 1,500.036 — SO 시트의 Sales amount KRW)
+P07: Output = 1,976,024  (7월 환율 1,548.608 — 매출 인식 환율)
+
+Variance 없이 계산하면 → Ending = 1,914,046 − 1,976,024 = -61,978  ← 있지도 않은 음수 잔고
+Variance 넣으면      → Ending = 1,914,046 − 1,976,024 + 61,978 = 0  ← 소진
+                                                        ↑
+                                            환율 상승분(61,978)만큼 잔고를 재평가한 뒤 소진
+```
+
+즉 **Output은 매출 금액(선적월 환율)**, **Variance는 그 환율 재평가분**, **Ending은 재환산 도입 전과 동일**합니다.
+환율 노이즈가 Variance로 빠지므로 "Ending ≠ 0 = SO-DN 금액 불일치" 진단이 그대로 유지됩니다.
 
 ```
 SOD-0001, IQ3를 1월에 수주, 2월에 출고:
@@ -1539,10 +1556,14 @@ P02: Start=500만 + Input=0    - Output=480만  = Ending=20만   (SO-DN 차이)
 - **버튼/마감 작업 없음** — Ctrl+Alt+F5 새로고침 시 전체 재계산
 - SO/DN 원본 데이터에서 매번 처음부터 계산하는 **뷰(View)**
 - 스냅샷 저장 없음 (과도기적 사용, 과거 데이터 수정 시 소급 반영)
-- Input = SO의 `Sales amount KRW` (수주 금액)
-- Output = DN의 `Total Sales` / `Total Sales KRW` (실제 매출 금액)
-- 국내: DN 출고일 기준, **해외: DN 선적일 기준** (매출 인식 시점)
-- **분할 출고 대응**: 같은 SO+Line item에 DN이 여러 건이면 각 출고월에 해당 수량/금액 배분
+- Input = SO의 `Sales amount KRW` (수주 금액, 수주시점 환율)
+- Output = 국내 `Total Sales` / 해외 `외화금액 × 선적월 환율` (실제 매출 금액) — **`AX_매출대사`와 동일 산식**
+- Variance = 해외 `Output 재환산액 − 시트 Total Sales KRW` (환율 재평가분). 국내는 항상 0
+- **Output 귀속월 = 매출 인식월** (`AX_매출대사`와 동일):
+  - 국내 = **세금계산서 발행월** → `N/A`(발행 불필요: 무상공급·FOC·반품)면 출고월 → 선수금 세금계산서+출고면 출고월 → 아무것도 없으면 **매출 미인식**
+  - 해외 = **선적월**
+- **미인식 = Backlog 잔류**: 출고했지만 세금계산서가 아직 없으면(월합세금계산서 대기 등) Output이 잡히지 않고 Backlog에 남는다. 발행되면 새로고침만으로 그 달 Output이 된다
+- **분할 출고 대응**: 같은 SO+Line item에 DN이 여러 건이면 각 매출월에 해당 수량/금액 배분
 
 ### SO-DN 금액 차이 감지
 
@@ -1597,13 +1618,13 @@ SO_ID = SOD-0001
 | Industry code | 산업 코드 |
 | Value_Start_qty | 전월 이월 수량 |
 | Value_Input_qty | 당월 수주 수량 (등록 Period에만) |
-| Value_Output_qty | 당월 출고 수량 (출고월에만, DN 기준) |
-| Value_Variance_qty | 수량 조정분 (현재 0, 향후 확장용) |
-| Value_Ending_qty | Start + Input - Output + Variance |
+| Value_Output_qty | 당월 매출 수량 (매출월에만, DN 기준) |
+| Value_Variance_qty | 수량 조정분 (환율 영향 없음 → 항상 0, 최종 출력에서 제거) |
+| Value_Ending_qty | Start + Input - Output |
 | Value_Start_amount | 전월 이월 금액 |
-| Value_Input_amount | 당월 수주 금액 (SO 기준) |
-| Value_Output_amount | 당월 매출 금액 (DN 기준) |
-| Value_Variance_amount | 금액 조정분 (현재 0, 향후 확장용) |
+| Value_Input_amount | 당월 수주 금액 (SO 기준, 수주시점 환율) |
+| Value_Output_amount | 당월 매출 금액 (국내 `Total Sales` / 해외 `외화금액 × 선적월 환율`) |
+| **Value_Variance_amount** | **환율 재평가분** = Output 재환산액 − DN 시트 `Total Sales KRW`. 해외 비KRW 건의 출고(선적)월에만 발생, 국내는 0 |
 | Value_Ending_amount | Start + Input - Output + Variance |
 
 ### 동작 원리 도식
@@ -1628,16 +1649,18 @@ SO_ID = SOD-0001
                │  └──────┬──────┘     └──────┬──────┘
                │         └────────┬─────────┘
                │                  ▼
-               │          ┌──────────────┐
-               │          │  DN_Combined  │  출고일→출고월 변환
-               │          └──────┬───────┘
+               │          ┌───────────────┐     ┌────────┐
+               │          │  DN_Combined  │◀────│   FX    │
+               │          │ 매출인식일→매출월│     │ 선적월  │
+               │          │ 해외 KRW 재환산 │     │ 환율    │
+               │          └──────┬────────┘     └────────┘
                │                 │
                │          ┌──────┴──────────────────┐
                │          ▼                         ▼
                │  ┌──────────────┐         ┌──────────────────┐
                │  │ DN_LastMonth  │         │   DN_ByMonth      │
-               │  │ SO+Line별     │         │   SO+Line+출고월별  │
-               │  │ 마지막 출고월  │         │   월별 qty/amount  │
+               │  │ SO+Line별     │         │   SO+Line+매출월별  │
+               │  │ 마지막 매출월  │         │   월별 qty/amount  │
                │  └──────┬───────┘         └────────┬─────────┘
                │         │                          │
        ┌───────┴─────────┘                          │
@@ -1671,8 +1694,12 @@ SO_ID = SOD-0001
  ══════════════════
   ④ Output 조인
     DN_ByMonth와
-    Period = 출고월 매칭
-    → 월별 출고 배분
+    Period = 매출월 매칭
+    → 월별 매출 배분
+    → 해외는 선적월 환율
+      재환산액을 Output으로,
+      시트값과의 차를
+      Variance로
  ══════════════════
        │
        ▼
@@ -1824,54 +1851,88 @@ let
         [Period] <> null and Text.Trim(Text.From([Period])) <> ""
     ),
 
-    // ========== DN (출고 시점 + 실제 매출 금액) ==========
+    // ========== FX 시트 언피벗 (가로 → 세로: Currency + 환율월 + 환율) ==========
+    // AX_매출대사와 동일 로직 — 해외 Output을 선적월 환율로 재환산하기 위함
+    FX_Unpiv = Table.UnpivotOtherColumns(Table.RenameColumns(Excel.CurrentWorkbook(){[Name="FX"]}[Content], {{"FX", "Currency"}}), {"Currency"}, "환율월", "환율"),
+    FX_Clean = Table.Buffer(Table.SelectRows(FX_Unpiv, each [Currency] <> null and [환율] <> null and Text.Length(Text.From([환율월])) = 7 and Text.Contains(Text.From([환율월]), "-"))),
+
+    // ========== DN (매출 인식 시점 + 실제 매출 금액) ==========
     DN_국내_Raw = Excel.CurrentWorkbook(){[Name="DN_국내"]}[Content],
     DN_해외_Raw = Excel.CurrentWorkbook(){[Name="DN_해외"]}[Content],
 
-    // 국내: 출고일 기준, Total Sales = 매출
-    DN_국내_Select = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Qty", "Total Sales", "출고일"}),
+    // 국내: 매출인식일 기준 (AX_매출대사와 동일 귀속). 우선순위:
+    //   ① 세금계산서 발행일  ② 'N/A' 표기(= 발행 불필요: 무상공급·FOC·반품)면 출고일
+    //   ③ 선수금 세금계산서 + 출고 완료면 출고일 (선청구 후 출고 시점에 수익인식)
+    //   ④ 아무것도 없으면 매출 미인식 → Output 없음 = Backlog에 남는다 (월합세금계산서 대기 등)
+    DN_국내_Select = Table.SelectColumns(DN_국내_Raw, {"SO_ID", "Line item", "Qty", "Total Sales", "출고일", "세금계산서 발행일", "선수금 세금계산서 발행일"}),
     DN_국내 = Table.ReplaceErrorValues(DN_국내_Select,
         List.Transform(Table.ColumnNames(DN_국내_Select), each {_, null})
     ),
-    DN_국내_WithPeriod = Table.AddColumn(DN_국내, "출고월", each
-        if [출고일] = null then null
-        else Text.From(Date.Year([출고일])) & "-" & Text.PadStart(Text.From(Date.Month([출고일])), 2, "0"),
+    DN_국내_Rev = Table.AddColumn(DN_국내, "매출일", each
+        let 세금일 = try Date.From([세금계산서 발행일]) otherwise null in
+        if 세금일 <> null then 세금일
+        // 'N/A'는 날짜가 아니라 "발행하지 않는다"는 표기 → 출고 시점에 매출로 본다
+        // (안 그러면 무상공급·FOC 수량이 Backlog에 영구히 남는다)
+        else if [세금계산서 발행일] <> null and Text.Upper(Text.Trim(Text.From([세금계산서 발행일]))) = "N/A" then [출고일]
+        else if [선수금 세금계산서 발행일] <> null and [출고일] <> null then [출고일]
+        else null, type date),
+    DN_국내_WithPeriod = Table.AddColumn(DN_국내_Rev, "매출월", each
+        if [매출일] = null then null
+        else Text.From(Date.Year([매출일])) & "-" & Text.PadStart(Text.From(Date.Month([매출일])), 2, "0"),
         type text),
-    DN_국내_Final = Table.RenameColumns(DN_국내_WithPeriod, {{"Total Sales", "출고금액"}}),
+    DN_국내_Renamed = Table.RenameColumns(
+        Table.RemoveColumns(DN_국내_WithPeriod, {"세금계산서 발행일", "선수금 세금계산서 발행일", "매출일"}),
+        {{"Total Sales", "출고금액"}}),
+    // 국내는 KRW 거래 — 재환산 없음, FX 조정 0
+    DN_국내_Final = Table.AddColumn(Table.AddColumn(DN_국내_Renamed,
+        "출고금액_재환산", each [출고금액], type number),
+        "FX_조정", each 0, type number),
 
-    // 해외: 선적일 기준 (매출 인식 시점), Total Sales KRW = 매출
-    DN_해외_Select = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Qty", "Total Sales KRW", "선적일"}),
+    // 해외: 선적일 기준 (매출 인식 시점), KRW = 외화금액 × 선적월 환율로 재환산
+    DN_해외_Select = Table.SelectColumns(DN_해외_Raw, {"SO_ID", "Line item", "Qty", "Currency", "Total Sales", "Total Sales KRW", "선적일"}),
     DN_해외 = Table.ReplaceErrorValues(DN_해외_Select,
         List.Transform(Table.ColumnNames(DN_해외_Select), each {_, null})
     ),
-    DN_해외_WithPeriod = Table.AddColumn(DN_해외, "출고월", each
+    DN_해외_WithPeriod = Table.AddColumn(DN_해외, "매출월", each
         if [선적일] = null then null
         else Text.From(Date.Year([선적일])) & "-" & Text.PadStart(Text.From(Date.Month([선적일])), 2, "0"),
         type text),
-    DN_해외_Final = Table.RenameColumns(DN_해외_WithPeriod, {{"Total Sales KRW", "출고금액"}}),
+    DN_해외_Renamed = Table.RenameColumns(DN_해외_WithPeriod, {{"Total Sales KRW", "출고금액"}, {"Total Sales", "외화금액"}}),
+    // 선적월 환율 조인 → DN 라인 단위로 반올림 (AX_매출대사와 동일 grain·동일 반올림이라 합계가 일치)
+    DN_해외_FXJoin = Table.ExpandTableColumn(Table.NestedJoin(DN_해외_Renamed, {"Currency", "매출월"}, FX_Clean, {"Currency", "환율월"}, "FX_Match", JoinKind.LeftOuter), "FX_Match", {"환율"}, {"환율"}),
+    DN_해외_FX = Table.AddColumn(Table.AddColumn(DN_해외_FXJoin,
+        "출고금액_재환산", each
+            if [Currency] = "KRW" then [외화금액]
+            else if [환율] <> null and [외화금액] <> null then Number.Round([외화금액] * [환율], 0)
+            else [출고금액],   // 선적월 환율·외화금액 결측 → 시트값 유지 (Output이 조용히 0이 되는 것 방지)
+        type number),
+        "FX_조정", each [출고금액_재환산] - [출고금액], type number),
+    DN_해외_Final = Table.RemoveColumns(DN_해외_FX, {"Currency", "외화금액", "환율"}),
 
     DN_Combined = Table.Combine({DN_국내_Final, DN_해외_Final}),
 
-    // DN 월별 집계 (분할 출고 대응: SO_ID + Line item + 출고월)
-    DN_ByMonth = Table.Group(DN_Combined, {"SO_ID", "Line item", "출고월"}, {
+    // DN 월별 집계 (분할 출고 대응: SO_ID + Line item + 매출월)
+    // Output_amount = 선적월 환율 재환산액, Output_fx = 시트값과의 차이(= Variance 재원)
+    DN_ByMonth = Table.Group(DN_Combined, {"SO_ID", "Line item", "매출월"}, {
         {"Output_qty", each List.Sum([Qty]), type number},
-        {"Output_amount", each List.Sum([출고금액]), Currency.Type}
+        {"Output_amount", each List.Sum([출고금액_재환산]), Currency.Type},
+        {"Output_fx", each List.Sum([FX_조정]), Currency.Type}
     }),
 
-    // DN 마지막 출고월 (ActivePeriods 범위 결정용)
+    // DN 마지막 매출월 (ActivePeriods 범위 결정용)
     DN_LastMonth = Table.Group(DN_Combined, {"SO_ID", "Line item"}, {
-        {"출고월", each List.Max(List.RemoveNulls([출고월])), type text}
+        {"매출월", each List.Max(List.RemoveNulls([매출월])), type text}
     }),
 
-    // ========== SO + DN 조인 (기간 범위용, 마지막 출고월만) ==========
+    // ========== SO + DN 조인 (기간 범위용, 마지막 매출월만) ==========
     WithDN = Table.NestedJoin(SO_Filtered, {"SO_ID", "Line item"}, DN_LastMonth, {"SO_ID", "Line item"}, "DN_Data", JoinKind.LeftOuter),
-    WithDNExpanded = Table.ExpandTableColumn(WithDN, "DN_Data", {"출고월"}),
+    WithDNExpanded = Table.ExpandTableColumn(WithDN, "DN_Data", {"매출월"}),
 
     // ========== Period 리스트 ==========
-    // SO 등록 Period + DN 모든 출고월 (분할 출고 중간 월 누락 방지)
+    // SO 등록 Period + DN 모든 매출월 (분할 출고 중간 월 누락 방지)
     AllPeriods = List.Buffer(List.Sort(List.Distinct(
         List.RemoveNulls(Table.Column(WithDNExpanded, "Period")) &
-        List.RemoveNulls(Table.Column(DN_ByMonth, "출고월"))
+        List.RemoveNulls(Table.Column(DN_ByMonth, "매출월"))
     ))),
     LastPeriod = List.Last(AllPeriods),
 
@@ -1904,14 +1965,20 @@ let
         if [Period] = [등록Period] then [Sales amount KRW] else 0, type number),
 
     // ========== Output (DN 월별 조인) ==========
-    // DN_ByMonth와 SO_ID + Line item + Period = 출고월 조인 → 분할 출고 월별 배분
-    WithDNOutput = Table.NestedJoin(WithInputAmt, {"SO_ID", "Line item", "Period"}, DN_ByMonth, {"SO_ID", "Line item", "출고월"}, "DN_Output", JoinKind.LeftOuter),
-    WithDNOutputExpanded = Table.ExpandTableColumn(WithDNOutput, "DN_Output", {"Output_qty", "Output_amount"}),
+    // DN_ByMonth와 SO_ID + Line item + Period = 매출월 조인 → 분할 출고 월별 배분
+    WithDNOutput = Table.NestedJoin(WithInputAmt, {"SO_ID", "Line item", "Period"}, DN_ByMonth, {"SO_ID", "Line item", "매출월"}, "DN_Output", JoinKind.LeftOuter),
+    WithDNOutputExpanded = Table.ExpandTableColumn(WithDNOutput, "DN_Output", {"Output_qty", "Output_amount", "Output_fx"}),
     WithOutputQty = Table.AddColumn(WithDNOutputExpanded, "Value_Output_qty", each
         if [Output_qty] = null then 0 else [Output_qty], type number),
     WithValues = Table.AddColumn(WithOutputQty, "Value_Output_amount", each
         if [Output_amount] = null then 0 else [Output_amount], type number),
-    WithValuesCleaned = Table.RemoveColumns(WithValues, {"Output_qty", "Output_amount"}),
+
+    // ========== Variance (환율 재평가) ==========
+    // Input은 수주시점 환율의 SO 금액, Output은 선적월 환율 재환산액 → 그 차액을 Variance로 흡수
+    // → 매출월에 환율차만큼 Backlog를 재평가하고 소진 ⇒ Ending은 재환산 도입 전과 동일
+    WithVariance = Table.AddColumn(WithValues, "Value_Variance_amount", each
+        if [Output_fx] = null then 0 else [Output_fx], type number),
+    WithValuesCleaned = Table.RemoveColumns(WithVariance, {"Output_qty", "Output_amount", "Output_fx"}),
 
     // ========== OS name 기준 그룹화 ==========
     // Line item 레벨 → SO_ID + OS name + Expected delivery date + Period 로 합산
@@ -1930,7 +1997,8 @@ let
         {"Value_Input_qty", each List.Sum([Value_Input_qty]), type number},
         {"Value_Input_amount", each List.Sum([Value_Input_amount]), type number},
         {"Value_Output_qty", each List.Sum([Value_Output_qty]), type number},
-        {"Value_Output_amount", each List.Sum([Value_Output_amount]), type number}
+        {"Value_Output_amount", each List.Sum([Value_Output_amount]), type number},
+        {"Value_Variance_amount", each List.Sum([Value_Variance_amount]), type number}
     }),
 
     // ========== 건별 롤링 계산 ==========
@@ -1968,8 +2036,8 @@ let
                         Value_Start_amount = sAmt,
                         Value_Input_amount = r[Value_Input_amount],
                         Value_Output_amount = r[Value_Output_amount],
-                        Value_Variance_amount = 0,
-                        Value_Ending_amount = sAmt + r[Value_Input_amount] - r[Value_Output_amount]
+                        Value_Variance_amount = r[Value_Variance_amount],
+                        Value_Ending_amount = sAmt + r[Value_Input_amount] - r[Value_Output_amount] + r[Value_Variance_amount]
                     ]}
             )
         in
@@ -2012,16 +2080,18 @@ let
         {"Value_Ending_amount", Currency.Type}
     }),
 
-    // 완납 건(Ending=0) 후속 빈 행 제거: Start=Input=Output=Ending 모두 0이면 제거
+    // 완납 건(Ending=0) 후속 빈 행 제거: Start=Input=Output=Variance=Ending 모두 0이면 제거
     ZeroFiltered = Table.SelectRows(Result, each
         not ([Value_Start_qty] = 0 and [Value_Input_qty] = 0 and [Value_Output_qty] = 0 and [Value_Ending_qty] = 0
-         and [Value_Start_amount] = 0 and [Value_Input_amount] = 0 and [Value_Output_amount] = 0 and [Value_Ending_amount] = 0)
+         and [Value_Start_amount] = 0 and [Value_Input_amount] = 0 and [Value_Output_amount] = 0
+         and [Value_Variance_amount] = 0 and [Value_Ending_amount] = 0)
     ),
 
     #"Reordered Columns" = Table.ReorderColumns(ZeroFiltered,{"SO_ID", "AX Project number", "AX Period", "구분", "Period", "등록Period", "Customer name", "Customer PO", "Item name", "OS name", "Sector", "Business registration number", "Industry code", "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty", "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount", "Expected delivery date"}),
     #"Removed Columns" = Table.RemoveColumns(#"Reordered Columns",{"Item name"}),
     #"Reordered Columns1" = Table.ReorderColumns(#"Removed Columns",{"SO_ID", "AX Project number", "AX Period", "구분", "Period", "등록Period", "Business registration number", "Customer name", "Customer PO", "Sector", "Industry code", "OS name", "Value_Start_qty", "Value_Input_qty", "Value_Output_qty", "Value_Variance_qty", "Value_Ending_qty", "Value_Start_amount", "Value_Input_amount", "Value_Output_amount", "Value_Variance_amount", "Value_Ending_amount", "Expected delivery date"}),
-    #"Removed Columns1" = Table.RemoveColumns(#"Reordered Columns1",{"Value_Variance_qty", "Value_Variance_amount"})
+    // Value_Variance_qty만 제거 (수량엔 환율 영향이 없어 항상 0) — 금액 Variance는 유지
+    #"Removed Columns1" = Table.RemoveColumns(#"Reordered Columns1",{"Value_Variance_qty"})
 in
     #"Removed Columns1"
 ```
@@ -2054,6 +2124,24 @@ SOD-0003: 1월 수주(20) → 2월에도 미출고 → Ending=20 (Backlog)
 | **특정 월 스냅샷** | Period = "2026-01" 필터 → 그 시점의 모든 건 |
 | **누적 매출** | Value_Output_amount를 P01~해당월까지 합산 |
 | **SO-DN 차이 점검** | 출고 완료 건 중 Value_Ending ≠ 0 필터 |
+| **AX 매출 대사** | Period 필터 → SUM(Value_Output_amount) = `AX_매출대사` 같은 월 `매출금액_KRW` 합 (해외는 완전 일치, 국내는 아래 주의) |
+| **환율 임팩트** | Period 필터 → SUM(Value_Variance_amount) = 그 달 매출의 환율 재평가액 |
+
+#### AX_매출대사와의 대사 (금액·귀속월 완전 일치)
+
+| 구분 | Order_Book Output 귀속월 | AX_매출대사 매출월 | 금액 |
+|------|------------------------|------------------|------|
+| 국내 | 세금계산서 발행월 | 세금계산서 발행월 | `Total Sales` (동일) |
+| 해외 | DN 선적월 | DN 선적월 | 외화금액 × 선적월 환율 (동일) |
+
+```
+Period = "2026-07" 필터 → SUM(Value_Output_amount)
+   = AX_매출대사에서 매출월 = "P07" 필터 → SUM(매출금액_KRW)
+```
+
+- **환율 축**은 Variance로, **귀속월 축**은 매출인식일로 맞췄다. 2026-01~07 전 월 차이 0원 (실측).
+- 대가: Order_Book Backlog는 이제 **"아직 매출로 인식되지 않은 물량"**이다. 출고됐지만 세금계산서 미발행 건은 월말 Backlog에 남는다(2026-07 기준 4라인 / 1,232,420원 — 월합세금계산서 대기분). 물류상 미출고 잔량은 대시보드 `납기현황`/`EXW미출고`를 본다.
+- `N/A` 표기(무상공급·FOC·반품)를 출고월 인식으로 처리하는 이유: 세금계산서를 영구히 발행하지 않는 건이라 미인식으로 두면 **수량이 Backlog에 영구히 남는다**. 금액이 0이거나 같은 달 안에서 상쇄되므로 월별 매출 합계는 바뀌지 않는다.
 
 ### AX 오더북과의 비교
 
@@ -2061,12 +2149,12 @@ SOD-0003: 1월 수주(20) → 2월에도 미출고 → Ending=20 (Backlog)
 |------|-------------------|-----------------|
 | 마감 | Period 마감 → 잠금 | 없음 (매번 재계산) |
 | Start 이월 | DB에 저장된 값 | Power Query가 계산한 값 |
-| Variance | 자동 추적 (금액 변경, 취소) | 불필요 (조정분을 새 Line item으로 추가 → Input에서 넷팅) |
+| Variance | 자동 추적 (금액 변경, 취소) | **환율 재평가분** (수량·판가 조정분은 새 Line item으로 추가 → Input에서 넷팅) |
 | 스냅샷 | DB에 보존 | 없음 (현재 데이터 기준) |
 | 그룹화 | Project number 기준 | SO_ID + OS name 기준 (Line item 합산) |
 | Input 기준 | SO 등록일 | SO의 Period 컬럼 (yyyy-MM) |
-| Output 기준 | Invoice 일자 | DN 출고일(국내) / 선적일(해외) |
-| 금액 기준 | SO 금액 | Input=SO, Output=DN (차이 감지 가능) |
+| Output 기준 | Invoice 일자 | 세금계산서 발행일(국내) / 선적일(해외) — AX와 같은 기준 |
+| 금액 기준 | SO 금액 | Input=SO(수주시점 환율), Output=DN(선적월 환율), 차액=Variance |
 | 갱신 | 자동 (트랜잭션 기반) | Ctrl+Alt+F5 (수동 새로고침) |
 
 ### 전제조건
@@ -2075,7 +2163,10 @@ SOD-0003: 1월 수주(20) → 2월에도 미출고 → Ending=20 (Backlog)
 - SO의 **Sector 컬럼**: 사업 부문 (예: "Process", "CPI", "Water")
 - SO의 **Business registration number 컬럼**: 사업자등록번호
 - SO의 **Industry code 컬럼**: 산업 코드
-- DN의 **출고일/선적일**: 날짜 형식 → 쿼리에서 yyyy-MM으로 변환
+- DN_국내의 **세금계산서 발행일 / 선수금 세금계산서 발행일 / 출고일**, DN_해외의 **선적일**: 날짜 형식 → 쿼리에서 yyyy-MM으로 변환.
+  `세금계산서 발행일`에 날짜가 아닌 텍스트가 들어오면 `N/A`만 "발행 불필요"로 인식하고, 그 밖의 텍스트는 **미인식(Backlog 잔류)** 으로 떨어진다 — 매출이 조용히 잡히는 것보다 눈에 보이는 쪽으로 실패한다
+- **`FX` 시트**: 통합 문서 안에 표(또는 이름 정의)로 존재하고, 헤더가 `FX | 2026-01 | …`로 승격돼 있어야 한다 (월 컬럼명은 `YYYY-MM` 텍스트). `AX_매출대사`와 같은 전제.
+  선적월 환율이 아직 없는 월(예: 마감 전 당월)은 **시트의 `Total Sales KRW`로 폴백**하고 Variance = 0이 된다 → Output이 누락되지 않는다. 환율이 입력되면 새로고침만으로 반영된다.
 
 ### 수량/금액 조정 방법 (분개 방식)
 
@@ -2094,8 +2185,7 @@ P02: SOD-0001, IQ3, Line item 2, qty=-2, amount=-100만  (조정분)
 - **원래 행 안 건드림** → SO raw에 이력 보존
 - **새 Line item** → 언제, 얼마나 조정했는지 추적 가능
 - OS name 그룹화가 자동으로 넷팅 처리
-- Variance 컬럼 불필요 (스냅샷 없이도 조정 이력 관리 가능)
-- Variance 컬럼은 M 코드에 구조만 유지 (현재 0, 향후 스냅샷 도입 시 활용 가능)
+- **수량·판가 조정은 Variance가 아니라 Input으로 넷팅**한다 (Variance는 환율 재평가 전용)
 
 ### 한계
 
@@ -2104,8 +2194,31 @@ P02: SOD-0001, IQ3, Line item 2, qty=-2, amount=-100만  (조정분)
 | 마감 잠금 없음 | 과거 SO/DN 수정 시 소급 변경 | 원래 행 수정 금지, 조정은 새 Line item으로 추가 |
 | 스냅샷 없음 | 과거 시점 재현 불가 | SO raw 데이터에 원본+조정 이력이 남아 추적 가능 |
 | Period 갭 | 활동 없는 월은 행 생성 안됨 | 전월 Ending이 다음 활동월 Start로 정확히 이월됨 |
+| 미선적 Backlog는 수주시점 환율 | Variance는 **매출로 인식된 부분만** 재평가한다. 미선적 잔고의 KRW 가치는 환율이 움직여도 그대로 | 실현 시점(선적)에 한 번에 반영되는 구조. 미실현 환평가가 필요해지면 잔고 전체를 매월 재평가하는 방식으로 확장 |
+| Backlog ≠ 미출고 물량 | Output이 매출인식 기준이라, 출고했지만 세금계산서 미발행 건은 Backlog에 남는다 | 물류상 미출고는 대시보드 `납기현황`/`EXW미출고` 참조 |
+| SQLite 미러와 ±1원 | 재환산 반올림이 정확히 .5인 라인에서 Power Query(`Number.Round`=짝수 반올림)와 SQLite(`ROUND`=올림)가 갈린다 | 실측 2라인, 월 합계 최대 ±1원. `AX_매출대사`와 맞추는 게 목적이라 Excel 쪽 기준을 유지 |
 
-> **향후 확장**: ERP 통합 등으로 스냅샷 기반 Variance 추적이 필요해지면, M 코드의 `Value_Variance_qty/amount` 컬럼(현재 0)에 스냅샷 대비 차이를 계산하는 로직을 추가할 수 있음. 현재 분개 방식과 병행 가능.
+> **향후 확장**: ERP 통합 등으로 스냅샷 기반 조정 추적이 필요해지면, `Value_Variance_amount`에 환율 재평가분과 스냅샷 대비 차이를 구분해 담을 수 있음(예: `Value_Variance_fx` / `Value_Variance_adj`로 분리). 현재 분개 방식과 병행 가능.
+
+### 검증 (2026-07-30 기준 실측)
+
+| 검증 항목 | 결과 |
+|-----------|------|
+| **Output vs `AX_매출대사`** | **P01~P07 × 국내/해외 14개 조합 전부 차이 0원** (P07 국내 464,170,700 / 해외 789,883,397) |
+| 건별 Ending 불변 (환율) | 재환산 도입 전/후 **모든 그룹×Period에서 Ending 동일** (불일치 0건) — 환율차가 Variance로 흡수되어 잔고·SO-DN 진단이 그대로 |
+| P07 환율 임팩트 | SUM(Value_Variance_amount) 해외 = **+47,662,819원** (재환산 전 742,220,578 → 789,883,397). 누적 P01~P07 +115,496,363원 |
+| 예시 건 SOO-2026-0188 | P06 Input 1,914,046(USD 1,276 × 1,500.036) → P07 Output 1,976,024(× 1,548.608) + Variance 61,978 → **Ending 0** |
+| 귀속월 변경의 Backlog 영향 | 국내 **+4개 / +1,232,420원**(세금계산서 미발행 4라인), 해외 **변동 없음**. 그 외 전 그룹 Ending 동일 |
+| 국내 환율 | Variance 항상 0 (KRW 거래) |
+| 누락 점검 | SO 조인 실패·Cancelled/Hold·SO Period 공란으로 Output이 사라지는 DN 라인 **0건**. DN_해외 통화는 USD/EUR뿐이고 선적월 환율 결측 **0건** |
+| SQLite 미러 | `sql/order_book.sql`도 **14개 조합 전부 동일** (뷰 `v_dn_revenue` 공유, ±1원 반올림 제외). DN 테이블 PK에 `_row_seq`를 추가해 분할출고 중복키 행이 삼켜지던 문제까지 해결 |
+
+> **기존 마감 스냅샷 주의** (`ob_snapshot`, 2026-01~06): 옛 기준(출고월·시트 KRW)으로 동결돼 있다.
+> 새 기준으로 재계산하면 2026-06 마감 시점 Ending이 **50그룹 / 수량 731 / 220,112,337원** 달라진다
+> (대부분 "6월 출고·7월 세금계산서" 건이 6월 말 Backlog로 남게 된 것).
+> 그대로 2026-07을 마감하면 이 차이가 **한 번에 Variance로 계상**된다. 기준 변경을 소급 반영하려면
+> `close_period.py --undo`로 과거 월을 되돌린 뒤 순서대로 다시 마감해야 한다 — 어느 쪽을 택할지는
+> 회계 판단이므로 자동으로 하지 않는다.
 
 ---
 

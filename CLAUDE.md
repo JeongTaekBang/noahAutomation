@@ -60,7 +60,7 @@ python reconcile_ind.py P03 -v            # 상세 로그
 # Dashboard
 streamlit run dashboard.py                # Streamlit 대시보드
 
-# GUI (문서 생성 7종) / 사내 배포판 빌드
+# GUI (문서 7종 + 납기현황) / 사내 배포판 빌드
 python noah_gui.py                        # tkinter GUI (개발 PC에서도 그대로 실행)
 python cli_dist/build_portable_gui.py     # 배포 zip 빌드 → cli_dist/NOAH_문서생성기_배포.zip
 
@@ -83,7 +83,7 @@ Generators (excel_generator.py=openpyxl, ts/pi/fi/oc_generator.py=xlwings)
 Shared: config.py (paths, constants, aliases), utils.py (data loading), validators.py
 
 DB layer:
-  sync_db.py → db_sync.py (Excel→SQLite, upsert+prune) → db_schema.py (DDL)
+  sync_db.py → db_sync.py (Excel→SQLite, upsert+prune, FX 시트 언피벗) → db_schema.py (DDL + v_dn_revenue 뷰)
   close_period.py → snapshot.py (SnapshotEngine) → db_schema.py (snapshot tables)
   sql/order_book.sql (이벤트 기반), sql/order_book_snapshot.sql (snapshot-based)
 
@@ -107,8 +107,11 @@ Reconciliation layer:
 - **Result Pattern** (`services/result.py`): `DocumentResult` + `GenerationStatus` enum for structured operation outcomes. `history_saved` field tracks history persistence separately from generation success.
 - **Output File Safety** (`cli_common.py`): Generated files auto-suffix on collision (`_1`, `_2`, ...) to prevent silent overwrites. Raises `FileExistsError` if 100+ collisions.
 - **DB Sync Prune** (`db_sync.py`): Excel→SQLite sync includes prune step — rows deleted from Excel are also deleted from DB. Works even when sheet is completely empty. `--dry-run` connects to real DB and rollbacks for accurate diff simulation.
+- **`_row_seq` in PK — 자연키는 유일하지 않다** (`db_schema.py: SYNC_SHEETS`): PO·DN 시트는 같은 문서·같은 라인을 **여러 행으로 나눠 적는다**(분할발주/분할출고). 그래서 PO는 `(PO_ID, Line item, _row_seq)`, DN은 `(DN_ID, SO_ID, Line item, _row_seq)`가 PK다. `_row_seq`를 빼면 upsert가 뒤 행으로 앞 행을 덮어써 **매출·수량이 조용히 사라진다** (2026-07-30 실측: DN에서 18,656,000원 누락). 새 시트를 `SYNC_SHEETS`에 추가할 때 자연키 유일성을 실데이터로 확인할 것 — `SELECT COUNT(*)` vs `COUNT(DISTINCT 자연키)`.
+- **PK Migration Logging** (`db_sync.py` + `sync_db.py`): PK 정의를 바꾸면 `migrate_pk_if_changed`가 기존 테이블을 `{table}_bak`으로 백업하고 재생성한다. 재적재는 전 행이 '신규'로 잡히므로 `SheetSyncResult.pk_migrated`를 보고 `_sync_log`에 **'재적재' 1건만** 남긴다 (수천 건의 가짜 '신규'가 변경 이력을 덮지 않게 — 재키잉 억제와 같은 취지).
 - **Dashboard Error Visibility** (`dashboard.py`): Loader failures collected in `session_state` and displayed as `st.warning()` banner, distinguishing "no data" from "query failure".
-- **Snapshot Engine** (`snapshot.py`): Monthly close → `ob_snapshot` freezes Ending, subsequent retroactive changes auto-detected as Variance. Sequential close enforced.
+- **Snapshot Engine** (`snapshot.py`): Monthly close → `ob_snapshot` freezes Ending, subsequent retroactive changes auto-detected as Variance. Sequential close enforced. `variance_amount`는 **환율 재평가분 + 소급 변경분 합산** (AX Order Book처럼 조정분 단일 컬럼).
+- **Single Source for DN Revenue** (`db_schema.py: v_dn_revenue`): 매출 귀속월·선적월 환율 재환산·환율차를 뷰 한 곳에서 정의. Order Book 계열 6개 소비처(sql 4종 + `snapshot.py` + `dashboard.py`)가 모두 이 뷰를 읽는다.
 
 ### Configuration Split
 
@@ -126,10 +129,10 @@ Reconciliation layer:
 | `po_generator/validators.py` | Required field checks, ICO Unit > 0, delivery date validation |
 | `po_generator/services/document_service.py` | Orchestrator: find → validate → generate → save |
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
-| `noah_gui.py` | tkinter GUI — 문서 생성 7종. 기존 `create_*.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함 |
-| `cli_dist/build_portable_gui.py` | 사내 배포판 빌드 — python-build-standalone 런타임 + 앱 파일 + `설치.bat` → zip. 빌드는 임시 폴더에서(OneDrive 동기화·MAX_PATH 회피), 프로젝트엔 zip만 남김 |
+| `noah_gui.py` | tkinter GUI — 문서 7종 + 납기현황. 기존 `create_*.py`·`delivery_status.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함. **DOC_TYPES에 항목을 추가하면 `build_portable_gui.APP_FILES`에도 넣어야 한다** — 안 그러면 배포판에서 그 버튼만 조용히 실패한다 (빌드 `verify()`와 `tests/test_noah_gui.py`가 대조) |
+| `cli_dist/build_portable_gui.py` | 사내 배포판 빌드 — python-build-standalone 런타임 + 앱 파일 + `설치.bat`/`제거.bat` → zip. 빌드는 임시 폴더에서(OneDrive 동기화·MAX_PATH 회피), 프로젝트엔 zip만 남김. 버전 스탬프(`날짜+git sha` → `BUILD_INFO.txt` → GUI 타이틀), 핀 3자 대조(requirements 핀 = 배포 런타임 = 개발 env — transitive까지, 어긋나면 빌드 실패), 트리밍 후 `verify()`가 `DOC_TYPES` 대조 + CLI 전수 `--help` 스모크. **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
-| `po_generator/mailer.py` | 고객 메일 발송 — 사업자번호로 `Customer_국내` 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). 새 Outlook은 COM 미지원이라 `auto`가 `.eml`로 전환. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
+| `po_generator/mailer.py` | 고객 메일 발송 — 사업자번호로 `Customer_국내` 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
 | `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`confirm`/`add_mail_arguments`. `create_ts.py`와 `delivery_status.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다) |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
 | `docs/DATA_STRUCTURE_DESIGN.md` | Excel schema (8 sheets), Power Query setup |
@@ -139,10 +142,10 @@ Reconciliation layer:
 | `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
 | `docs/매입대사_가이드.md` | 운영자 관점 시각 가이드 — 데이터 흐름·합계 블록 해석·월별 액션 |
 | `po_generator/snapshot.py` | SnapshotEngine — 월별 마감, Variance 추적 |
-| `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`), `_sync_runs` + `_sync_log` v2 (record당 1행 + JSON, actor/host/sync_id/snapshot 포함) |
+| `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`), `_sync_runs` + `_sync_log` v2 (record당 1행 + JSON, actor/host/sync_id/snapshot 포함), `fx(currency, ym, rate)`, **`v_dn_revenue`(라인 매출 산식) + `v_dn_by_month`(인식 필터+월별 합산) 뷰 = DN 매출의 단일 정의**. 뷰는 `sync_db.py`가 매번 DROP+CREATE로 갱신. `SYNC_LOG_CHANGE_TYPES`·`KNOWN_SYNC_SHEETS`도 여기가 소유 |
 | `migrate_sync_log.py` | `sync_log.csv` → `_sync_log_legacy_v1` 전용 테이블 1회성 적재 (구 v1 형식; 운영 v2 `_sync_log`와 분리, 이후 `migrate_sync_log_v2.py`로 변환) |
 | `migrate_sync_log_v2.py` | `_sync_log` v1 → v2 (record 단위 + JSON 압축, _sync_runs 메타 분리, snapshot 추가) |
-| `sql/order_book.sql` | 이벤트 기반 Order Book SQL (Input/Output 이벤트 월만 행 생성, 재귀 CTE 없음) |
+| `sql/order_book.sql` | 이벤트 기반 Order Book SQL (Input/Output 이벤트 월만 행 생성, 재귀 CTE 없음). Output/Variance는 `v_dn_revenue` 뷰에서 온다 — **DN 산식을 여기서 다시 쓰지 말 것** (같은 산식이 sql 4종 + snapshot.py + dashboard.py 6곳에 복제돼 있던 걸 뷰로 모았다) |
 | `sql/order_book_snapshot.sql` | 스냅샷 기반 Order Book SQL (마감 고정 + Variance) |
 | `sql/order_book_variance.sql` | Variance 변동이유 분석 SQL (환율차이/판매가변경/수량변경/반올림 자동 분류, 납기변경 제외) |
 | `dashboard.py` | Streamlit 대시보드 (9페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book/동기화로그, PO미등록감지, PO확정지연, EXW미출고, 납기현황(DN qty매칭+PO EXW보충), 납기캘린더(선적예정 포함), 해외선적(Incoterms/운송방식별), 세금계산서미발행, Order Book 3탭, `_sync_log` 변경이력 조회) |
@@ -170,6 +173,14 @@ Reconciliation layer:
     고객이 섞인 `--merge` 문서는 발송 차단
   - 납기현황: 조회 기준인 사업자번호를 그대로 사용(항상 단일 거래처라 섞임 없음), 고정 참조는 `DS_MAIL_CC`,
     첨부 기본 **xlsx**(고객이 정렬·가공해 보는 표라 원본이 쓸모 있다). 본문에 납기 표를 HTML로 싣는다
+- **Order Book Output = 매출 인식 기준**이다 (출고 기준이 아니다) — `AX_매출대사`와 동일 산식.
+  국내 = 세금계산서 발행월(미발행이면 **미인식 = Backlog 잔류**), 해외 = 선적월 + 선적월 환율 재환산.
+  환율 재평가분은 `Value_Variance_amount`로 빠져 **Ending은 재환산 도입 전과 동일** —
+  "Ending ≠ 0 = SO-DN 금액 불일치" 진단이 환율 노이즈에 오염되지 않는다.
+  결과: `Period` 필터 → `SUM(Value_Output_amount)` = `AX_매출대사` 같은 월 합계.
+  **Backlog는 "미출고"가 아니라 "미인식" 물량** — 물류상 미출고는 대시보드 `납기현황`/`EXW미출고`.
+  N/A·선수금 폴백 사다리, 환율 결측 폴백 등 정확한 산식은 `v_dn_revenue`/`v_dn_by_month` 뷰
+  (db_schema.py)와 `docs/POWER_QUERY.md`(Order_Book)가 소유한다 — 산문 사본을 늘리지 말 것
 - 납기현황 요약 행은 **주문 × 요청납기 × 공장출고일** 단위다. 한 주문 안에서 두 날짜 중 하나라도
   다르면 행을 나눈다 — 대표값 하나로 접으면 나머지 납기 약속이 회신에서 사라진다.
   나뉜 행이 비고만으로 구분되지 않을 때만 `(품목: ...)`를 덧붙인다

@@ -26,7 +26,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 from po_generator.config import (
     NOAH_SO_PO_DN_FILE, BASE_DIR,
-    DN_DOMESTIC_SHEET, DN_EXPORT_SHEET,
+    DN_DOMESTIC_SHEET, DN_EXPORT_SHEET, FX_SHEET,
 )
 from po_generator.logging_config import setup_logging
 from po_generator.recon_paths import resolve_period_dir
@@ -47,7 +47,6 @@ DN_COMMON_COLS = [
 
 DN_EXPORT_EXTRA_COLS = ['Total Sales KRW', '선적일']
 
-FX_SHEET = 'FX'
 # 환율차이 판정 임계값 (반올림 오차 허용)
 FX_DIFF_THRESHOLD = 100
 
@@ -146,6 +145,8 @@ def load_noah_dn(year_month: str) -> pd.DataFrame:
     df_exp['구분'] = '해외'
 
     # 매출 인식일: 국내=출고일, 해외=선적일
+    # 주의: Order Book / `v_dn_revenue` 뷰는 국내를 세금계산서 발행월로 귀속한다 —
+    # 여기와 기준이 다르다 (매출대사도 세금계산서 기준으로 옮길지는 별도 판단, tasks/todo.md)
     df_dom['매출일'] = pd.to_datetime(df_dom['출고일'], errors='coerce')
     if '선적일' in df_exp.columns:
         df_exp['매출일'] = pd.to_datetime(df_exp['선적일'], errors='coerce')

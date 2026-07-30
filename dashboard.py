@@ -22,7 +22,9 @@ import plotly.io as pio
 import streamlit as st
 
 from po_generator.config import DB_FILE
-from po_generator.db_schema import ensure_so_change_ack_table, get_sync_metadata
+from po_generator.db_schema import (
+    ensure_so_change_ack_table, get_sync_metadata, SYNC_LOG_CHANGE_TYPES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +217,13 @@ def load_so() -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def load_dn() -> pd.DataFrame:
-    """DN 국내+해외 통합 (매출 기준: 국내=출고일, 해외=선적일)"""
+    """DN 국내+해외 통합 — **출고 흐름 기준** (국내=출고일, 해외=선적일, 금액=시트 KRW).
+
+    주의: Order Book의 '매출 인식 기준'(국내=세금계산서 발행월, 해외=선적월 환율 재환산,
+    `v_dn_revenue` 뷰)과 다르다. 이 로더를 쓰는 수주출고/제품/섹터/고객 페이지의 월별
+    금액은 출고월·수주시점 환율 관점이며, 회계 매출과 맞추려면 뷰 기준으로 옮겨야 한다
+    (페이지 전반의 숫자가 바뀌는 제품 결정이라 의도적으로 보류).
+    """
     conn = _conn()
     if not conn:
         return pd.DataFrame()
@@ -663,26 +671,28 @@ def load_dn_lines_by_so_line() -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def load_dn_tax_pending() -> pd.DataFrame:
-    """국내 DN 세금계산서 미발행 건 — 출고 완료 but 세금계산서/선수금 세금계산서 모두 미발행."""
+    """국내 DN 세금계산서 미발행 건 — 출고 완료 but 매출 미인식.
+
+    "출고했는데 세금계산서/선수금이 없다" 판정은 v_dn_revenue의 매출인식 캐스케이드
+    (세금계산서 → 'N/A'면 출고월 → 선수금+출고 → 미인식)와 정확히 같은 규칙이므로
+    직접 재구현하지 않고 `매출월 IS NULL`로 읽는다 — N/A 의미론이 갈라지지 않게.
+    """
     conn = _conn()
     if not conn:
         return pd.DataFrame()
     try:
         df = pd.read_sql_query("""
-            SELECT DN_ID, SO_ID, [Customer name] AS customer_name,
-                   [Item] AS item_name,
-                   CAST([Line item] AS INTEGER) AS line_item,
-                   CAST(Qty AS REAL) AS qty,
-                   CAST([Total Sales] AS REAL) AS amount_krw,
+            SELECT DN_ID, SO_ID, dn_cust AS customer_name,
+                   dn_item AS item_name,
+                   [Line item] AS line_item,
+                   Qty AS qty,
+                   output_amount AS amount_krw,
                    [출고일] AS dispatch_date
-            FROM dn_domestic
-            WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
-              AND (TRIM(COALESCE([세금계산서 발행일], '')) = '' OR [세금계산서 발행일] IS NULL)
-              AND UPPER(TRIM(COALESCE([세금계산서 발행일], ''))) != 'N/A'
-              AND ([선수금 세금계산서 발행일] IS NULL
-                   OR TRIM(COALESCE([선수금 세금계산서 발행일], '')) = ''
-                   OR UPPER(TRIM(COALESCE([선수금 세금계산서 발행일], ''))) = 'N/A')
-              AND CAST(COALESCE([Total Sales], 0) AS REAL) > 0
+            FROM v_dn_revenue
+            WHERE dn_market = '국내'
+              AND [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
+              AND (매출월 IS NULL OR 매출월 = '')
+              AND output_amount > 0
         """, conn)
     except Exception as e:
         logger.warning("데이터 로드 실패: %s", e)
@@ -725,22 +735,17 @@ def load_backlog() -> pd.DataFrame:
               AND Period IS NOT NULL AND TRIM(Period) != ''
         ),
         dn_combined AS (
-            SELECT SO_ID, CAST([Line item] AS INTEGER) AS line_item,
-                   CAST(Qty AS REAL) AS out_qty,
-                   ROUND(CAST([Total Sales] AS REAL)) AS out_amt
-            FROM dn_domestic
-            WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
-            UNION ALL
-            SELECT SO_ID, CAST([Line item] AS INTEGER),
-                   CAST(Qty AS REAL), ROUND(CAST([Total Sales KRW] AS REAL))
-            FROM dn_export
-            WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''
+            -- 매출 산식·인식 필터·월별 합산은 v_dn_by_month 뷰가 단일 정의
+            -- (po_generator/db_schema.py). 미인식 라인은 Output이 아니므로 Backlog에 남는다
+            SELECT SO_ID, [Line item] AS line_item, Output_qty AS out_qty,
+                   Output_amount AS out_amt, Output_fx AS fx_amt
+            FROM v_dn_by_month
         ),
         events AS (
             SELECT SO_ID, customer_name, os_name, line_item,
                    model_code, sector, delivery_date, market,
                    qty AS in_qty, amount AS in_amt,
-                   0 AS out_qty, 0 AS out_amt
+                   0 AS out_qty, 0 AS out_amt, 0 AS fx_amt
             FROM so_combined
             UNION ALL
             SELECT d.SO_ID,
@@ -751,7 +756,7 @@ def load_backlog() -> pd.DataFrame:
                    COALESCE(s.sector, '')                AS sector,
                    COALESCE(s.delivery_date, '')         AS delivery_date,
                    COALESCE(s.market, '')                AS market,
-                   0, 0, d.out_qty, d.out_amt
+                   0, 0, d.out_qty, d.out_amt, d.fx_amt
             FROM dn_combined d
             LEFT JOIN so_combined s
               ON d.SO_ID = s.SO_ID AND d.line_item = s.line_item
@@ -762,10 +767,11 @@ def load_backlog() -> pd.DataFrame:
                MIN(sector)        AS sector,
                GROUP_CONCAT(DISTINCT model_code) AS model_code,
                SUM(in_qty  - out_qty) AS ending_qty,
-               SUM(in_amt  - out_amt) AS ending_amount
+               SUM(in_amt  - out_amt + fx_amt) AS ending_amount
         FROM events
         GROUP BY SO_ID, os_name, delivery_date
-        HAVING ABS(SUM(in_qty - out_qty)) > 0.001 OR SUM(in_amt - out_amt) > 0.5
+        HAVING ABS(SUM(in_qty - out_qty)) > 0.001
+            OR SUM(in_amt - out_amt + fx_amt) > 0.5
         ORDER BY market, SO_ID, os_name
         """, conn)
     except Exception as e:
@@ -4609,6 +4615,8 @@ def pg_orderbook(market, sectors, customers, **_):
         ob_flow = ob.groupby("Period").agg(
             Input=("Value_Input_amount", "sum"),
             Output=("Value_Output_amount", "sum"),
+            # 환율 재평가분 — Output이 선적월 환율 재환산액이라 이게 없으면 Opening이 어긋난다
+            Variance=("Value_Variance_amount", "sum"),
         ).reset_index()
         _line_end = ob.groupby(_line_key + ["Period"])["Value_Ending_amount"].sum().reset_index()
         _pivot = _line_end.pivot_table(
@@ -4642,59 +4650,42 @@ def pg_orderbook(market, sectors, customers, **_):
                 else:
                     wf_sel_period = None
 
+            def _opening(row) -> float:
+                # Ending = Opening + Input − Output + Variance 의 역산.
+                # 원장 항등식은 이 한 곳에만 — 항이 늘면(예: 수량 Variance) 여기만 고친다
+                return row["Ending"] - row["Input"] + row["Output"] - row["Variance"]
+
             if wf_mode == "월별":
-                # 선택 월 워터폴
                 sel_row = ob_monthly[ob_monthly["Period"] == wf_sel_period].iloc[0]
-                opening = sel_row["Ending"] - sel_row["Input"] + sel_row["Output"]
-
-                wf_labels = ["Opening", "수주(Input)", "출고(Output)", "Ending"]
-                wf_values = [opening, sel_row["Input"], -sel_row["Output"], sel_row["Ending"]]
-                wf_measures = ["absolute", "relative", "relative", "total"]
-
-                fig_wf = go.Figure(go.Waterfall(
-                    x=wf_labels, y=wf_values, measure=wf_measures,
-                    connector=dict(line=dict(color="gray", dash="dot")),
-                    increasing=dict(marker=dict(color=C_INPUT)),
-                    decreasing=dict(marker=dict(color=C_OUTPUT)),
-                    totals=dict(marker=dict(color=C_ENDING)),
-                    textposition="outside",
-                    text=[fmt_krw(abs(v)) for v in wf_values],
-                    hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>",
-                ))
-                fig_wf.update_layout(
-                    height=400, margin=dict(t=30, b=30),
-                    yaxis=dict(title="금액 (KRW)"),
-                    title=dict(text=f"기준 월: {wf_sel_period}", font=dict(size=14)),
-                )
-                st.plotly_chart(fig_wf, width='stretch')
-
+                wf_labels = ["Opening", "수주(Input)", "매출(Output)", "환율(Variance)", "Ending"]
+                wf_values = [_opening(sel_row), sel_row["Input"], -sel_row["Output"],
+                             sel_row["Variance"], sel_row["Ending"]]
+                wf_title = f"기준 월: {wf_sel_period}"
             else:  # 누적
-                total_input = ob_monthly["Input"].sum()
-                total_output = ob_monthly["Output"].sum()
-                first_opening = ob_monthly.iloc[0]["Ending"] - ob_monthly.iloc[0]["Input"] + ob_monthly.iloc[0]["Output"]
-                final_ending = ob_monthly.iloc[-1]["Ending"]
                 period_range = f"{ob_monthly['Period'].min()} ~ {ob_monthly['Period'].max()}"
+                wf_labels = ["Opening", "총 수주(Input)", "총 매출(Output)", "환율(Variance)", "Ending"]
+                wf_values = [_opening(ob_monthly.iloc[0]),
+                             ob_monthly["Input"].sum(), -ob_monthly["Output"].sum(),
+                             ob_monthly["Variance"].sum(), ob_monthly.iloc[-1]["Ending"]]
+                wf_title = f"누적 기간: {period_range}"
 
-                wf_labels = ["Opening", "총 수주(Input)", "총 출고(Output)", "Ending"]
-                wf_values = [first_opening, total_input, -total_output, final_ending]
-                wf_measures = ["absolute", "relative", "relative", "total"]
-
-                fig_wf = go.Figure(go.Waterfall(
-                    x=wf_labels, y=wf_values, measure=wf_measures,
-                    connector=dict(line=dict(color="gray", dash="dot")),
-                    increasing=dict(marker=dict(color=C_INPUT)),
-                    decreasing=dict(marker=dict(color=C_OUTPUT)),
-                    totals=dict(marker=dict(color=C_ENDING)),
-                    textposition="outside",
-                    text=[fmt_krw(abs(v)) for v in wf_values],
-                    hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>",
-                ))
-                fig_wf.update_layout(
-                    height=400, margin=dict(t=30, b=30),
-                    yaxis=dict(title="금액 (KRW)"),
-                    title=dict(text=f"누적 기간: {period_range}", font=dict(size=14)),
-                )
-                st.plotly_chart(fig_wf, width='stretch')
+            wf_measures = ["absolute", "relative", "relative", "relative", "total"]
+            fig_wf = go.Figure(go.Waterfall(
+                x=wf_labels, y=wf_values, measure=wf_measures,
+                connector=dict(line=dict(color="gray", dash="dot")),
+                increasing=dict(marker=dict(color=C_INPUT)),
+                decreasing=dict(marker=dict(color=C_OUTPUT)),
+                totals=dict(marker=dict(color=C_ENDING)),
+                textposition="outside",
+                text=[fmt_krw(abs(v)) for v in wf_values],
+                hovertemplate="<b>%{x}</b><br>₩%{y:,.0f}<extra></extra>",
+            ))
+            fig_wf.update_layout(
+                height=400, margin=dict(t=30, b=30),
+                yaxis=dict(title="금액 (KRW)"),
+                title=dict(text=wf_title, font=dict(size=14)),
+            )
+            st.plotly_chart(fig_wf, width='stretch')
 
             latest_period = ob_monthly["Period"].max()
             latest = ob_monthly[ob_monthly["Period"] == latest_period].iloc[0]
@@ -5323,9 +5314,10 @@ def _render_order_timeline() -> None:
     )
 
     n_evt = len(events)
-    n_c = int((events["change_type"] == "신규").sum())
-    n_u = int((events["change_type"] == "수정").sum())
-    n_d = int((events["change_type"] == "삭제").sum())
+    # 어휘는 db_schema.SYNC_LOG_CHANGE_TYPES가 소유 — writer가 유형을 추가하면 여기도 따라온다
+    type_counts = {
+        t: int((events["change_type"] == t).sum()) for t in SYNC_LOG_CHANGE_TYPES
+    }
     first_evt = events["sync_time_dt"].min()
     last_evt = events["sync_time_dt"].max()
     # 빈 문자열/NULL actor는 '(unknown)'으로 통일 — 카드 단위 표기(actor or '(unknown)')와 일관,
@@ -5337,7 +5329,8 @@ def _render_order_timeline() -> None:
 
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("총 이벤트", f"{n_evt:,}")
-    k2.metric("신규·수정·삭제", f"{n_c}·{n_u}·{n_d}")
+    k2.metric("·".join(SYNC_LOG_CHANGE_TYPES),
+              "·".join(str(type_counts[t]) for t in SYNC_LOG_CHANGE_TYPES))
     if pd.notna(first_evt):
         k3.metric("최초 기록", first_evt.strftime("%Y-%m-%d %H:%M"))
     if pd.notna(last_evt):
@@ -5356,7 +5349,7 @@ def _render_order_timeline() -> None:
 
     st.divider()
 
-    type_emoji = {"신규": "🟢", "수정": "🔵", "삭제": "🔴"}
+    type_emoji = {"신규": "🟢", "수정": "🔵", "삭제": "🔴", "재적재": "🔁"}
     sheet_emoji = {
         "SO_국내": "🛒", "SO_해외": "🛒",
         "PO_국내": "🏭", "PO_해외": "🏭",
@@ -5437,7 +5430,7 @@ def _render_sync_log_explore() -> None:
     with r1c1:
         sheet_sel = st.multiselect("시트", sorted(log_df["sheet_name"].unique()))
     with r1c2:
-        type_sel = st.multiselect("변경 유형", ["신규", "수정", "삭제"])
+        type_sel = st.multiselect("변경 유형", list(SYNC_LOG_CHANGE_TYPES))
 
     r2c1, r2c2, r2c3 = st.columns([2, 2, 1])
     with r2c1:
@@ -5509,19 +5502,19 @@ def _render_sync_log_explore() -> None:
             필터된_변경=("id", "count"),
             시트수=("sheet_name", "nunique"),
             영향PK수=("pk", "nunique"),
-            신규=("change_type", lambda s: (s == "신규").sum()),
-            수정=("change_type", lambda s: (s == "수정").sum()),
-            삭제=("change_type", lambda s: (s == "삭제").sum()),
+            # 유형별 카운트 — 어휘(재적재 포함)는 db_schema.SYNC_LOG_CHANGE_TYPES가 소유
+            **{t: ("change_type", lambda s, _t=t: (s == _t).sum())
+               for t in SYNC_LOG_CHANGE_TYPES},
         ).reset_index()
         runs_view = runs_view.merge(per_run, on="sync_id", how="left")
         # dry_run 컬럼은 제거 — 이 뷰는 _sync_log와 조인되어 항상 0(dry-run은 로그 미기록).
         runs_view = runs_view[[
             "sync_id", "started_at", "소요(초)", "actor", "host",
-            "필터된_변경", "시트수", "영향PK수", "신규", "수정", "삭제", "note",
+            "필터된_변경", "시트수", "영향PK수", *SYNC_LOG_CHANGE_TYPES, "note",
         ]]
         runs_view.columns = [
             "sync_id", "시작", "소요(초)", "사용자", "호스트",
-            "변경수(필터)", "시트수", "PK수", "신규", "수정", "삭제", "비고",
+            "변경수(필터)", "시트수", "PK수", *SYNC_LOG_CHANGE_TYPES, "비고",
         ]
         runs_view["소요(초)"] = runs_view["소요(초)"].apply(
             lambda v: "" if pd.isna(v) else f"{int(round(v))}"

@@ -182,6 +182,8 @@ def _jdump(obj) -> str:
 
 
 # 시트명 → PK 컬럼 (재키잉 인식 시 '키 컬럼'을 비교에서 제외하기 위함)
+# SYNC_SHEETS 밖 결과(FX 등)는 여기 없어 pk_columns=()로 떨어지고, _reconcile_rekeys가
+# 빈 키에서 즉시 통과한다 — 재키잉 페어링은 위치성 키를 가진 세로형 시트 전용(의도된 제외).
 _PK_BY_SHEET: dict[str, tuple[str, ...]] = {c.sheet_name: c.pk_columns for c in SYNC_SHEETS}
 
 
@@ -272,6 +274,15 @@ def write_sync_log_to_db(summary: SyncSummary, note: str | None = None,
     rows: list[tuple] = []
     # placeholder sync_id — INSERT 시점에 채움
     for r in summary.results:
+        # PK 정의 변경으로 테이블을 재적재한 경우: 전 행이 '신규'로 잡히지만 데이터가
+        # 들어온 게 아니라 키 체계가 바뀐 것이다. 수천 건의 가짜 '신규'로 이력을
+        # 덮는 대신 '재적재' 1건만 남긴다 (진짜 변경은 다음 sync부터 정상 기록).
+        if r.pk_migrated:
+            rows.append((r.sheet_name, '재적재', _jdump([r.table_name]), r.table_name,
+                         _jdump({'reason': 'PK 정의 변경 → 테이블 재생성',
+                                 'rows': r.total_rows}), None))
+            continue
+
         # 재키잉 인식: 위치성 키(Line item 등) 편집으로 발생한 삭제+신규 쌍을
         # '키변경(수정)' 단일 이벤트로 합쳐 "데이터는 있는데 삭제로 뜨는" 오해 제거.
         # 묶이지 않은 신규/삭제만 그대로 신규/삭제로 기록한다.

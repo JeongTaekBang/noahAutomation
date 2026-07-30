@@ -32,32 +32,14 @@ so_combined AS (
     WHERE COALESCE(Status, '') NOT IN ('Cancelled', 'Hold')
       AND Period IS NOT NULL AND TRIM(Period) != ''
 ),
-dn_combined AS (
-    SELECT SO_ID, CAST([Line item] AS INTEGER) AS [Line item],
-        CAST(Qty AS REAL) AS Qty, ROUND(CAST([Total Sales] AS REAL)) AS 출고금액,
-        SUBSTR([출고일], 1, 7) AS 출고월
-    FROM dn_domestic
-    WHERE [출고일] IS NOT NULL AND TRIM(COALESCE([출고일], '')) != ''
-    UNION ALL
-    SELECT SO_ID, CAST([Line item] AS INTEGER),
-        CAST(Qty AS REAL), ROUND(CAST([Total Sales KRW] AS REAL)),
-        SUBSTR([선적일], 1, 7)
-    FROM dn_export
-    WHERE [선적일] IS NOT NULL AND TRIM(COALESCE([선적일], '')) != ''
-),
-dn_by_month AS (
-    SELECT SO_ID, [Line item], 출고월,
-        SUM(Qty) AS Output_qty, SUM(출고금액) AS Output_amount
-    FROM dn_combined WHERE 출고월 IS NOT NULL AND 출고월 != ''
-    GROUP BY SO_ID, [Line item], 출고월
-),
+-- DN 월별 집계는 v_dn_by_month 뷰 (매출 인식 필터 + 분할 출고 합산의 단일 정의)
 events_line_item AS (
     SELECT s.SO_ID, s.[Customer name], s.[Customer PO], s.[Item name],
         s.[OS name], s.[Line item], s.[Model code],
         s.Sector, s.[Business registration number], s.[Industry code],
         s.[Expected delivery date], s.구분,
         s.[Item qty] AS Value_Input_qty, s.[Sales amount KRW] AS Value_Input_amount,
-        0 AS Value_Output_qty, 0 AS Value_Output_amount
+        0 AS Value_Output_qty, 0 AS Value_Output_amount, 0 AS Value_FX_amount
     FROM so_combined s
     UNION ALL
     SELECT dm.SO_ID,
@@ -72,8 +54,8 @@ events_line_item AS (
         COALESCE(s.[Industry code], '')         AS [Industry code],
         COALESCE(s.[Expected delivery date], '') AS [Expected delivery date],
         COALESCE(s.구분, '')                    AS 구분,
-        0, 0, dm.Output_qty, dm.Output_amount
-    FROM dn_by_month dm
+        0, 0, dm.Output_qty, dm.Output_amount, dm.Output_fx
+    FROM v_dn_by_month dm
     LEFT JOIN so_combined s ON dm.SO_ID = s.SO_ID AND dm.[Line item] = s.[Line item]
 ),
 -- ─── Backlog: 전체 이벤트 합산, Ending > 0 ───
@@ -86,12 +68,12 @@ backlog AS (
         MIN([Industry code]) AS [Industry code],
         GROUP_CONCAT(DISTINCT [Model code]) AS [Model code],
         SUM(Value_Input_qty - Value_Output_qty) AS Value_Ending_qty,
-        SUM(Value_Input_amount - Value_Output_amount) AS Value_Ending_amount
+        SUM(Value_Input_amount - Value_Output_amount + Value_FX_amount) AS Value_Ending_amount
     FROM events_line_item
     GROUP BY SO_ID, [OS name], [Expected delivery date]
     -- 잔여수량 또는 잔여금액 중 하나라도 남으면 open (수량 양수/금액 0 라인 보존)
     HAVING ABS(SUM(Value_Input_qty - Value_Output_qty)) > 0.001
-        OR SUM(Value_Input_amount - Value_Output_amount) > 0.5
+        OR SUM(Value_Input_amount - Value_Output_amount + Value_FX_amount) > 0.5
 )
 
 -- ═══ Backlog 현황: Ending > 0 ═══

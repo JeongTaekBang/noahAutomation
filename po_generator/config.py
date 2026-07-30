@@ -140,6 +140,9 @@ DN_EXPORT_SHEET: Final[str] = 'DN_해외'
 CUSTOMER_DOMESTIC_SHEET: Final[str] = 'Customer_국내'
 CUSTOMER_EXPORT_SHEET: Final[str] = 'Customer_해외'
 WEIGHT_SHEET: Final[str] = 'Weight'
+# 월별 환율 (가로형: 헤더 `FX | 2026-01 | 2026-02 | ...`, 행 = 통화)
+# 해외 매출을 선적월 환율로 재환산할 때 사용 — Order Book / AX_매출대사 공통 기준
+FX_SHEET: Final[str] = 'FX'
 
 # 기존 설정 (하위 호환 - deprecated)
 DOMESTIC_SHEET_INDEX: Final[int] = 0  # 국내

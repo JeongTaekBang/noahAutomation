@@ -7,6 +7,7 @@ NOAH_SO_PO_DN.xlsx의 수동 입력 시트를 SQLite DB에 upsert 방식으로 �
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import logging
 import math
@@ -17,15 +18,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from po_generator.config import NOAH_SO_PO_DN_FILE, DB_FILE
+from po_generator.config import NOAH_SO_PO_DN_FILE, DB_FILE, FX_SHEET
 from po_generator.db_schema import (
-    SheetConfig, SYNC_SHEETS,
+    SheetConfig, SYNC_SHEETS, KNOWN_SYNC_SHEETS,
     create_table, ensure_columns_exist,
     update_sync_metadata, get_table_row_count,
-    migrate_pk_if_changed,
+    migrate_pk_if_changed, create_fx_table, create_order_book_views,
 )
 
 logger = logging.getLogger(__name__)
+
+# FX 시트의 월 컬럼 헤더 (YYYY-MM 텍스트)
+_FX_YM_RE = re.compile(r'^(\d{4})-(0[1-9]|1[0-2])$')
 
 
 @dataclass
@@ -51,6 +55,9 @@ class SheetSyncResult:
     pruned_pks: list[tuple] = field(default_factory=list)
     # 삭제 직전 행 스냅샷 — 감사/복구용 ([{pk: tuple, snapshot: {col: value}}])
     pruned_snapshots: list[dict] = field(default_factory=list)
+    # PK 정의가 바뀌어 테이블을 재생성했는가. True면 전 행이 '신규'로 잡히지만
+    # 데이터 변경이 아니라 재키잉이므로 변경 이력엔 '재적재' 1건만 남긴다.
+    pk_migrated: bool = False
 
     @property
     def success(self) -> bool:
@@ -209,7 +216,7 @@ class SyncEngine:
         if sheet_filter:
             filter_set = set(sheet_filter)
             configs = [c for c in configs if c.sheet_name in filter_set]
-            not_found = filter_set - {c.sheet_name for c in configs}
+            not_found = filter_set - KNOWN_SYNC_SHEETS
             if not_found:
                 logger.warning("설정에 없는 시트 무시: %s", not_found)
 
@@ -235,6 +242,14 @@ class SyncEngine:
                 result = self._sync_sheet(conn, xls, config, dry_run)
                 summary.results.append(result)
 
+            # FX(환율)는 가로형 시트라 일반 파이프라인을 타지 않는다 → 전용 언피벗 동기화
+            if ((not sheet_filter or FX_SHEET in sheet_filter)
+                    and FX_SHEET in available_sheets):
+                summary.results.append(self._sync_fx(conn, xls))
+
+            # Order Book 공통 뷰(v_dn_revenue) — 정의가 코드에 있으므로 매번 갱신
+            create_order_book_views(conn)
+
             if dry_run:
                 conn.rollback()
             elif summary.total_errors > 0:
@@ -251,6 +266,102 @@ class SyncEngine:
 
         summary.elapsed_seconds = (datetime.now() - start).total_seconds()
         return summary
+
+    @staticmethod
+    def _fx_month_key(col) -> str | None:
+        """FX 시트 헤더를 'YYYY-MM'으로 정규화. 월 컬럼이 아니면 None."""
+        if isinstance(col, (datetime, pd.Timestamp)):
+            return f'{col.year:04d}-{col.month:02d}'
+        text = str(col).strip()
+        return text if _FX_YM_RE.match(text) else None
+
+    def _sync_fx(self, conn: sqlite3.Connection,
+                 xls: pd.ExcelFile) -> SheetSyncResult:
+        """FX 시트(가로형: 통화 × 월) → fx(currency, ym, rate) 언피벗 동기화.
+
+        환율 한 칸이 바뀌면 해외 매출·Order Book Output이 전부 움직이므로
+        신규/수정/삭제를 모두 상세 기록해 `_sync_log`에 남긴다.
+        """
+        result = SheetSyncResult(sheet_name=FX_SHEET, table_name='fx')
+        try:
+            df = pd.read_excel(xls, sheet_name=FX_SHEET)
+        except Exception as e:  # noqa: BLE001 — 시트 파손도 동기화 실패로 보고
+            logger.error("%s: 읽기 실패 — %s", FX_SHEET, e)
+            result.errors = 1
+            result.error_messages.append(f"'{FX_SHEET}' 시트 읽기 실패: {e}")
+            return result
+
+        create_fx_table(conn)
+        now = datetime.now().isoformat()
+
+        month_cols = [(c, k) for c in df.columns[1:]
+                      if (k := self._fx_month_key(c)) is not None]
+        if not month_cols:
+            # 월 컬럼을 못 찾으면 fx가 비어 뷰가 조용히 시트 KRW로 폴백한다
+            # → 숫자가 틀린 채 돌아가므로 에러로 세운다 (헤더 승격/형식 확인 필요)
+            msg = (f"'{FX_SHEET}' 시트에서 'YYYY-MM' 월 컬럼을 찾지 못했습니다 "
+                   f"(헤더: {list(df.columns)[:5]})")
+            logger.error(msg)
+            result.errors = 1
+            result.error_messages.append(msg)
+            return result
+
+        cur_col = df.columns[0]
+        excel_rates: dict[tuple[str, str], float] = {}
+        for _, row in df.iterrows():
+            raw_cur = row[cur_col]
+            currency = '' if pd.isna(raw_cur) else str(raw_cur).strip().upper()
+            if not currency:
+                continue
+            for col, ym in month_cols:
+                val = row[col]
+                if pd.isna(val):
+                    continue
+                try:
+                    rate = float(val)
+                except (TypeError, ValueError):
+                    continue
+                if rate <= 0:
+                    continue
+                excel_rates[(currency, ym)] = rate
+
+        result.total_rows = len(excel_rates)
+        existing: dict[tuple[str, str], float] = {
+            (c, y): r for c, y, r in
+            conn.execute('SELECT currency, ym, rate FROM fx')
+        }
+
+        for pk, rate in excel_rates.items():
+            old = existing.get(pk)
+            if old is None:
+                conn.execute(
+                    'INSERT INTO fx (currency, ym, rate, _sync_updated_at) '
+                    'VALUES (?, ?, ?, ?)', (*pk, rate, now))
+                result.inserted += 1
+                result.inserted_pks.append(pk)
+                result.inserted_details.append({'pk': pk, 'values': {'rate': rate}})
+            elif abs(old - rate) > 1e-9:
+                conn.execute(
+                    'UPDATE fx SET rate = ?, _sync_updated_at = ? '
+                    'WHERE currency = ? AND ym = ?', (rate, now, *pk))
+                result.updated += 1
+                result.updated_pks.append(pk)
+                result.updated_details.append({'pk': pk, 'changes': {'rate': (old, rate)}})
+            else:
+                result.unchanged += 1
+
+        for pk, old in existing.items():
+            if pk not in excel_rates:
+                conn.execute('DELETE FROM fx WHERE currency = ? AND ym = ?', pk)
+                result.pruned += 1
+                result.pruned_pks.append(pk)
+                result.pruned_snapshots.append({'pk': pk, 'snapshot': {'rate': old}})
+
+        update_sync_metadata(conn, 'fx', now, len(excel_rates))
+        logger.info("%s: %d개 환율 (신규 %d / 수정 %d / 삭제 %d)",
+                    FX_SHEET, result.total_rows, result.inserted,
+                    result.updated, result.pruned)
+        return result
 
     def _sync_sheet(self, conn: sqlite3.Connection, xls: pd.ExcelFile,
                     config: SheetConfig, dry_run: bool) -> SheetSyncResult:
@@ -332,7 +443,7 @@ class SyncEngine:
             columns = list(df.columns)
 
             # 5. PK 변경 시 테이블 재생성 + 테이블 생성/컬럼 추가
-            migrate_pk_if_changed(conn, config)
+            result.pk_migrated = migrate_pk_if_changed(conn, config)
             create_table(conn, config.table_name, columns, config.pk_columns)
             added_cols = ensure_columns_exist(conn, config.table_name, columns)
             if added_cols > 0:
@@ -438,16 +549,20 @@ class SyncEngine:
                         )
                         result.inserted += 1
                         result.inserted_pks.append(tuple(pk_vals))
-                        # 신규 행의 비어있지 않은 값 기록
-                        non_empty = {}
-                        for i, c in enumerate(columns):
-                            v = new_values[i]
-                            if v is not None and str(v).strip() != '':
-                                non_empty[c] = v
-                        result.inserted_details.append({
-                            'pk': tuple(pk_vals),
-                            'values': non_empty,
-                        })
+                        # 신규 행의 비어있지 않은 값 기록.
+                        # PK 마이그레이션 재적재는 전 행이 '신규'로 잡히지만 로그가
+                        # '재적재' 1건으로 접으므로 행별 상세는 만들지 않는다
+                        # (수천 행 × 전 컬럼 dict 생성 낭비 + --changes 출력 폭주 방지)
+                        if not result.pk_migrated:
+                            non_empty = {}
+                            for i, c in enumerate(columns):
+                                v = new_values[i]
+                                if v is not None and str(v).strip() != '':
+                                    non_empty[c] = v
+                            result.inserted_details.append({
+                                'pk': tuple(pk_vals),
+                                'values': non_empty,
+                            })
 
                 except Exception as e:
                     result.errors += 1

@@ -19,7 +19,7 @@ from po_generator.config import (
     SO_DOMESTIC_SHEET, SO_EXPORT_SHEET,
     PO_DOMESTIC_SHEET, PO_EXPORT_SHEET,
     DN_DOMESTIC_SHEET, DN_EXPORT_SHEET,
-    PMT_DOMESTIC_SHEET,
+    PMT_DOMESTIC_SHEET, FX_SHEET,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,17 +66,24 @@ SYNC_SHEETS: list[SheetConfig] = [
         needs_row_seq=True,
         row_seq_group=('PO_ID', 'Line item'),
     ),
+    # DN도 (DN_ID, SO_ID, Line item)이 유일하지 않다 — 같은 DN 문서·같은 SO 라인을
+    # 두 행으로 나눠 적는 분할출고가 실제로 존재한다(2026-07-30 실측 2쌍). _row_seq 없이는
+    # 뒤 행이 앞 행을 덮어써 매출·수량이 조용히 사라진다. PO와 동일한 처방.
     SheetConfig(
         sheet_name=DN_DOMESTIC_SHEET,
         table_name='dn_domestic',
-        pk_columns=('DN_ID', 'SO_ID', 'Line item'),
+        pk_columns=('DN_ID', 'SO_ID', 'Line item', '_row_seq'),
         required_column='DN_ID',
+        needs_row_seq=True,
+        row_seq_group=('DN_ID', 'SO_ID', 'Line item'),
     ),
     SheetConfig(
         sheet_name=DN_EXPORT_SHEET,
         table_name='dn_export',
-        pk_columns=('DN_ID', 'SO_ID', 'Line item'),
+        pk_columns=('DN_ID', 'SO_ID', 'Line item', '_row_seq'),
         required_column='DN_ID',
+        needs_row_seq=True,
+        row_seq_group=('DN_ID', 'SO_ID', 'Line item'),
     ),
     SheetConfig(
         sheet_name=PMT_DOMESTIC_SHEET,
@@ -85,6 +92,16 @@ SYNC_SHEETS: list[SheetConfig] = [
         required_column='\uc120\uc218\uae08_ID',  # 선수금_ID
     ),
 ]
+
+# sync가 아는 시트 전체 = 세로형 공통 파이프라인(SYNC_SHEETS) + 가로형 전용 경로(FX).
+# "--sheets에 설정에 없는 시트가 왔다" 경고 판정의 단일 소유자 — 특수 경로가 늘면 여기만 넓힌다.
+KNOWN_SYNC_SHEETS: frozenset[str] = frozenset(
+    {c.sheet_name for c in SYNC_SHEETS} | {FX_SHEET}
+)
+
+# _sync_log.change_type 어휘 — writer(sync_db)와 reader(dashboard 동기화 로그)가 공유.
+# 멤버를 추가하면 양쪽이 자동으로 따라온다 ('재적재'가 writer에만 있던 갈라짐 방지).
+SYNC_LOG_CHANGE_TYPES: tuple[str, ...] = ('신규', '수정', '삭제', '재적재')
 
 
 def _get_table_pk(conn: sqlite3.Connection, table_name: str) -> tuple[str, ...]:
@@ -218,6 +235,118 @@ def create_snapshot_tables(conn: sqlite3.Connection) -> None:
         )
     """)
     logger.debug("스냅샷 테이블 생성/확인 완료")
+
+
+def create_fx_table(conn: sqlite3.Connection) -> None:
+    """월별 환율 테이블 생성 (FX 시트 언피벗 결과: 통화 × 월 → 환율)"""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS fx (
+            currency TEXT NOT NULL,
+            ym TEXT NOT NULL,
+            rate REAL NOT NULL,
+            _sync_updated_at TEXT,
+            PRIMARY KEY (currency, ym)
+        )
+    """)
+    logger.debug("fx 테이블 생성/확인 완료")
+
+
+# ─────────────────────────────────────────────────────────────
+# v_dn_revenue — DN 매출 인식(월·금액) 단일 정의
+#
+# Order Book 계열 쿼리가 6곳(sql/ 4개 + snapshot.py + dashboard.py)에서
+# 같은 DN 산식을 복제하고 있었다. 뷰로 한 번만 정의해 갈라짐을 막는다.
+# Power Query `Order_Book` / `AX_매출대사`와 동일 규칙:
+#   국내 매출인식일 = 세금계산서 발행일
+#                   → 'N/A'(발행 불필요: 무상공급·FOC·반품)면 출고일
+#                   → 선수금 세금계산서 + 출고 완료면 출고일
+#                   → 없으면 NULL (매출 미인식 → Output 없음 = Backlog 잔류)
+#   해외 매출인식일 = 선적일, KRW = 외화금액 × 선적월 환율 (없으면 시트 KRW로 폴백)
+#   fx_variance     = 재환산액 − 시트 KRW (환율 재평가분, 국내는 항상 0)
+# ─────────────────────────────────────────────────────────────
+DN_REVENUE_VIEW_SQL = """
+CREATE VIEW v_dn_revenue AS
+SELECT
+    DN_ID, SO_ID, [Line item], Qty, 매출월, 출고일,
+    output_amount,
+    output_amount - sheet_amount AS fx_variance,
+    dn_cust, dn_item, dn_po, dn_brn, dn_market
+FROM (
+    -- ─── 국내: 매출인식일 기준 (KRW 거래 → 재환산 없음) ───
+    SELECT
+        d.DN_ID,
+        d.SO_ID,
+        CAST(d.[Line item] AS INTEGER) AS [Line item],
+        CAST(d.Qty AS REAL)            AS Qty,
+        SUBSTR(
+            CASE
+                WHEN TRIM(COALESCE(d.[세금계산서 발행일], '')) GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]*'
+                    THEN d.[세금계산서 발행일]
+                WHEN UPPER(TRIM(COALESCE(d.[세금계산서 발행일], ''))) = 'N/A'
+                    THEN d.[출고일]
+                WHEN TRIM(COALESCE(d.[선수금 세금계산서 발행일], '')) != ''
+                     AND TRIM(COALESCE(d.[출고일], '')) != ''
+                    THEN d.[출고일]
+            END, 1, 7)                 AS 매출월,
+        d.[출고일]                      AS 출고일,
+        ROUND(CAST(d.[Total Sales] AS REAL)) AS output_amount,
+        ROUND(CAST(d.[Total Sales] AS REAL)) AS sheet_amount,
+        d.[Customer name] AS dn_cust, d.[Item] AS dn_item,
+        d.[Customer PO] AS dn_po, d.[Business registration number] AS dn_brn,
+        '국내' AS dn_market
+    FROM dn_domestic d
+
+    UNION ALL
+
+    -- ─── 해외: 선적일 기준 + 선적월 환율 재환산 ───
+    SELECT
+        e.DN_ID,
+        e.SO_ID,
+        CAST(e.[Line item] AS INTEGER),
+        CAST(e.Qty AS REAL),
+        SUBSTR(e.[선적일], 1, 7),
+        e.[출고일],
+        CASE
+            WHEN e.Currency = 'KRW' THEN ROUND(CAST(e.[Total Sales] AS REAL))
+            WHEN f.rate IS NOT NULL AND TRIM(COALESCE(e.[Total Sales], '')) != ''
+                THEN ROUND(CAST(e.[Total Sales] AS REAL) * f.rate)
+            ELSE ROUND(CAST(e.[Total Sales KRW] AS REAL))
+        END,
+        ROUND(CAST(e.[Total Sales KRW] AS REAL)),
+        e.[Customer name], e.[Item], e.[Customer PO], '', '해외'
+    FROM dn_export e
+    LEFT JOIN fx f
+        ON f.currency = e.Currency
+       AND f.ym = SUBSTR(e.[선적일], 1, 7)
+)
+"""
+
+# v_dn_by_month — 매출 인식된 라인의 월별 집계 (Order Book Output의 공통 재료)
+# "미인식 행은 Output이 아니다" 필터와 SUM 집계를 한 곳에 둔다 — 소비처(sql 4종 +
+# snapshot.py + dashboard.py)가 같은 WHERE/GROUP BY를 각자 들고 있지 않게.
+# 미인식 행 진단(매출월 IS NULL 조회)은 라인 레벨 v_dn_revenue를 직접 읽는다.
+DN_BY_MONTH_VIEW_SQL = """
+CREATE VIEW v_dn_by_month AS
+SELECT SO_ID, [Line item], 매출월,
+       SUM(Qty)           AS Output_qty,
+       SUM(output_amount) AS Output_amount,
+       SUM(fx_variance)   AS Output_fx,
+       MIN(dn_cust) AS dn_cust, MIN(dn_item) AS dn_item,
+       MIN(dn_po) AS dn_po, MIN(dn_brn) AS dn_brn, MIN(dn_market) AS dn_market
+FROM v_dn_revenue
+WHERE 매출월 IS NOT NULL AND 매출월 != ''
+GROUP BY SO_ID, [Line item], 매출월
+"""
+
+
+def create_order_book_views(conn: sqlite3.Connection) -> None:
+    """Order Book 계열 공통 뷰 생성/갱신 (정의 변경이 바로 반영되도록 DROP 후 재생성)"""
+    create_fx_table(conn)  # 뷰가 참조하므로 먼저 보장
+    conn.execute('DROP VIEW IF EXISTS v_dn_by_month')
+    conn.execute('DROP VIEW IF EXISTS v_dn_revenue')
+    conn.execute(DN_REVENUE_VIEW_SQL)
+    conn.execute(DN_BY_MONTH_VIEW_SQL)
+    logger.debug("v_dn_revenue / v_dn_by_month 뷰 생성/갱신 완료")
 
 
 def ensure_sync_log_tables(conn: sqlite3.Connection) -> None:
