@@ -4,8 +4,24 @@
 # 범위 지정(>=)으로 두면 빌드 시점마다 다른 버전이 들어가 재현이 안 된다.
 # 특히 pandas 3.x는 동작이 달라 프로젝트가 <3.0.0으로 막아둔 상태다.
 #
+# transitive까지 고정하는 이유: 직접 의존성만 고정했더니 numpy가 빌드마다
+# 떠다녔다 (개발 env 2.4.3 vs 배포판 2.4.6 실측). 빌드가 이 파일의 핀과
+# ① 배포 런타임에 설치된 버전, ② 빌드하는 개발 env의 버전을 전부 대조하고,
+# 하나라도 어긋나면 실패한다 (build_portable_gui.py: install_packages).
+# → 갱신 절차: 개발 env에서 버전을 올려 테스트를 통과시킨 뒤, 여기 핀을 맞춘다.
+#
 # 대시보드/대사/테스트용 패키지(streamlit, plotly, pytest)는 배포판에 넣지 않는다.
+
+# 직접 의존성
 pandas==2.3.3
 openpyxl==3.1.5
 xlwings==0.33.21
 pywin32==311
+
+# transitive (pandas: numpy·python-dateutil·pytz·tzdata·six / openpyxl: et-xmlfile)
+numpy==2.4.3
+python-dateutil==2.9.0.post0
+pytz==2026.1.post1
+tzdata==2025.3
+six==1.17.0
+et-xmlfile==2.0.0

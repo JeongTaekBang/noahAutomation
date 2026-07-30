@@ -2,13 +2,13 @@
 NOAH 문서 생성기 GUI
 =====================
 
-발주서/거래명세표/PI/FI/OC/CI/PL을 창 하나에서 생성합니다.
+발주서/거래명세표/PI/FI/OC/CI/PL과 거래처 납기현황 회신표를 창 하나에서 만듭니다.
 사내 배포판(포터블 폴더)의 진입점이며, 개발 PC에서도 그대로 실행됩니다.
 
 설계
 ----
-GUI는 문서를 직접 만들지 않고 기존 CLI(`create_*.py`)를 **자식 프로세스로 실행**하고
-표준출력을 화면에 흘립니다. 덕분에
+GUI는 문서를 직접 만들지 않고 기존 CLI(`create_*.py`, `delivery_status.py`)를
+**자식 프로세스로 실행**하고 표준출력을 화면에 흘립니다. 덕분에
 
   - 생성 로직에 GUI 코드가 섞이지 않는다 (CLI와 완전히 같은 코드 경로)
   - Excel COM이 자식 프로세스에 격리된다 (COM 오류가 나도 창이 죽지 않음)
@@ -39,6 +39,9 @@ from tkinter import filedialog, messagebox, ttk
 APP_DIR = Path(__file__).resolve().parent
 INI_FILE = APP_DIR / "noah_config.ini"
 
+# 배포 빌드가 만드는 버전 파일 — 개발 PC에는 없다 (없으면 타이틀에 버전 생략)
+BUILD_INFO_FILE = APP_DIR / "BUILD_INFO.txt"
+
 DATA_FILE_NAME = "NOAH_SO_PO_DN.xlsx"
 
 # 데이터 파일 검증용 — 이 시트들이 있어야 NOAH 데이터 파일로 인정
@@ -57,45 +60,91 @@ SEARCH_MAX_DEPTH = 5
 # hint     : 입력 예시
 # out_attr : config.py의 출력 폴더 상수명 ([출력 폴더 열기]에 사용)
 # options  : 이 문서에서만 보이는 옵션 위젯 키
+# multi    : 한 번에 여러 건을 넘길 수 있는지
+# 모든 키는 모든 항목에 있어야 한다 (tests/test_noah_gui.py가 검사)
 DOC_TYPES: tuple[dict[str, object], ...] = (
     {
         'key': 'po', 'label': '발주서 (PO)', 'script': 'create_po.py',
         'id_label': 'PO_ID', 'hint': '예: ND-0001, NO-0001',
-        'out_attr': 'OUTPUT_DIR', 'options': ('force',),
+        'out_attr': 'OUTPUT_DIR', 'options': ('force',), 'multi': True,
     },
     {
         'key': 'ts', 'label': '거래명세표 (TS)', 'script': 'create_ts.py',
         'id_label': 'DN_ID / 선수금_ID', 'hint': '예: DND-2026-0001, ADV_2026-0001',
-        'out_attr': 'TS_OUTPUT_DIR', 'options': ('merge', 'mail'),
+        'out_attr': 'TS_OUTPUT_DIR', 'options': ('merge', 'mail'), 'multi': True,
     },
     {
         'key': 'pi', 'label': 'Proforma Invoice (PI)', 'script': 'create_pi.py',
         'id_label': 'SO_ID', 'hint': '예: SOO-2026-0001',
-        'out_attr': 'PI_OUTPUT_DIR', 'options': (),
+        'out_attr': 'PI_OUTPUT_DIR', 'options': (), 'multi': True,
     },
     {
         'key': 'fi', 'label': 'Final Invoice (FI)', 'script': 'create_fi.py',
         'id_label': 'DN_ID', 'hint': '예: DNO-2026-0001',
-        'out_attr': 'FI_OUTPUT_DIR', 'options': ('fi_mode',),
+        'out_attr': 'FI_OUTPUT_DIR', 'options': ('fi_mode',), 'multi': True,
     },
     {
         'key': 'oc', 'label': 'Order Confirmation (OC)', 'script': 'create_oc.py',
         'id_label': 'SO_ID', 'hint': '예: SOO-2026-0001',
-        'out_attr': 'OC_OUTPUT_DIR', 'options': (),
+        'out_attr': 'OC_OUTPUT_DIR', 'options': (), 'multi': True,
     },
     {
         'key': 'ci', 'label': 'Commercial Invoice (CI)', 'script': 'create_ci.py',
         'id_label': 'DN_ID', 'hint': '예: DNO-2026-0001',
-        'out_attr': 'CI_OUTPUT_DIR', 'options': (),
+        'out_attr': 'CI_OUTPUT_DIR', 'options': (), 'multi': True,
     },
     {
         'key': 'pl', 'label': 'Packing List (PL)', 'script': 'create_pl.py',
         'id_label': 'DN_ID', 'hint': '예: DNO-2026-0001',
-        'out_attr': 'PL_OUTPUT_DIR', 'options': (),
+        'out_attr': 'PL_OUTPUT_DIR', 'options': (), 'multi': True,
+    },
+    # 유일하게 문서 ID가 아니라 거래처로 조회한다. CLI가 거래처 하나만 받으므로 multi=False.
+    {
+        'key': 'ds', 'label': '납기현황 (미출고 회신)', 'script': 'delivery_status.py',
+        'id_label': '사업자번호 / 거래처명', 'hint': '예: 615-81-88675, 엔이에스',
+        'out_attr': 'DS_OUTPUT_DIR', 'options': ('ds_mode', 'ds_all', 'mail'),
+        'multi': False,
     },
 )
 
 DOC_BY_KEY: dict[str, dict[str, object]] = {d['key']: d for d in DOC_TYPES}  # type: ignore[index]
+
+# 체크박스 옵션 — 배선이 전부 같고 라벨만 달라서 표로 만든다.
+# 라디오 모드(fi_mode, ds_mode)는 기본값·콜백이 제각각이라 코드로 남긴다.
+CHECKBOX_OPTIONS: dict[str, str] = {
+    'force': "검증 오류 무시하고 생성 (--force)",
+    'merge': "월합 — 여러 DN을 한 장으로 (--merge)",
+    'mail': "메일 초안 만들기 (--mail)",
+    'ds_all': "출고완료 건까지 포함 (--all)",
+}
+
+
+def missing_scripts() -> list[str]:
+    """DOC_TYPES가 가리키는 CLI 중 이 폴더에 없는 것
+
+    개발 레포에서는 파일명 실수를, 배포 폴더에서는 APP_FILES 누락을 잡는다.
+    판정이 갈리면 안 되므로 배포 빌드 verify()와 tests/test_noah_gui.py가
+    이 함수 하나를 같이 쓴다.
+    """
+    return [str(d['script']) for d in DOC_TYPES
+            if not (APP_DIR / str(d['script'])).exists()]
+
+
+def read_build_info(path: Path = BUILD_INFO_FILE) -> str | None:
+    """BUILD_INFO.txt의 버전 (없으면 None — 개발 PC가 그렇다)
+
+    계약: 기계가 읽는 건 `version:`으로 시작하는 줄 하나뿐이고, 나머지는
+    문의 대응용 사람 몫이다 (빌드 쪽 write_build_info와 짝).
+    """
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return None
+    for line in text.splitlines():
+        if line.startswith('version:'):
+            version = line.partition(':')[2].strip()
+            return version or None
+    return None
 
 
 # === 설정 파일 ==============================================================
@@ -275,26 +324,46 @@ def child_env() -> dict[str, str]:
     return env
 
 
+def list_mode_selected(doc_key: str, ids: list[str], options: dict[str, object]) -> bool:
+    """입력 없이 실행되는 '목록 보기' 모드인가
+
+    FI는 발주번호를 비웠을 때, 납기현황은 목록 모드를 골랐을 때 목록만 출력한다.
+    """
+    if doc_key == 'fi':
+        return options.get('fi_mode') == 'po' and not ids
+    if doc_key == 'ds':
+        return options.get('ds_mode') == 'list'
+    return False
+
+
 def build_command(doc_key: str, ids: list[str], options: dict[str, object]) -> list[str]:
     """문서 종류 + 옵션 → CLI 명령"""
     script = str(DOC_BY_KEY[doc_key]['script'])
     cmd = [child_python(), script]
 
+    if doc_key == 'ds' and options.get('ds_mode') == 'list':
+        # 거래처 목록만 — 입력란도 다른 옵션도 쓰지 않는다 (유일한 조기 반환)
+        cmd.append('--list')
+        return cmd
+
     if doc_key == 'fi' and options.get('fi_mode') == 'po':
         # 발주번호 기준 (복수 DN 통합). ID가 비면 사용 가능한 발주번호 목록 표시
         cmd.append('--po')
-        cmd.extend(ids)
-        return cmd
 
     cmd.extend(ids)
 
     if doc_key == 'po' and options.get('force'):
         cmd.append('--force')
 
-    if doc_key == 'ts':
-        if options.get('merge'):
-            cmd.append('--merge')
-        # 자식은 비대화형이라 메일 프롬프트가 자동으로 꺼지지만, 의도를 명령에 남긴다
+    if doc_key == 'ts' and options.get('merge'):
+        cmd.append('--merge')
+
+    if doc_key == 'ds' and options.get('ds_all'):
+        cmd.append('--all')
+
+    # 메일을 지원하는 문서 — 자식은 비대화형이라 프롬프트가 자동으로 꺼지지만,
+    # 의도를 명령에 남긴다 (로그에 그대로 찍혀 무엇을 눌렀는지 남는다)
+    if 'mail' in DOC_BY_KEY[doc_key]['options']:  # type: ignore[operator]
         cmd.append('--mail' if options.get('mail') else '--no-mail')
 
     return cmd
@@ -536,30 +605,25 @@ class MainWindow(ttk.Frame):
         else:
             self.data_path_var.set("(지정되지 않음)")
 
+    def _default_id_label(self, doc: dict[str, object]) -> str:
+        """입력란 기본 라벨 — 여러 건을 못 받는 문서에는 줄바꿈 안내를 빼야 한다"""
+        suffix = ', 여러 건은 줄바꿈' if doc['multi'] else ', 한 번에 한 곳'
+        return f"{doc['id_label']}   ({doc['hint']}{suffix})"
+
     def _on_doc_change(self) -> None:
         doc = DOC_BY_KEY[self.doc_var.get()]
-        self.id_label_var.set(f"{doc['id_label']}   ({doc['hint']}, 여러 건은 줄바꿈)")
+        self.id_label_var.set(self._default_id_label(doc))
 
         for child in self.options_frame.winfo_children():
             child.destroy()
         self.option_vars.clear()
 
         for opt in doc['options']:  # type: ignore[union-attr]
-            if opt == 'force':
+            if opt in CHECKBOX_OPTIONS:
                 var = tk.BooleanVar(value=False)
                 ttk.Checkbutton(self.options_frame, variable=var,
-                                text="검증 오류 무시하고 생성 (--force)").pack(anchor='w')
-                self.option_vars['force'] = var
-            elif opt == 'merge':
-                var = tk.BooleanVar(value=False)
-                ttk.Checkbutton(self.options_frame, variable=var,
-                                text="월합 — 여러 DN을 한 장으로 (--merge)").pack(anchor='w')
-                self.option_vars['merge'] = var
-            elif opt == 'mail':
-                var = tk.BooleanVar(value=False)
-                ttk.Checkbutton(self.options_frame, variable=var,
-                                text="메일 초안 만들기 (--mail)").pack(anchor='w')
-                self.option_vars['mail'] = var
+                                text=CHECKBOX_OPTIONS[opt]).pack(anchor='w')
+                self.option_vars[opt] = var
             elif opt == 'fi_mode':
                 var = tk.StringVar(value='dn')
                 ttk.Radiobutton(self.options_frame, variable=var, value='dn',
@@ -569,16 +633,34 @@ class MainWindow(ttk.Frame):
                     text="발주번호 기준 (복수 DN 통합) — 비워두면 발주번호 목록 표시",
                     command=self._on_fi_mode).pack(anchor='w')
                 self.option_vars['fi_mode'] = var
+            elif opt == 'ds_mode':
+                var = tk.StringVar(value='customer')
+                ttk.Radiobutton(self.options_frame, variable=var, value='customer',
+                                text="거래처 조회 — 사업자번호 또는 거래처명",
+                                command=self._on_ds_mode).pack(anchor='w')
+                ttk.Radiobutton(
+                    self.options_frame, variable=var, value='list',
+                    text="거래처 목록 — 미출고 잔량이 있는 거래처 (--list)",
+                    command=self._on_ds_mode).pack(anchor='w')
+                self.option_vars['ds_mode'] = var
 
     def _on_fi_mode(self) -> None:
         mode = self.option_vars.get('fi_mode')
         if mode is None:
             return
-        doc = DOC_BY_KEY['fi']
         if mode.get() == 'po':
             self.id_label_var.set("발주번호 (Customer PO)   (예: 26KPO00144, 여러 건은 줄바꿈)")
         else:
-            self.id_label_var.set(f"{doc['id_label']}   ({doc['hint']}, 여러 건은 줄바꿈)")
+            self.id_label_var.set(self._default_id_label(DOC_BY_KEY['fi']))
+
+    def _on_ds_mode(self) -> None:
+        mode = self.option_vars.get('ds_mode')
+        if mode is None:
+            return
+        if mode.get() == 'list':
+            self.id_label_var.set("거래처 목록 모드   (입력 불필요 — [생성]을 누르세요)")
+        else:
+            self.id_label_var.set(self._default_id_label(DOC_BY_KEY['ds']))
 
     # --- 동작 --------------------------------------------------------------
 
@@ -626,9 +708,17 @@ class MainWindow(ttk.Frame):
         ids = self._collect_ids()
         options = {k: v.get() for k, v in self.option_vars.items()}
 
-        list_mode = doc_key == 'fi' and options.get('fi_mode') == 'po' and not ids
+        list_mode = list_mode_selected(doc_key, ids, options)
         if not ids and not list_mode:
             messagebox.showwarning("입력 없음", "ID를 한 줄에 하나씩 입력하세요.")
+            return
+
+        # 여러 건을 못 받는 CLI에 줄을 여러 개 넘기면 argparse가 죽는다 — 미리 막는다
+        if not list_mode and len(ids) > 1 and not DOC_BY_KEY[doc_key]['multi']:
+            messagebox.showwarning(
+                "한 번에 하나만",
+                f"{DOC_BY_KEY[doc_key]['label']}은(는) 한 번에 하나만 조회합니다.\n\n"
+                f"입력 {len(ids)}줄 중 하나만 남기고 다시 실행하세요.")
             return
 
         cmd = build_command(doc_key, ids, options)
@@ -750,8 +840,10 @@ class MainWindow(ttk.Frame):
 
 def main() -> int:
     root = tk.Tk()
-    root.title("NOAH 문서 생성기")
-    root.geometry("760x720")
+    version = read_build_info()
+    root.title("NOAH 문서 생성기" + (f"  v{version}" if version else ""))
+    # 옵션이 가장 많은 문서(납기현황: 라디오 2 + 체크 2)에서도 로그가 충분히 보이는 높이
+    root.geometry("760x760")
     try:
         root.call('tk', 'scaling', 1.2)
     except tk.TclError:
