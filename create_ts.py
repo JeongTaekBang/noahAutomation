@@ -607,7 +607,8 @@ def prepare_mail_options(args: argparse.Namespace) -> MailOptions:
         MailMode.DRAFT: '확인 없이 초안 열기',
         MailMode.SEND: '확인 없이 즉시 발송',
     }[mode]
-    backend = resolve_backend()
+    # auto는 용도에 따라 갈린다 — 초안은 .eml(사용자 기본 메일 앱), 즉시 발송만 COM
+    backend = resolve_backend(send=mode is MailMode.SEND)
     backend_label = 'Outlook COM' if backend is MailBackend.OUTLOOK else '.eml 초안'
     # 참조자는 거래처마다 달라서 Customer_국내의 '참조 이메일'로 건별 관리한다.
     # TS_MAIL_CC는 모든 거래처에 공통으로 붙일 주소가 있을 때만 쓰는 선택 항목.
@@ -618,7 +619,7 @@ def prepare_mail_options(args: argparse.Namespace) -> MailOptions:
     # .eml은 작성 창을 띄우는 방식이라 자동 발송이 불가능하다
     if mode is MailMode.SEND and backend is MailBackend.EML:
         print("  [주의] .eml 방식은 자동 발송을 지원하지 않습니다 — 초안까지만 진행됩니다.")
-        print("         (Outlook COM 미사용 환경: 새 Outlook은 COM 자동화를 지원하지 않음)")
+        print("         (Outlook COM 사용 불가 환경 — 클래식 Outlook이 없거나 실행 실패)")
 
     return MailOptions(mode=mode, backend=backend)
 

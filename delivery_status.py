@@ -93,6 +93,7 @@ from po_generator.mailer import (
     create_document_mail,
     find_recipient,
     render_template,
+    wrap_body_html,
 )
 from po_generator.utils import normalize_biz_no, normalize_line_item
 
@@ -754,15 +755,10 @@ def build_html_table(summary: pd.DataFrame) -> str:
 
 
 def build_html_body(body_text: str, html_table: str) -> str:
-    """본문 평문 → HTML
+    """본문 평문 → HTML (표를 문단 사이 제자리에 끼워 넣는다)
 
-    **Outlook은 본문의 첫 블록 요소 바로 뒤에 자동 서명을 끼워 넣는다** (2026-07-29 실측 2회).
-    처음엔 `<br>`로 이은 인라인 텍스트였고 서명이 표(첫 블록) 앞에 들어갔다. 문단을 `<p>`로
-    바꿨더니 이번엔 첫 `<p>` 뒤에 들어갔다. `<div>`로 감싸도 Outlook은 그 안으로 파고든다.
-
-    그래서 **본문 전체를 표 한 칸(`<table><tr><td>`) 안에 넣어 최상위 블록을 하나로 만든다.**
-    삽입 지점이 그 블록 뒤 = 본문 맨 끝이 되어 서명이 정상 위치에 붙는다.
-    (메일 레이아웃에서 흔히 쓰는 방식이라 클라이언트 호환성도 넓다)
+    래퍼는 `mailer.wrap_body_html` — 최상위 블록을 하나로 만들어 Outlook 자동 서명이
+    붙지 않게 하는 구조이고, 거래명세표 메일과 공유한다 (그쪽 docstring에 실측 이력).
 
     Args:
         body_text: 치환이 끝난 평문 본문 (표 자리에 `_HTML_TABLE_TOKEN`)
@@ -786,15 +782,7 @@ def build_html_body(body_text: str, html_table: str) -> str:
             + '</p>'
         )
 
-    return (
-        '<html><body>'
-        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
-        'style="border-collapse:collapse;"><tr><td '
-        'style="font-family:맑은 고딕,sans-serif;font-size:13px;line-height:1.6;">'
-        + ''.join(blocks) +
-        '</td></tr></table>'
-        '</body></html>'
-    )
+    return wrap_body_html(''.join(blocks))
 
 
 def _cell_text(value) -> str:

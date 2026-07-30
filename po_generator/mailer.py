@@ -378,14 +378,25 @@ def outlook_com_available() -> bool:
     return _com_available
 
 
-def resolve_backend(configured: str | None = None) -> MailBackend:
-    """설정값 + 환경으로 메일 작성 방식 결정
+def resolve_backend(configured: str | None = None, send: bool = False) -> MailBackend:
+    """설정값 + 환경 + 용도로 메일 작성 방식 결정
+
+    `auto`의 의미: **초안은 .eml, 즉시 발송만 Outlook COM.**
+
+    초안을 COM으로 만들면 **클래식 Outlook** 창이 뜬다 — 사용자가 평소 새 Outlook을
+    쓰는 PC에서도 그렇다 (COM은 항상 클래식을 부른다). 실제로 클래식 Outlook이
+    설치되는 순간 auto가 COM으로 넘어가 초안이 낯선 옛 창으로 뜨는 회귀가 있었다
+    (2026-07-30 배포판 테스트 실측). `.eml`은 OS 연결 프로그램을 따르므로 그 자체가
+    "사용자가 평소 쓰는 메일 앱"이고, 새 Outlook도 X-Unsent를 편집 가능한 초안으로
+    연다 (같은 날 실측). 즉시 발송은 창 없이 나가야 하므로 COM에서만 가능하다 —
+    거기서만 COM을 쓴다.
 
     설정값은 호출 시점에 읽습니다 (기본 인자로 박아두면 import 시점에 고정돼
     테스트나 런타임 변경이 반영되지 않음).
 
     Args:
         configured: 'auto' | 'outlook' | 'eml' (None이면 TS_MAIL_BACKEND 사용)
+        send: 즉시 발송 여부 — auto일 때만 판정에 쓰인다
 
     Returns:
         MailBackend
@@ -395,23 +406,52 @@ def resolve_backend(configured: str | None = None) -> MailBackend:
         return MailBackend.OUTLOOK
     if choice == 'eml':
         return MailBackend.EML
-    return MailBackend.OUTLOOK if outlook_com_available() else MailBackend.EML
+    if send and outlook_com_available():
+        return MailBackend.OUTLOOK
+    return MailBackend.EML
+
+
+def wrap_body_html(inner: str) -> str:
+    """본문 HTML을 최상위 블록 **하나**(표 한 칸)로 감싼다
+
+    Outlook은 .eml 초안을 열 때 자동 서명을 본문에 끼워 넣는데, 삽입 위치가 본문 구조에
+    따라 널뛴다 — 인라인 텍스트면 첫 블록 요소 앞, `<p>` 여러 개면 첫 문단 뒤 (2026-07-29
+    실측). 본문 전체를 `<table><tr><td>` 한 칸에 담으면 **서명이 붙지 않는다** (납기현황
+    메일에서 실측 확인). 메일은 어차피 끝에 "자동 발송" 안내를 달고 나가므로 서명 없는
+    쪽이 낫다는 운영 결정이고, 거래명세표·납기현황이 같은 래퍼를 써서 동작이 갈리지 않는다.
+
+    Args:
+        inner: 감쌀 본문 HTML 조각
+
+    Returns:
+        `<html>...</html>` 전체 문서
+    """
+    return (
+        '<html><body>'
+        '<table role="presentation" cellpadding="0" cellspacing="0" border="0" '
+        'style="border-collapse:collapse;"><tr><td '
+        'style="font-family:맑은 고딕,sans-serif;font-size:13px;line-height:1.6;">'
+        + inner +
+        '</td></tr></table>'
+        '</body></html>'
+    )
 
 
 def body_to_html(body: str) -> str:
     """평문 본문을 최소 HTML로 변환
 
-    서식을 입히지 않고 줄바꿈만 유지합니다. 거래처명에 `&`나 `<`가 있어도
-    깨지지 않도록 이스케이프를 먼저 합니다 (예: 'S&T중공업').
+    본문 텍스트는 줄바꿈만 `<br>`로 살리고, 글꼴·크기는 공용 래퍼(`wrap_body_html`)가
+    입힌다 — 메일 클라이언트가 `<style>` 블록을 지우므로 래퍼가 유일하게 믿을 곳이다.
+    거래처명에 `&`나 `<`가 있어도 깨지지 않도록 이스케이프를 먼저 합니다 (예: 'S&T중공업').
 
     Args:
         body: 평문 본문
 
     Returns:
-        HTML 문자열
+        HTML 문자열 (단일 블록 래퍼 — Outlook 자동 서명이 붙지 않는 구조)
     """
     escaped = html_escape(body)
-    return '<html><body>' + escaped.replace('\n', '<br>\n') + '</body></html>'
+    return wrap_body_html(escaped.replace('\n', '<br>\n'))
 
 
 def build_eml(
@@ -568,7 +608,7 @@ def create_document_mail(
     if date_str is None:
         date_str = datetime.now().strftime('%Y-%m-%d')
     if backend is None:
-        backend = resolve_backend()
+        backend = resolve_backend(send=send)
 
     try:
         attachments = build_attachments(xlsx_path, attach_format)

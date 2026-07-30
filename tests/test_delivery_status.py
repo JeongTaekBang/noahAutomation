@@ -19,7 +19,7 @@ import pytest
 
 import delivery_status as ds
 from po_generator.mail_cli import MailMode, MailOptions
-from po_generator.mailer import MailConfigError, MailResult, Recipient
+from po_generator.mailer import MailConfigError, MailResult, Recipient, wrap_body_html
 
 
 # === 픽스처 ================================================================
@@ -732,16 +732,18 @@ class TestHtmlBody:
     """본문 구조 — Outlook은 첫 블록 요소 뒤에 서명을 끼워 넣는다
 
     그래서 본문 전체가 최상위 블록 **하나** 안에 들어가야 서명이 맨 끝에 붙는다.
+    그 구조 자체는 공용 래퍼 `mailer.wrap_body_html`이 소유하고 검사도 그쪽 테스트가
+    한다 (tests/test_mailer.py). 여기서는 **래퍼를 그대로 쓴다**는 위임만 확인한다.
     """
 
-    def test_최상위_블록이_하나다(self):
-        """<body> 바로 아래에 형제 블록이 여러 개면 서명이 그 사이로 들어간다"""
+    def test_래퍼는_공용_wrap_body_html이다(self):
+        """래퍼 마크업을 여기서 다시 만들면 TS 메일과 구조가 갈릴 수 있다 — 정확히 위임해야 한다"""
         html = ds.build_html_body(f'인사말\n\n{ds._HTML_TABLE_TOKEN}\n\n맺음말', '<table>T</table>')
-        inner = html[html.index('<body>') + len('<body>'):html.index('</body>')]
-        assert inner.startswith('<table role="presentation"')
-        assert inner.endswith('</table>')
-        # 래퍼를 벗기면 그 안에 문단·표가 들어 있다
-        assert inner.count('<td ') == 1
+        assert html == wrap_body_html(
+            '<p style="margin:0 0 12px 0;">인사말</p>'
+            '<table>T</table>'
+            '<p style="margin:0 0 12px 0;">맺음말</p>'
+        )
 
     def test_문단이_블록요소로_나온다(self):
         html = ds.build_html_body(f'인사말\n\n{ds._HTML_TABLE_TOKEN}\n\n맺음말', '<table></table>')

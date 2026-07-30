@@ -505,14 +505,31 @@ class TestResolveBackend:
         monkeypatch.setattr(mailer, 'TS_MAIL_BACKEND', 'outlook')
         assert resolve_backend() is MailBackend.OUTLOOK
 
-    def test_auto_uses_com_when_available(self, monkeypatch):
-        monkeypatch.setattr(mailer, 'outlook_com_available', lambda: True)
-        assert resolve_backend('auto') is MailBackend.OUTLOOK
+    def test_auto_draft_is_eml_even_with_com(self, monkeypatch):
+        """auto 초안은 COM이 있어도 .eml — 사용자의 기본 메일 앱에서 열려야 한다
 
-    def test_auto_falls_back_to_eml_without_com(self, monkeypatch):
-        """새 Outlook 환경 — COM이 없으면 .eml로 자동 전환"""
-        monkeypatch.setattr(mailer, 'outlook_com_available', lambda: False)
+        COM 초안은 항상 클래식 Outlook 창을 띄운다. 클래식이 설치되는 순간
+        평소 새 Outlook을 쓰는 PC에서 초안이 낯선 옛 창으로 뜨는 회귀가 있었다
+        (2026-07-30 배포판 테스트 실측) — 이 테스트가 그 회귀 방지다.
+        """
+        monkeypatch.setattr(mailer, 'outlook_com_available', lambda: True)
         assert resolve_backend('auto') is MailBackend.EML
+        assert resolve_backend('auto', send=False) is MailBackend.EML
+
+    def test_auto_send_uses_com_when_available(self, monkeypatch):
+        """즉시 발송은 창 없이 나가야 하므로 COM이 있으면 COM"""
+        monkeypatch.setattr(mailer, 'outlook_com_available', lambda: True)
+        assert resolve_backend('auto', send=True) is MailBackend.OUTLOOK
+
+    def test_auto_send_falls_back_to_eml_without_com(self, monkeypatch):
+        """COM이 없으면 발송 요청도 .eml 초안으로 강등 (호출부가 안내)"""
+        monkeypatch.setattr(mailer, 'outlook_com_available', lambda: False)
+        assert resolve_backend('auto', send=True) is MailBackend.EML
+
+    def test_explicit_outlook_wins_for_draft(self, monkeypatch):
+        """명시 설정('outlook')은 초안도 COM으로 — auto 규칙보다 우선"""
+        monkeypatch.setattr(mailer, 'outlook_com_available', lambda: True)
+        assert resolve_backend('outlook', send=False) is MailBackend.OUTLOOK
 
     def test_com_probe_runs_once(self, monkeypatch):
         """COM 실패는 실행당 1회만 조사한다 (건마다 재시도하면 느려짐)"""
@@ -592,7 +609,7 @@ class TestBuildEml:
         assert self._parse(eml)['Cc'] is None
 
     def test_html_alternative_present(self, recipient, pdf, tmp_path):
-        """평문만 있으면 Outlook이 서명을 본문 '위'에 넣는다 — HTML 대체본이 있어야 아래로 간다"""
+        """평문만 있으면 Outlook이 서명을 본문 '위'에 넣는다 — HTML 대체본이 있어야 제어된다"""
         eml = mailer.build_eml(recipient, '제목', '가나밸브 귀중\n\n본문\n', (pdf,), tmp_path)
         msg = self._parse(eml)
 
@@ -602,6 +619,37 @@ class TestBuildEml:
         assert '가나밸브 귀중' in plain.get_content()
         assert '가나밸브 귀중' in html.get_content()
         assert '<br>' in html.get_content()
+
+    def test_wrap_body_html_is_single_top_level_block(self):
+        """공용 래퍼는 최상위 블록이 하나여야 한다 (Outlook 자동 서명 억제 구조)
+
+        인라인 `<br>` 본문이면 Outlook이 자동 서명을 본문에 끼워 넣는다.
+        전체를 `<table><tr><td>` 한 칸에 담은 구조에서는 서명이 붙지 않는 것이
+        실측(2026-07-29, 납기현황 메일)으로 확인됐다 — 이 구조로 회귀하면 안 된다.
+
+        래퍼 구조는 여기 한 곳에서만 검사한다. 소비자 쪽 테스트(아래, 납기현황의
+        TestHtmlBody)는 "래퍼를 그대로 쓴다"는 위임만 확인한다.
+        """
+        html = mailer.wrap_body_html('<p>본문</p>')
+        inner = html[html.index('<body>') + len('<body>'):html.index('</body>')]
+        assert inner.startswith('<table role="presentation"')
+        assert inner.endswith('</table>')
+        assert inner.count('<td ') == 1
+
+    def test_eml_html_part_is_body_to_html_verbatim(self, recipient, pdf, tmp_path):
+        """.eml의 HTML 대체본은 body_to_html 결과 그대로여야 한다
+
+        아래 위임 테스트와 함께 build_eml → body_to_html → wrap_body_html 사슬이 닫힌다.
+        """
+        body = '가나밸브 귀중\n\n본문\n'
+        eml = mailer.build_eml(recipient, '제목', body, (pdf,), tmp_path)
+        html = self._parse(eml).get_body(('html',)).get_content()
+        assert html.rstrip('\n') == mailer.body_to_html(body)
+
+    def test_body_to_html_matches_wrapper(self):
+        """body_to_html은 wrap_body_html 래퍼를 그대로 써야 한다 (TS·납기현황 구조 공유)"""
+        html = mailer.body_to_html('첫줄\n둘째줄')
+        assert html == mailer.wrap_body_html('첫줄<br>\n둘째줄')
 
     def test_html_and_attachment_coexist(self, recipient, pdf, tmp_path):
         """HTML 대체본을 넣어도 첨부가 살아있어야 한다 (multipart 구조 회귀)"""
