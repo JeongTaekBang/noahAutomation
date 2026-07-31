@@ -4,6 +4,61 @@
 
 ---
 
+## 2026-07-31: 대시보드 사내 배포판 — 죽어 있던 빌드를 재작성
+
+### 증상
+`dashboard_dist/`에 배포 구조가 있었지만 **빌드가 실행되지 않았다.** 동봉된 `dashboard.py`는
+220KB(3/27), 원본은 292KB(7/30) — **4개월 낡은 상태**로 Order Book 매출인식 개편과
+동기화로그 v2 페이지가 통째로 빠져 있었다.
+
+### 원인
+`build_dist.py`가 원본 `dashboard.py`의 import 줄을 **문자열 치환**해 `po_generator` 의존성을
+끊는 방식이었다. 치환 대상이 한 줄짜리였는데 원본이 괄호 다중 import로 바뀌면서
+(`ensure_so_change_ack_table`·`get_sync_metadata`·`SYNC_LOG_CHANGE_TYPES`) 패턴이 안 맞아
+`sys.exit(1)`. 게다가 `.gitignore`가 `dashboard_dist/`를 통째로 제외해 **빌드 레시피가
+git에 없었고**, 그래서 깨진 것도 낡은 것도 아무도 몰랐다.
+
+### 수정
+소스 재작성을 **없앴다**. `cli_dist`처럼 `po_generator/`를 동봉해 `dashboard.py`를 무수정으로
+돌린다 — import가 늘어도 빌드가 안 깨진다. `build_dist.py`·`build_portable.py`·`launcher.py`·
+`dashboard_config.ini` 삭제, 설정은 `noah_config.ini`로 통일.
+
+- `build_common.py` — 두 배포판이 공유하는 빌드 공통부 (런타임·핀 3자 대조·트리밍·zip)
+- `po_generator/__init__.py`의 재export 제거 — `from po_generator.config import ...` 한 줄에
+  pandas·openpyxl·xlwings(→COM)가 딸려오던 것을 끊었다. 그 이름들을 패키지 루트에서 쓰는
+  코드는 저장소 전체에 0건이었다. 덕분에 대시보드 배포판에서 Excel 라이브러리가 빠지고
+  모든 CLI 기동도 빨라진다
+- `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다 —
+  트리밍을 246MB 했으므로 import 검사만으로는 부족하다
+- `.gitignore` — `dashboard_dist/` 통째 제외 → `*.zip`만 제외 (레시피를 커밋한다)
+
+### WAL — OneDrive 공유의 지뢰
+DB는 `journal_mode=wal`이고 OneDrive로 공유한다. WAL이면 최신 커밋이 `-wal` 사이드카에 먼저
+들어가는데 OneDrive는 본체와 사이드카를 **각각 따로** 올린다. 원본을 직접 열면 커밋이 빠진
+상태를 보거나, 읽기 잠금 탓에 OneDrive가 파일을 교체 못 해 **"충돌된 사본"** 이 생긴다.
+둘 다 "사람마다 숫자가 다르다"로 뒤늦게 드러나는 형태다.
+
+- 발행: `sync_db.py: checkpoint_wal()` — 동기화 성공 후 `PRAGMA wal_checkpoint(TRUNCATE)`
+- 소비: `dashboard.py: _db_snapshot()` — 백업 API로 일관된 사본을 떠서 그것만 연다.
+  캐시 키가 `(mtime, size)`라 원본이 갱신되면 자동으로 다시 뜬다
+- 표시: 사이드바 "데이터 기준" — 하루가 넘으면 caption이 아니라 경고로 올린다
+
+### 크기 (최적화)
+설치 직후 런타임에서 **246MB 트리밍**. 근거는 전부 실측이다.
+- `pyarrow` 84MB → flight·parquet·dataset·substrait·acero·gandiva·tests·include·src 제거.
+  `import pyarrow`는 lib/ipc/types/util만, streamlit은 여기에 `_compute`를 더 얹으므로
+  **`arrow_compute.dll`은 남긴다**
+- `plotly` — `labextension`(JupyterLab) + `package_data`(오프라인 HTML용 plotly.min.js).
+  `st.plotly_chart`는 streamlit 자기 번들로 그린다. `write_html`·`plotly.offline` 사용 0건
+- `pydeck/nbextension`(Jupyter 자산), `tkinter`·`tcl`(대시보드는 GUI 창이 없다)
+
+### 배포 방식에 대한 판단 (실측 근거)
+중앙 호스팅(streamlit 한 대 띄우고 URL 공유)이 갱신 문제를 근본적으로 없애지만, 회사 PC에서
+**불가**로 확인됐다: 관리자 권한이 없어 방화벽 인바운드 규칙 생성이 `Access is denied`,
+Wi-Fi DHCP라 URL 고정 불가, AC 전원 절전 5분. IT 지원 없이는 폴더 배포가 유일한 선택지다.
+
+---
+
 ## 2026-07-30: DN 테이블 PK — 분할출고 중복키 행이 조용히 사라지던 버그
 
 ### 증상

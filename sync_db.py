@@ -449,6 +449,39 @@ def show_log(limit: int = 20) -> int:
     return 0
 
 
+def checkpoint_wal() -> None:
+    """WAL을 본체로 합치고 `-wal`을 비운다 — 동기화 성공 직후에 부른다.
+
+    이 DB는 OneDrive 폴더에 있고 다른 사람들이 대시보드로 읽는다.
+    `journal_mode=wal`이면 방금 넣은 데이터가 `noah_data.db`가 아니라
+    `noah_data.db-wal`에 들어 있을 수 있는데, OneDrive는 두 파일을 **각각 따로**
+    올린다. 본체만 먼저 도착하면 받는 사람은 **최신 변경이 빠진 DB**를 본다.
+
+    TRUNCATE 체크포인트를 돌리면 WAL 내용이 본체로 들어가고 `-wal`이 0바이트가 된다.
+    그러면 OneDrive가 올리는 `noah_data.db` 하나만으로 내용이 완결된다.
+
+    실패해도 동기화 자체는 이미 commit됐으므로 경고만 남긴다.
+    """
+    try:
+        conn = sqlite3.connect(str(DB_FILE))
+        try:
+            busy, log_pages, moved = conn.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        print(f"[경고] WAL 체크포인트 실패 — 다른 프로그램이 DB를 열고 있을 수 있습니다: {e}")
+        return
+
+    if busy:
+        # 대시보드 등이 DB를 잡고 있어 WAL을 다 비우지 못한 상태
+        print("[경고] WAL을 완전히 비우지 못했습니다 (다른 프로그램이 DB 사용 중).")
+        print("       대시보드를 닫고 `python sync_db.py --info`를 한 번 더 실행하세요.")
+    else:
+        print(f"WAL 체크포인트 완료 ({moved:,}/{log_pages:,} 페이지) — 공유용 단일 파일 상태")
+
+
 def create_argument_parser() -> argparse.ArgumentParser:
     """CLI 인자 파서 생성"""
     parser = argparse.ArgumentParser(
@@ -554,6 +587,8 @@ def main() -> int:
             write_sync_log_to_db(summary, note=args.note)
         except Exception as e:
             print(f"[경고] 동기화 로그 저장 실패 (데이터는 정상 반영됨): {e}")
+
+        checkpoint_wal()
 
     print_summary(summary, dry_run=args.dry_run)
 

@@ -1,0 +1,71 @@
+# 대시보드 배포판 전용 의존성 — 개발 PC(po-automate)와 동일한 버전으로 고정한다.
+#
+# 고정하는 이유와 transitive까지 적는 이유는 cli_dist/requirements.txt와 같다.
+# 빌드가 이 파일의 핀 ↔ 배포 런타임 ↔ 개발 env를 3자 대조하고, 하나라도 어긋나면
+# 실패한다 (build_common.py: install_packages).
+# → 갱신 절차: 개발 env에서 버전을 올려 테스트를 통과시킨 뒤, 여기 핀을 맞춘다.
+#
+# 여기 **없는** 것들 (넣지 말 것):
+#   openpyxl / xlwings — 대시보드는 Excel을 건드리지 않는다. 예전에는 po_generator
+#     패키지 __init__이 excel_generator를 eager import 해서 딸려왔지만, 지금은
+#     config/db_schema 둘 다 표준 라이브러리만 의존한다 (po_generator/__init__.py 주석 참조).
+#   pytest — 테스트는 개발 PC에서만 돈다.
+#
+# pywin32는 대시보드가 아니라 **설치.bat의 바탕화면 바로가기**가 쓴다
+# (IShellLinkW — 한글 경로가 깨지지 않는 유일한 방법. cli_dist 쪽 주석에 경위가 있다).
+
+# 직접 의존성
+streamlit==1.55.0
+plotly==6.6.0
+pandas==2.3.3
+pywin32==311
+
+# transitive — streamlit
+altair==6.0.0
+blinker==1.9.0
+cachetools==7.0.5
+click==8.3.1
+gitpython==3.1.46
+numpy==2.4.3
+packaging==25.0
+pillow==12.1.1
+protobuf==6.33.5
+pyarrow==23.0.1
+pydeck==0.9.1
+requests==2.32.5
+tenacity==9.1.4
+toml==0.10.2
+tornado==6.5.5
+typing-extensions==4.15.0
+watchdog==6.0.0
+
+# transitive — altair (jsonschema 계열)
+attrs==25.4.0
+jinja2==3.1.6
+jsonschema==4.26.0
+jsonschema-specifications==2025.9.1
+markupsafe==3.0.3
+referencing==0.37.0
+rpds-py==0.30.0
+
+# transitive — plotly
+narwhals==2.18.0
+
+# transitive — pandas
+python-dateutil==2.9.0.post0
+pytz==2026.1.post1
+six==1.17.0
+tzdata==2025.3
+
+# transitive — gitpython
+gitdb==4.0.12
+smmap==5.0.3
+
+# transitive — requests
+certifi==2026.2.25
+charset-normalizer==3.4.6
+idna==3.11
+urllib3==2.6.3
+
+# transitive — click
+colorama==0.4.6

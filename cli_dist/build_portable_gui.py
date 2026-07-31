@@ -32,30 +32,48 @@ Usage:
   NuGet CPython 패키지에도 없다(1773개 엔트리 중 tk 관련 0건). 그래서 tkinter와
   pythonw.exe를 모두 포함하는 python-build-standalone 배포본을 쓴다.
 
+런타임 내려받기·핀 대조·트리밍·zip 만들기는 대시보드 배포판과 똑같아서
+`build_common.py`(프로젝트 루트)가 갖고 있다. 여기 남는 것은 이 배포판만의 것
+— 무엇을 담고(APP_FILES), 어떻게 실행하고(런처), 무엇을 증명하는가(verify).
+
 주의: 이 모듈의 최상위는 **상수와 함수 정의만** 있어야 한다.
   tests/test_noah_gui.py가 이 파일을 경로로 로드해 APP_FILES·parse_pins 등을
   검사한다 — 모듈 로드가 곧 빌드 시작이면 테스트가 빌드를 돌려버린다.
+  (예외는 build_common을 찾기 위한 sys.path 한 줄뿐이다.)
 """
 
 from __future__ import annotations
 
-import datetime as dt
-import importlib.metadata
-import itertools
-import json
-import os
 import re
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
-import urllib.request
-import zipfile
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
+
+# 공통부(build_common)는 프로젝트 루트에 있다. 이 파일은
+# `python cli_dist/build_portable_gui.py`로 실행되므로 sys.path[0]이 cli_dist/ 다
+# — 루트를 넣어 줘야 import가 된다. tests는 루트가 이미 sys.path에 있어
+# 이 줄이 없어도 되지만, 중복 삽입은 무해하다.
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from build_common import (  # noqa: E402 — 위 sys.path 배선 뒤여야 한다
+    Stepper,
+    canon,  # noqa: F401 — tests가 이 모듈의 속성으로 접근한다 (재export)
+    compute_version,
+    install_packages,
+    install_runtime,
+    make_zip,
+    parse_pins,  # noqa: F401 — 위와 같음
+    prepare,
+    trim_runtime,
+    verify_env,
+    write_build_info,
+    write_text,
+)
 
 ZIP_PATH = HERE / "NOAH_문서생성기_배포.zip"
 
@@ -96,10 +114,6 @@ APP_DIRS = ("po_generator", "templates")
 #   user_settings.py — 빌드한 사람의 OneDrive 경로가 박혀 있다. 이게 들어가면
 #                      받는 사람 PC에서 ini보다 우선해서 남의 경로를 바라본다.
 EXCLUDE_FILES = {"user_settings.py"}
-
-# 런타임에 pip이 필요 없어 트리밍으로 제거하지만, 핀 대조 시점(설치 직후)에는
-# 아직 존재한다 — "핀에 없는 패키지" 검사에서만 눈감아 준다.
-IGNORE_PACKAGES = frozenset({"pip", "setuptools"})
 
 # === 런타임 트리밍 ===
 # 기준: repo 전체 grep으로 import 0건 확인된 것만 지운다 (2026-07-30 실측 ~60MB 추가 절감).
@@ -148,202 +162,10 @@ INSTALL_DIR_NAME = "NOAH_DocGen"  # 경로는 ASCII로 (batch에서 안전)
 SHORTCUT_NAME = "NOAH 문서 생성기.lnk"
 
 STEP_TOTAL = 7
-_STEP_NO = itertools.count(1)
+step = Stepper(STEP_TOTAL)
 
 
-def step(msg: str) -> None:
-    print(f"\n{'=' * 56}\n  {next(_STEP_NO)}/{STEP_TOTAL}  {msg}\n{'=' * 56}")
-
-
-def write_text(path: Path, content: str) -> None:
-    """UTF-8 (BOM 없음) — chcp 65001과 조합해 기존 create_po.bat과 동일한 방식"""
-    path.write_text(content, encoding="utf-8", newline="\r\n")
-
-
-def download(url: str, dest: Path) -> None:
-    print(f"  다운로드: {url.rsplit('/', 1)[-1]}")
-    req = urllib.request.Request(url, headers={"User-Agent": "noah-build"})
-    with urllib.request.urlopen(req, timeout=300) as resp, dest.open("wb") as f:
-        shutil.copyfileobj(resp, f)
-    print(f"  {dest.stat().st_size / 1024 / 1024:.1f} MB")
-
-
-# === 버전 / 핀 대조 헬퍼 ====================================================
-
-def canon(name: str) -> str:
-    """패키지명 정규화 (PEP 503) — et_xmlfile/et-xmlfile 같은 표기 차이를 흡수한다"""
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-
-def parse_pins(text: str) -> dict[str, str]:
-    """requirements 텍스트 → {정규화된 이름: 버전}
-
-    `이름==버전` 형식만 허용한다. `>=` 같은 범위가 끼어들면 "여기서 테스트한
-    그대로"라는 재현성 약속이 조용히 깨지므로 파싱 단계에서 막는다.
-    """
-    pins: dict[str, str] = {}
-    for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line:
-            continue
-        m = re.fullmatch(r"([A-Za-z0-9._-]+)\s*==\s*([A-Za-z0-9.+!_-]+)", line)
-        if m is None:
-            raise ValueError(f"핀 고정(이름==버전)이 아닌 요구사항: {line!r}")
-        pins[canon(m.group(1))] = m.group(2)
-    return pins
-
-
-def compute_version() -> str:
-    """빌드 버전 — 날짜 + git 커밋 (예: 2026.07.30+326b87e)
-
-    CHANGELOG이 날짜 기반이라 버전도 날짜를 앞세운다. 커밋 해시가 있어야
-    "어느 빌드 쓰세요?" 문의에서 코드 상태를 특정할 수 있다.
-    커밋 안 된 변경이 있으면 `.dirty` — 깨끗한 트리에서 빌드하라는 신호다.
-    """
-    date = dt.date.today().strftime("%Y.%m.%d")
-
-    def _git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args],
-            cwd=str(PROJECT_ROOT), capture_output=True, text=True,
-            errors="replace", check=True,
-        ).stdout.strip()
-
-    try:
-        sha = _git("rev-parse", "--short", "HEAD")
-        dirty = ".dirty" if _git("status", "--porcelain") else ""
-    except (OSError, subprocess.CalledProcessError):
-        return f"{date}+unknown"
-    return f"{date}+{sha}{dirty}"
-
-
-def verify_env() -> dict[str, str]:
-    """검증용 자식 프로세스 환경
-
-    파이프로 받는 자식 stdout은 기본이 콘솔 코드페이지(한국어 Windows면 cp949)라
-    아래 `encoding="utf-8"` 디코딩과 어긋나 한글 메시지가 깨진다.
-    통과/실패를 읽을 수 없으면 검증이 검증이 아니다.
-    """
-    return {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-
-
-def _runtime_packages() -> dict[str, str]:
-    """배포 런타임에 실제 설치된 패키지 {정규화된 이름: 버전}"""
-    result = subprocess.run(
-        [str(PYTHON_DIR / "python.exe"), "-B", "-c",
-         "import importlib.metadata, json\n"
-         "print(json.dumps({d.metadata['Name']: d.version"
-         " for d in importlib.metadata.distributions() if d.metadata['Name']}))\n"],
-        env=verify_env(),
-        capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
-    )
-    return {canon(name): ver for name, ver in json.loads(result.stdout).items()}
-
-
-def _dev_env_versions(names: set[str]) -> dict[str, str]:
-    """빌드를 실행한 개발 env(po-automate)의 설치 버전 — 없는 패키지는 빠진다"""
-    versions: dict[str, str] = {}
-    for name in names:
-        try:
-            versions[name] = importlib.metadata.version(name)
-        except importlib.metadata.PackageNotFoundError:
-            continue
-    return versions
-
-
-# === 빌드 단계 =============================================================
-
-def prepare() -> None:
-    step("빌드 폴더 준비")
-    if BUILD_ROOT.exists():
-        shutil.rmtree(BUILD_ROOT)
-    APP_DIR.mkdir(parents=True)
-    print(f"  {BUILD_ROOT}")
-
-
-def install_runtime() -> None:
-    step("Python 런타임 (tkinter 포함)")
-    cache = Path(tempfile.gettempdir()) / f"noah_runtime_{RUNTIME_TAG}.tar.gz"
-    if not cache.exists():
-        download(RUNTIME_URL, cache)
-    else:
-        print(f"  캐시 사용: {cache.name}")
-
-    with tarfile.open(cache) as tar:
-        tar.extractall(BUILD_ROOT)  # noqa: S202 — 신뢰된 공식 배포본
-    # 아카이브 최상위가 python/ 이므로 app/ 아래로 옮긴다
-    shutil.move(str(BUILD_ROOT / "python"), str(PYTHON_DIR))
-    print(f"  {PYTHON_DIR}")
-
-
-def install_packages() -> dict[str, str]:
-    """패키지 설치 + 3자 대조 (핀 = 배포 런타임 = 개발 env)
-
-    transitive까지 requirements.txt에 고정돼 있고, 여기서 어긋남을 전부 모아
-    실패시킨다. 통과하면 배포판은 개발 PC에서 테스트한 버전 조합 그대로다.
-
-    Returns:
-        배포 런타임의 {패키지: 버전} — BUILD_INFO.txt에 재사용
-    """
-    step("패키지 설치 + 버전 대조 (2~3분)")
-    subprocess.run(
-        [str(PYTHON_DIR / "python.exe"), "-m", "pip", "install",
-         "-r", str(HERE / "requirements.txt"),
-         "--no-warn-script-location", "-q"],
-        check=True,
-    )
-
-    pins = parse_pins((HERE / "requirements.txt").read_text(encoding="utf-8"))
-    installed = _runtime_packages()
-    dev = _dev_env_versions(set(pins))
-
-    problems: list[str] = []
-    # 핀 3자 대조 — 같은 검사를 배포 런타임/개발 env 두 대상에 적용
-    for label, actual in (("배포 런타임", installed), ("개발 env", dev)):
-        for name, want in sorted(pins.items()):
-            got = actual.get(name)
-            if got != want:
-                problems.append(f"{label} {name}: 핀 {want} vs 설치 {got or '없음'}")
-    for name in sorted(set(installed) - set(pins) - IGNORE_PACKAGES):
-        problems.append(
-            f"핀에 없는 패키지 설치됨: {name} {installed[name]}"
-            " — requirements.txt에 핀을 추가하세요 (의존성이 늘었다는 신호)"
-        )
-
-    if problems:
-        detail = "\n".join(f"  - {p}" for p in problems)
-        raise RuntimeError(
-            "패키지 버전이 핀과 다릅니다 — 배포판은 개발 PC에서 테스트한 그대로여야 합니다.\n"
-            f"{detail}\n"
-            "  해결: 개발 env(po-automate)에서 `pip install 이름==버전`으로 맞추거나,\n"
-            "        새 버전으로 테스트를 통과시킨 뒤 cli_dist/requirements.txt 핀을 갱신하세요."
-        )
-    print(f"  OK  핀 {len(pins)}개 = 배포 런타임 = 개발 env")
-    return installed
-
-
-def trim_runtime() -> None:
-    step("런타임 트리밍")
-    removed = 0
-
-    def _rm(path: Path) -> None:
-        """파일/디렉터리 제거 (크기 집계). 이미 없는 경로는 no-op —
-        앞선 glob 패턴이 부모째 지웠을 수 있어 존재 확인을 여기서 흡수한다."""
-        nonlocal removed
-        if path.is_file():
-            removed += path.stat().st_size
-            path.unlink()
-        elif path.is_dir():
-            removed += sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-            shutil.rmtree(path)
-
-    for pattern in TRIM_GLOBS:
-        for path in PYTHON_DIR.glob(pattern):
-            _rm(path)
-    for rel in TRIM_DIRS:
-        _rm(PYTHON_DIR / rel)
-    print(f"  {removed / 1024 / 1024:.0f} MB 제거")
-
+# === 빌드 단계 (이 배포판 고유) =============================================
 
 def copy_app() -> None:
     step("앱 파일 복사")
@@ -360,27 +182,6 @@ def copy_app() -> None:
         raise RuntimeError(f"배포에 들어가면 안 되는 파일이 포함됨: {leaked}")
 
     print(f"  파일 {len(APP_FILES)}개 + 폴더 {len(APP_DIRS)}개")
-
-
-def write_build_info(version: str, packages: dict[str, str]) -> None:
-    """app/BUILD_INFO.txt — 배포판의 정체
-
-    기계가 읽는 건 `version:` 줄 하나뿐이다 (noah_gui.read_build_info → GUI 타이틀).
-    나머지는 문의 대응용 — "어느 빌드 쓰세요?"에 사용자가 이 파일을 열어 답한다.
-    """
-    lines = [
-        f"version: {version}",
-        f"built: {dt.datetime.now():%Y-%m-%d %H:%M}",
-        f"runtime: python {RUNTIME_PY_VERSION} (python-build-standalone {RUNTIME_TAG})",
-        "packages:",
-    ]
-    lines += [
-        f"  {name} {ver}"
-        for name, ver in sorted(packages.items())
-        if name not in IGNORE_PACKAGES  # 트리밍으로 제거되는 것은 싣지 않는다
-    ]
-    write_text(APP_DIR / "BUILD_INFO.txt", "\n".join(lines) + "\n")
-    print(f"  BUILD_INFO.txt  v{version}")
 
 
 def create_launchers(version: str) -> None:
@@ -653,44 +454,29 @@ def verify() -> None:
     print(f"  OK  {len(clis)}종 전부 실행 가능")
 
 
-def make_zip() -> None:
-    step("배포 zip 생성")
-    if ZIP_PATH.exists():
-        ZIP_PATH.unlink()
-    ZIP_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-    # 앱 쪽 __pycache__는 넣지 않는다 (검증 단계가 만들 수 있고, 첫 실행 때 다시 생긴다).
-    # python/ 안의 것은 표준 라이브러리 로딩을 빠르게 하므로 그대로 둔다.
-    for cache in (APP_DIR.rglob("__pycache__")):
-        if PYTHON_DIR not in cache.parents:
-            shutil.rmtree(cache, ignore_errors=True)
-
-    files = [p for p in BUILD_ROOT.rglob("*") if p.is_file()]
-    with zipfile.ZipFile(ZIP_PATH, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-        for i, path in enumerate(files, 1):
-            zf.write(path, path.relative_to(BUILD_ROOT))
-            if i % 2000 == 0:
-                print(f"  {i}/{len(files)}...")
-
-    raw = sum(p.stat().st_size for p in files)
-    print(f"\n  {ZIP_PATH}")
-    print(f"  {ZIP_PATH.stat().st_size / 1024 / 1024:.0f} MB "
-          f"(압축 전 {raw / 1024 / 1024:.0f} MB, 파일 {len(files):,}개)")
-
-
 def build() -> int:
     version = compute_version()
     print(f"  빌드 버전: {version}")
 
-    prepare()
-    install_runtime()
-    packages = install_packages()
-    trim_runtime()
+    step("빌드 폴더 준비")
+    prepare(BUILD_ROOT, APP_DIR)
+
+    step("Python 런타임 (tkinter 포함)")
+    install_runtime(RUNTIME_URL, RUNTIME_TAG, BUILD_ROOT, PYTHON_DIR)
+
+    step("패키지 설치 + 버전 대조 (2~3분)")
+    packages = install_packages(PYTHON_DIR, HERE / "requirements.txt")
+
+    step("런타임 트리밍")
+    trim_runtime(PYTHON_DIR, TRIM_GLOBS, TRIM_DIRS)
+
     copy_app()
-    write_build_info(version, packages)
+    write_build_info(APP_DIR, version, packages, RUNTIME_PY_VERSION, RUNTIME_TAG)
     create_launchers(version)
     verify()
-    make_zip()
+
+    step("배포 zip 생성")
+    make_zip(ZIP_PATH, BUILD_ROOT, APP_DIR, PYTHON_DIR)
 
     print(f"\n{'=' * 56}\n  빌드 완료  (v{version})\n{'=' * 56}")
     print("  배포 방법:")

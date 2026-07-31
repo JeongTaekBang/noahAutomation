@@ -59,6 +59,7 @@ python reconcile_ind.py P03 -v            # 상세 로그
 
 # Dashboard
 streamlit run dashboard.py                # Streamlit 대시보드
+python dashboard_dist/build_portable_dashboard.py  # 배포 zip → dashboard_dist/NOAH_대시보드_배포.zip
 
 # GUI (문서 7종 + 납기현황) / 사내 배포판 빌드
 python noah_gui.py                        # tkinter GUI (개발 PC에서도 그대로 실행)
@@ -112,6 +113,8 @@ Reconciliation layer:
 - **Dashboard Error Visibility** (`dashboard.py`): Loader failures collected in `session_state` and displayed as `st.warning()` banner, distinguishing "no data" from "query failure".
 - **Snapshot Engine** (`snapshot.py`): Monthly close → `ob_snapshot` freezes Ending, subsequent retroactive changes auto-detected as Variance. Sequential close enforced. `variance_amount`는 **환율 재평가분 + 소급 변경분 합산** (AX Order Book처럼 조정분 단일 컬럼).
 - **Single Source for DN Revenue** (`db_schema.py: v_dn_revenue`): 매출 귀속월·선적월 환율 재환산·환율차를 뷰 한 곳에서 정의. Order Book 계열 6개 소비처(sql 4종 + `snapshot.py` + `dashboard.py`)가 모두 이 뷰를 읽는다.
+- **`po_generator/__init__.py`는 비워 둔다**: 하위 모듈을 재export하면 `from po_generator.config import DB_FILE` 한 줄에도 패키지 `__init__`이 먼저 돌아 **pandas·openpyxl·xlwings(→COM)가 통째로 딸려온다**. 대시보드는 `config`·`db_schema`만 쓰고 둘 다 표준 라이브러리만 의존하므로, 비워 둔 덕에 배포판에서 Excel 라이브러리가 빠진다. `tests/test_dashboard_dist.py`가 이 세 파일의 최상위 import를 감시한다.
+- **OneDrive로 공유하는 SQLite는 원본을 열지 않는다** (`dashboard.py: _db_snapshot`): DB는 `journal_mode=wal`이라 최신 커밋이 `-wal` 사이드카에 먼저 들어가는데, OneDrive는 본체와 사이드카를 **각각 따로** 동기화한다. 원본을 직접 열면 (1) 커밋이 빠진 상태를 보거나 (2) 읽기 잠금 때문에 OneDrive가 파일을 교체 못 해 **"충돌된 사본"** 이 생긴다 — 둘 다 "사람마다 숫자가 다르다"로 뒤늦게 드러난다. 그래서 백업 API로 일관된 사본을 떠서 그것만 읽고, 캐시 키가 `(mtime, size)`라 원본이 갱신되면 자동으로 다시 뜬다. 발행 쪽은 `sync_db.py: checkpoint_wal()`이 `PRAGMA wal_checkpoint(TRUNCATE)`로 `-wal`을 비워 **단일 파일로 완결**시킨다.
 
 ### Configuration Split
 
@@ -130,7 +133,9 @@ Reconciliation layer:
 | `po_generator/services/document_service.py` | Orchestrator: find → validate → generate → save |
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
 | `noah_gui.py` | tkinter GUI — 문서 7종 + 납기현황. 기존 `create_*.py`·`delivery_status.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함. **DOC_TYPES에 항목을 추가하면 `build_portable_gui.APP_FILES`에도 넣어야 한다** — 안 그러면 배포판에서 그 버튼만 조용히 실패한다 (빌드 `verify()`와 `tests/test_noah_gui.py`가 대조) |
-| `cli_dist/build_portable_gui.py` | 사내 배포판 빌드 — python-build-standalone 런타임 + 앱 파일 + `설치.bat`/`제거.bat` → zip. 빌드는 임시 폴더에서(OneDrive 동기화·MAX_PATH 회피), 프로젝트엔 zip만 남김. 버전 스탬프(`날짜+git sha` → `BUILD_INFO.txt` → GUI 타이틀), 핀 3자 대조(requirements 핀 = 배포 런타임 = 개발 env — transitive까지, 어긋나면 빌드 실패), 트리밍 후 `verify()`가 `DOC_TYPES` 대조 + CLI 전수 `--help` 스모크. **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드) |
+| `build_common.py` | 배포판 빌드 공통부 — 런타임 내려받기·핀 3자 대조·트리밍·BUILD_INFO·zip. 문서생성기와 대시보드 두 빌더가 공유한다 (복사하면 갈라지고, 그 갈라짐은 "한쪽만 낡은 pandas로 나간다"로 늦게 드러난다 — `mail_cli.py`와 같은 이유). **최상위는 상수·함수 정의만** |
+| `cli_dist/build_portable_gui.py` | 문서생성기 배포판 — `build_common` 위에 이 배포판만의 것을 얹는다: `APP_FILES`(담을 것) · 런처/설치 스크립트 · `verify()`(`DOC_TYPES` 대조 + CLI 전수 `--help` 스모크). **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드하며, 예외는 `build_common`을 찾는 sys.path 한 줄뿐) |
+| `dashboard_dist/build_portable_dashboard.py` | 대시보드 배포판 — `dashboard.py`를 **무수정으로** 담고 `po_generator/`·`sql/`을 동봉한다. 예전 `build_dist.py`는 import를 문자열 치환해 standalone 파일을 만들었는데, import 한 줄이 바뀌자 패턴이 안 맞아 빌드가 죽었고 배포본이 4개월 낡았다 — 그래서 재작성을 아예 없앴다. `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다(import만으로는 트리밍 사고를 못 잡는다). pyarrow는 flight/parquet/dataset/substrait를 잘라내되 `arrow_compute`는 남긴다 (streamlit이 로드한다 — 실측) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
 | `po_generator/mailer.py` | 고객 메일 발송 — 사업자번호로 `Customer_국내` 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
 | `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`confirm`/`add_mail_arguments`. `create_ts.py`와 `delivery_status.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다) |

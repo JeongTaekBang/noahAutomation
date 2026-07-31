@@ -1,4 +1,76 @@
-# Current Tasks — Order Book 환율 임팩트(Value Variance) [2026-07-30]
+# Current Tasks — 대시보드 사내 배포판 [2026-07-31]
+
+대시보드를 `cli_dist` 패턴으로 재작성한다. 기존 `dashboard_dist/`는 **빌드가 죽어 있다** —
+`build_dist.py`가 `dashboard.py`의 import 줄을 문자열 치환하는데, 그 패턴이 더 이상 없다
+(현 dashboard.py:25는 괄호 다중 import로 `ensure_so_change_ack_table`·`get_sync_metadata`·
+`SYNC_LOG_CHANGE_TYPES` 3개를 가져온다). 실행 확인: `build_dist.py:86` "원본 import 패턴을
+찾을 수 없습니다" → exit 1. 그래서 동봉된 dashboard.py는 220KB(3/27), 현재는 292KB(7/30)로
+**4개월 낡았다** (Order Book 매출인식 개편·동기화로그 v2 페이지 누락).
+
+**실측한 제약 (2026-07-31, 회사 PC)**
+- 관리자 권한 없음 → 방화벽 인바운드 규칙 생성 `Access is denied` (실제 시도).
+  중앙 호스팅(streamlit 한 대 띄우고 URL 공유)은 IT 없이는 **불가**. 폴더 배포로 간다.
+- Wi-Fi DHCP `192.168.154.3`, 유선 미연결. AC 전원 절전 5분(`0x12c`). 도메인 미가입.
+- `noah_data.db` 35.2MB, `journal_mode=wal`, 개인 OneDrive 안. 배포는 **개인 OneDrive 폴더 공유**로 결정.
+
+## 설계
+
+**1. 소스 재작성을 없앤다 — `po_generator`를 통째로 동봉**
+`build_dist.py`의 문자열 치환이 깨진 근본 원인은 "dashboard.py를 고쳐서 의존성을 끊는다"는
+전제다. `cli_dist`는 반대로 `po_generator/`를 동봉해 CLI를 **무수정**으로 돌린다. 같은 방법을
+쓰면 dashboard.py도 무수정이고, import가 늘어도 빌드가 안 깨진다.
+→ `build_dist.py`·`dashboard_config.ini`·`launcher.py` 전부 삭제.
+
+**2. 설정은 `noah_config.ini` 하나로**
+`config.py`가 이미 `DATA_FOLDER` → `DATA_DIR` → `DB_FILE` 사다리를 갖고 있다
+(user_settings.py → ini → 기본값). 별도 `dashboard_config.ini`와 `_find_onedrive_db()`
+자동탐색은 이 사다리의 중복 구현이다. ini로 통일하면 문서생성기와 설정 파일이 같아진다.
+
+**3. WAL 지뢰 제거 — 발행 시 체크포인트 + 소비 시 로컬 복사**
+WAL이면 커밋이 `noah_data.db-wal`에 먼저 들어간다. OneDrive는 본체와 사이드카를 따로
+동기화하므로 받는 쪽이 **커밋 누락분을 못 보거나** 깨진 DB를 열 수 있다. 또 대시보드를 켜둔
+사람이 읽기 잠금을 잡으면 OneDrive가 파일을 교체 못 해 **충돌 사본**이 생긴다.
+- 발행: `sync_db.py` 종료 시 `PRAGMA wal_checkpoint(TRUNCATE)` → 사이드카 없는 단일 파일
+- 소비: 대시보드가 시작 시 DB를 로컬로 복사한 뒤 사본을 연다 (35MB, 1초 미만).
+  원본에 잠금을 걸지 않으니 충돌 사본이 안 생기고, 일관된 시점 스냅샷이 보장된다.
+- 화면에 `_sync_meta.last_sync` 기준 "데이터 기준: YYYY-MM-DD HH:MM" + 새로고침 버튼.
+  → "내 화면이랑 김대리 화면 숫자가 다른데?"를 막는다. 개발 PC도 같은 코드로 이득.
+
+**4. 빌드 공통부 추출 — 복사하면 갈라진다**
+`build_portable_gui.py`와 새 빌더는 ~70%가 겹친다(download/parse_pins/compute_version/
+런타임 설치/핀 3자 대조/트리밍/zip). `mail_cli.py`를 공유한 것과 같은 이유로 `build_common.py`로
+뽑는다. 앱별로 남는 것은 `copy_app`·`create_launchers`·`verify`뿐.
+- 제약: `build_portable_gui.py` **최상위는 상수·함수 정의만** 유지 (tests가 경로로 로드).
+  경로 로드 상태에서 형제 모듈 import가 되는지 먼저 확인할 것.
+
+## 구현
+- [x] 0. (추가) `po_generator/__init__.py` 재export 제거 — 이게 전제였다. `config` 한 줄에
+      pandas·openpyxl·xlwings(→COM)가 딸려오던 것을 끊어 대시보드 배포판에서 Excel 계열이 빠졌다.
+      패키지 루트에서 그 이름들을 쓰는 코드는 저장소 전체 0건. 전체 테스트 561 통과로 확인
+- [x] 1. `build_common.py` 추출 + `build_portable_gui.py` 재배선 — **실제 빌드로 검증**
+      (7/7 통과, 47MB, 이전 빌드와 동일). 테스트가 참조하는 `parse_pins`/`canon`은 재export로 유지
+- [x] 2. `dashboard_dist/requirements.txt` — 전이 의존성 **40개 전수 핀** (3자 대조 통과)
+- [x] 3. `dashboard_dist/build_portable_dashboard.py` — `dashboard.py` 무수정 + `po_generator/`+`sql/`
+- [x] 4. 트리밍 — **246MB 제거**. pyarrow는 `arrow_compute` 유지(streamlit이 로드, 실측)
+- [x] 5. 런처 — `.vbs`/`.bat`/`설치.bat`/`제거.bat`/`설정.bat` + 빈 포트 자동 확보,
+      127.0.0.1 전용 바인딩(방화벽 권한이 없으니 승인 못 할 프롬프트를 띄우지 않는다)
+- [x] 6. `verify()` — streamlit 실기동 + **실제 DB 사본**으로 health 200 + 페이지 200 + Traceback 검사
+- [x] 7. WAL: `sync_db.py: checkpoint_wal()` + `dashboard.py: _db_snapshot()` + 데이터 기준 표시
+- [x] 8. `.gitignore` — `dashboard_dist/*.zip`만 제외 (레시피를 커밋)
+- [x] 9. 죽은 파일 삭제 — `build_dist.py`, `build_portable.py`, `launcher.py`, `build_exe.bat`,
+      `dashboard_config.ini`, 생성물(`dashboard.py`, `sql/`), `NOAH_Dashboard/`
+- [x] 10. 테스트(`tests/test_dashboard_dist.py` 13건) + 문서(CLAUDE.md, CHANGELOG)
+
+## 결과
+- **zip 96MB** (압축 전 298MB, 파일 10,713개). 트리밍 전 544MB에서 246MB를 걷어낸 결과이며
+  예상(80~100MB) 범위 안. pyarrow는 streamlit 하드 의존성이라 통째로는 못 빼지만
+  안 쓰는 컴포넌트(flight·parquet·dataset·substrait 등)로 ~40MB를 회수했다
+- 참고: 문서생성기 zip은 47MB. 대시보드가 2배인 것은 pyarrow+plotly+numpy 때문이다
+- 중앙 호스팅은 회사 PC에서 불가로 확정 (관리자 권한 없음 → 방화벽 규칙 `Access is denied`)
+
+---
+
+# 완료: Order Book 환율 임팩트(Value Variance) [2026-07-30]
 
 Order Book Output을 `AX_매출대사`와 같은 기준으로 맞춘다. 두 축이 어긋나 있었다:
 1. **해외 환율** — Output이 DN 시트의 `Total Sales KRW`(수주시점 환율)였다. 매출은 선적월 환율로 인식되므로 재환산하고, 차액을 **Value_Variance_amount**로 흡수한다.

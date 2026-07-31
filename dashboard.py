@@ -88,10 +88,65 @@ def _sanitize_date(series) -> pd.Series:
 
 
 # ═══════════════════════════════════════════════════════════════
-# DB 연결
+# DB 연결 — OneDrive 원본이 아니라 로컬 스냅샷을 읽는다
 # ═══════════════════════════════════════════════════════════════
+@st.cache_resource(show_spinner="데이터를 불러오는 중...")
+def _db_snapshot(mtime: float, size: int) -> str:
+    """noah_data.db의 일관된 사본을 로컬 임시폴더에 만들고 그 경로를 준다.
+
+    원본을 직접 열지 않는 이유 — DB는 OneDrive 폴더에 있고 `journal_mode=wal`이다.
+
+    1) WAL이면 최신 커밋이 `-wal` 사이드카에 먼저 들어간다. OneDrive는 본체와
+       사이드카를 **각각 따로** 동기화하므로, 받는 쪽이 원본을 그대로 열면
+       커밋이 빠졌거나 본체-WAL이 어긋난 상태를 볼 수 있다.
+    2) 대시보드를 켜 두면 SQLite가 원본에 읽기 잠금을 잡는다. 그러면 OneDrive가
+       파일을 교체하지 못해 **"충돌된 사본"** 이 생긴다 — 사람마다 다른 숫자를
+       보게 되는, 가장 늦게 발각되는 형태의 오류다.
+
+    그래서 SQLite 백업 API로 **한 시점의 일관된 사본**을 뜨고 그 사본만 연다.
+    원본에 거는 잠금은 복사하는 1초 남짓뿐이고, 그 뒤로는 아무것도 잡지 않는다.
+
+    캐시 키가 (mtime, size)라서 원본이 갱신되면 자동으로 다시 뜬다 —
+    사용자가 새로고침을 누르는 것에 기대지 않는다.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path
+
+    dest_dir = Path(tempfile.gettempdir()) / "noah_dashboard"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest, tmp = dest_dir / "noah_data.db", dest_dir / "noah_data.db.tmp"
+    tmp.unlink(missing_ok=True)
+
+    # 읽기 전용(mode=ro)으로 열지 않는 이유: WAL DB를 읽으려면 -shm이 필요한데
+    # 읽기 전용 연결은 그것을 만들지 못해 SQLITE_READONLY_CANTINIT으로 실패할 수 있다.
+    # 일반 연결로 열되 backup()은 읽기만 하므로 원본 내용은 바뀌지 않는다.
+    src = sqlite3.connect(str(DB_FILE))
+    try:
+        dst = sqlite3.connect(str(tmp))
+        try:
+            src.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        src.close()
+
+    os.replace(tmp, dest)  # 원자적 교체 — 반쯤 쓰인 파일을 열 일이 없다
+    logger.info("DB 스냅샷 갱신: %s (%.0f MB)", dest, dest.stat().st_size / 1024 / 1024)
+    return str(dest)
+
+
 def _conn():
-    return sqlite3.connect(str(DB_FILE)) if DB_FILE.exists() else None
+    if not DB_FILE.exists():
+        return None
+    stat = DB_FILE.stat()
+    try:
+        return sqlite3.connect(_db_snapshot(stat.st_mtime, stat.st_size))
+    except (sqlite3.Error, OSError) as e:
+        # 사본을 못 만들면 원본으로라도 보여준다 — 화면이 통째로 죽는 것보다 낫다.
+        # (위 1)2) 위험은 남으므로 로그에 흔적을 남긴다)
+        logger.warning("DB 스냅샷 실패 — 원본을 직접 엽니다: %s", e)
+        return sqlite3.connect(str(DB_FILE))
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -104,6 +159,32 @@ def _record_load_error(source: str, err: Exception) -> None:
     msg = f"{source}: {type(err).__name__}: {err}"
     if msg not in st.session_state["_load_errors"]:
         st.session_state["_load_errors"].append(msg)
+
+
+def _show_data_freshness(latest: str) -> None:
+    """사이드바에 '데이터 기준' 시각 — 오래됐으면 눈에 띄게 올린다
+
+    배포판을 쓰는 사람은 각자 PC의 OneDrive 사본을 읽는다. 동기화가 늦거나
+    담당자가 아직 sync_db를 안 돌렸으면 사람마다 다른 숫자를 보는데, 화면에
+    아무 표시가 없으면 그 사실이 **회의석에서야** 드러난다.
+    그래서 하루가 넘으면 caption이 아니라 경고로 올린다.
+    """
+    try:
+        synced = datetime.fromisoformat(latest)
+    except (TypeError, ValueError):
+        st.sidebar.caption(f"데이터 기준: {latest}")
+        return
+
+    stamp = synced.strftime("%Y-%m-%d %H:%M")
+    days = (datetime.now() - synced).total_seconds() / 86400
+    if days < 1:
+        st.sidebar.caption(f"데이터 기준: {stamp}")
+    elif days < 7:
+        st.sidebar.warning(f"데이터 기준: {stamp}\n\n{days:.0f}일 전 데이터입니다.")
+    else:
+        st.sidebar.error(
+            f"데이터 기준: {stamp}\n\n{days:.0f}일 전 — OneDrive 동기화 상태를 확인하세요."
+        )
 
 
 def _show_load_errors() -> None:
@@ -1370,7 +1451,7 @@ def main():
     if meta:
         latest = max((v["last_sync"] for v in meta.values() if v.get("last_sync")), default="")
         if latest:
-            st.sidebar.caption(f"마지막 동기화: {latest}")
+            _show_data_freshness(latest)
 
     # ── 로더 에러 배너 ──
     _show_load_errors()
