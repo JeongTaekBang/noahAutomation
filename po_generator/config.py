@@ -345,7 +345,13 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'lc_no': ('L/C No', 'LC No', 'lc no', 'LC번호'),
     'lc_date': ('L/C date', 'LC date', 'lc date', 'LC발행일'),
     # Final Invoice (대금 청구) 필드
-    'customer_code': ('Business registration number', 'C-code by 해외', '고객코드'),
+    # `SO_해외`의 'Business registration number'에는 사업자번호가 아니라 고객코드
+    # (C-0054)가 들어 있다 — 컬럼 이름만 국내 시트와 같다. `Customer_해외`에서는
+    # 'C-code by 해외'가 그 짝이다.
+    # 주의: `Customer_해외`의 '고객코드' 컬럼은 **다른 값**(AX 번호, 2352 같은 숫자)이라
+    # 여기 별칭에 넣으면 안 된다 — 앞 별칭이 없는 시트에서 조용히 엉뚱한 컬럼으로 풀려
+    # 수신자 조인이 전 건 미매칭이 된다.
+    'customer_code': ('Business registration number', 'C-code by 해외'),
     'bill_to_1': ('Bill to 1', 'bill to 1'),
     'bill_to_2': ('Bill to 2', 'bill to 2'),
     'bill_to_3': ('Bill to 3', 'bill to 3'),
@@ -381,6 +387,10 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
 class SupplierInfo:
     """거래명세표 공급자 정보"""
     name: str = '로토크 콘트롤즈 코리아㈜'
+    # 영문 상호 — 해외 고객에게 나가는 메일(OC) 서명용.
+    # `name`(한글)을 영문 본문에 쓸 수 없어 별도로 둔다. 값은 해외 문서 템플릿
+    # 머리글(order_confirmation.xlsx A3)과 같아야 한다 — 메일과 첨부의 발신자가 갈리면 안 된다.
+    name_en: str = 'Rotork Controls Korea Co., Ltd.'
     rep_name: str = '이민수'
     business_no: str = '220-81-21175'
     address: str = '경기도 성남시 분당구 장미로 42'
@@ -394,6 +404,7 @@ _user_supplier = _load_user_setting('SUPPLIER_INFO', None)
 if _user_supplier:
     SUPPLIER_INFO: Final[SupplierInfo] = SupplierInfo(
         name=_user_supplier.get('name', '로토크 콘트롤즈 코리아㈜'),
+        name_en=_user_supplier.get('name_en', 'Rotork Controls Korea Co., Ltd.'),
         rep_name=_user_supplier.get('rep_name', '이민수'),
         business_no=_user_supplier.get('business_no', '220-81-21175'),
         address=_user_supplier.get('address', '경기도 성남시 분당구 장미로 42'),
@@ -483,4 +494,32 @@ DS_MAIL_BODY: Final[str] = _load_user_setting(
     '{date} 기준 미출고 {count}건의 납기현황을 아래와 같이 송부하오니 참고 바랍니다.\n\n'
     '{table}\n\n'
     '본 메일은 자동 발송된 메일입니다.\n',
+)
+
+
+# === Order Confirmation 메일 설정 (create_oc.py) — 해외 전용 ===
+# 수신자(To)는 `Customer_해외`에서 **고객코드**로 조회한다. 국내 문서(거래명세표·납기현황)가
+# 쓰는 사업자번호가 아니다 — `SO_해외`의 'Business registration number' 컬럼에 실제로는
+# `C-0054` 같은 고객코드가 들어 있고, 이것이 `Customer_해외.C-code by 해외`와 맞물린다.
+OC_MAIL_CC: Final[tuple[str, ...]] = tuple(_load_user_setting('OC_MAIL_CC', ()) or ())
+
+# 첨부 형식: 'pdf' | 'xlsx' | 'both'
+# OC는 고객이 보관·회신용으로 받는 확정 통지라 원본(xlsx)을 줄 이유가 없다 — 거래명세표와 같이 PDF.
+OC_MAIL_ATTACH_FORMAT: Final[str] = _load_user_setting('OC_MAIL_ATTACH_FORMAT', 'pdf')
+
+# 제목/본문 템플릿 — 해외 고객이 받으므로 **영문**이다.
+# 치환자: {customer} 거래처명(Customer_해외.고객명, 이미 영문), {customer_po} 고객 발주번호,
+#         {doc_id} SO_ID(= O.C. No), {date} 발행일, {supplier_en} 영문 상호
+OC_MAIL_SUBJECT: Final[str] = _load_user_setting(
+    'OC_MAIL_SUBJECT',
+    'Order Confirmation {doc_id} (PO: {customer_po})',
+)
+OC_MAIL_BODY: Final[str] = _load_user_setting(
+    'OC_MAIL_BODY',
+    'Dear {customer},\n\n'
+    'Please find attached our Order Confirmation for your purchase order {customer_po}.\n\n'
+    'Kindly review the details and let us know if any correction is required.\n\n'
+    'Best regards,\n'
+    '{supplier_en}\n\n'
+    '* This email has been sent automatically.\n',
 )

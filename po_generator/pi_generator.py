@@ -19,7 +19,7 @@ import pandas as pd
 import xlwings as xw
 
 from po_generator.config import PI_TEMPLATE_FILE
-from po_generator.utils import get_value
+from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
     XlConstants,
     xlwings_app_context,
@@ -27,32 +27,11 @@ from po_generator.excel_helpers import (
     cleanup_temp_file,
     delete_rows_range,
     find_text_in_column_batch,
+    insert_copied_rows,
+    layout_item_rows,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _to_text(value) -> str:
-    """숫자를 문자열로 변환 (앞 0 보존, 뒤 .0 제거)
-
-    Excel에서 숫자로 읽힌 값을 원래 텍스트 형태로 복원합니다.
-    예: 12345.0 -> '12345', '0123' -> '0123'
-    """
-    if pd.isna(value) or value == '':
-        return ''
-
-    # 이미 문자열이면 그대로 반환
-    if isinstance(value, str):
-        return value
-
-    # float인 경우 .0 제거
-    if isinstance(value, float):
-        # 정수로 변환 가능하면 정수로
-        if value == int(value):
-            return str(int(value))
-        return str(value)
-
-    return str(value)
 
 
 # === 셀 매핑 (Commercial Invoice 기준 - Proforma Invoice 동일) ===
@@ -267,25 +246,23 @@ def _fill_items(
 
     # 행 수 조정: 템플릿 예시보다 실제 아이템이 많으면 행 삽입
     elif num_items > template_item_count:
-        rows_to_insert = num_items - template_item_count
-
         # 삽입 전: 템플릿 원래 마지막 행의 하단 테두리 제거
         # (이 테두리가 그대로 남아 중간에 선이 생기는 문제 방지)
         original_last_row = ITEM_START_ROW + template_item_count - 1
         ws.range(f'A{original_last_row}:I{original_last_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlNone
 
-        source_row = ITEM_START_ROW
-        for i in range(rows_to_insert):
-            insert_row = ITEM_START_ROW + template_item_count + i
-            ws.range(f'{source_row}:{source_row}').api.Copy()
-            ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=XlConstants.xlShiftDown)
-        logger.debug(f"{rows_to_insert}개 행 삽입")
+        insert_copied_rows(
+            ws, ITEM_START_ROW + template_item_count,
+            num_items - template_item_count, source_row=ITEM_START_ROW,
+        )
 
         # 테두리 복원: 새 마지막 아이템 행에 하단 테두리 추가
         _restore_item_borders(ws, num_items)
 
-    # 아이템 데이터 배치 쓰기 (N개 아이템 * 4열 COM 호출 → 1회로 감소)
-    _fill_items_batch(ws, items_df)
+    # 아이템 데이터 배치 쓰기 → 병합 보장 + 행 높이 교정
+    # (복사·삽입한 행은 병합을 잃을 수 있고, 병합 칸은 autofit이 먹지 않는다)
+    names = _fill_items_batch(ws, items_df)
+    layout_item_rows(ws, ITEM_START_ROW, names)
 
     # Total 행 수식 및 Currency 업데이트
     _update_total_row(ws, num_items, order_data)
@@ -320,7 +297,7 @@ def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> No
 def _fill_items_batch(
     ws: xw.Sheet,
     items_df: pd.DataFrame,
-) -> None:
+) -> list[str]:
     """아이템 데이터 배치 쓰기 (성능 최적화)
 
     PI는 열이 불연속적이므로(A, E, G, I) 열별로 배치 쓰기 수행
@@ -328,6 +305,9 @@ def _fill_items_batch(
     Args:
         ws: xlwings Sheet 객체
         items_df: 아이템 DataFrame
+
+    Returns:
+        각 행에 쓴 품목명 — 호출부가 행 높이를 재는 데 그대로 쓴다
     """
     num_items = len(items_df)
     end_row = ITEM_START_ROW + num_items - 1
@@ -341,7 +321,7 @@ def _fill_items_batch(
     for item_idx, (_, item) in enumerate(items_df.iterrows()):
         # 품목명: Model + Item name (Model은 텍스트로 변환하여 앞 0 보존)
         raw_model = get_value(item, 'model', '')
-        model = _to_text(raw_model)
+        model = to_text(raw_model)
         item_name = get_value(item, 'item_name', '')
         if model and item_name:
             full_name = f"{model} {item_name}"
@@ -380,7 +360,7 @@ def _fill_items_batch(
     ws.range(f'{COL_UNIT_PRICE}{ITEM_START_ROW}:{COL_UNIT_PRICE}{end_row}').value = [[p] for p in prices]
     ws.range(f'{COL_AMOUNT}{ITEM_START_ROW}:{COL_AMOUNT}{end_row}').value = [[a] for a in amounts]
 
-    # 아이템 영역 행 높이 자동 조정
-    ws.range(f'{ITEM_START_ROW}:{end_row}').rows.autofit()
-
+    # 행 높이는 여기서 만지지 않는다 — 품목명 칸이 A:D 병합이라 `rows.autofit()`이 먹지 않고,
+    # 오히려 1줄로 줄여 긴 품목명을 잘라낸다. 호출부가 `layout_item_rows()`로 처리한다.
     logger.debug(f"PI 아이템 배치 쓰기 완료: {num_items}개")
+    return names

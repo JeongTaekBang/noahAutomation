@@ -18,30 +18,25 @@ from pathlib import Path
 import pandas as pd
 import xlwings as xw
 
-from po_generator.utils import get_value
+from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
+    MIN_ITEM_ROW_HEIGHT,
     XlConstants,
+    ensure_row_merges,
     xlwings_app_context,
     prepare_template,
     cleanup_temp_file,
     delete_rows_range,
     find_text_in_column_batch,
+    fit_blank_rows,
+    insert_copied_rows,
+    layout_item_rows,
+    print_area_last_row,
+    printable_height,
+    sum_row_heights,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _to_text(value) -> str:
-    """숫자를 문자열로 변환 (앞 0 보존, 뒤 .0 제거)"""
-    if pd.isna(value) or value == '':
-        return ''
-    if isinstance(value, str):
-        return value
-    if isinstance(value, float):
-        if value == int(value):
-            return str(int(value))
-        return str(value)
-    return str(value)
 
 
 # === 셀 매핑 (Order Confirmation) ===
@@ -69,6 +64,9 @@ COL_UNIT_PRICE = 'F'    # 단가
 COL_CURRENCY = 'G'      # 통화
 COL_DISPATCH = 'H'      # Dispatch date (OC 신규)
 COL_AMOUNT = 'I'        # 금액
+
+# 품목명 칸의 병합 범위(A:D)는 문서 5종 공통이라 excel_helpers가 소유한다
+# (`ITEM_NAME_MERGED_COLS` — 여기서 재정의하지 말 것)
 
 
 def create_oc_xlwings(
@@ -171,45 +169,100 @@ def _find_total_row(ws: xw.Sheet, start_row: int, max_search: int = 20) -> int:
     return row if row is not None else start_row + 10
 
 
+def _page_blank_capacity(ws: xw.Sheet, rows_now: int, item_heights: list[float]) -> int:
+    """한 페이지를 채우려면 아이템 행이 몇 개 더 들어가는지
+
+    계산은 `fit_blank_rows()`(순수 함수)가 하고, 여기서는 시트에서 실제 치수를 읽어
+    넘긴다. 하단 블록은 현재 Total 행부터 인쇄영역 끝까지 (은행 정보·약관) — 행을
+    넣고 지우면 인쇄영역도 따라 움직이므로 하드코딩하지 않고 매번 읽는다.
+
+    **행 높이 확정 뒤에 불러야 한다** — 긴 품목명이 3줄을 먹으면 들어갈 빈 행 수가 준다.
+
+    Args:
+        ws: xlwings Sheet
+        rows_now: 현재 아이템 영역의 행 수 (Total 행 위치 계산용)
+        item_heights: 실제 아이템 행 높이들 (pt)
+
+    Returns:
+        추가로 들어가는 빈 행 수 (인쇄영역을 못 읽으면 0 — 못 재면 채우지 않는다)
+    """
+    last_row = print_area_last_row(ws)
+    if last_row is None:
+        logger.debug("인쇄영역을 읽지 못해 페이지 채움 생략")
+        return 0
+
+    total_row = ITEM_START_ROW + rows_now
+    printable = printable_height(ws)
+    header = sum_row_heights(ws, 1, ITEM_START_ROW - 1)
+    footer = sum_row_heights(ws, total_row, last_row)
+
+    blank_rows = fit_blank_rows(printable - header - footer, item_heights)
+    if blank_rows and logger.isEnabledFor(logging.DEBUG):
+        logger.debug(
+            f"한 페이지 채우기: 빈 행 {blank_rows}개 "
+            f"(헤더 {header:.1f} + 아이템 {sum(item_heights):.1f} + 하단 {footer:.1f} "
+            f"/ 인쇄가능 {printable:.1f}pt)"
+        )
+    return blank_rows
+
+
 def _fill_items(
     ws: xw.Sheet,
     order_data: pd.Series,
     items_df: pd.DataFrame | None,
 ) -> int:
-    """아이템 데이터 채우기"""
+    """아이템 데이터 채우기 (값 → 행 높이 → 최종 행 수 확정 → 한 번에 조정)
+
+    남는 템플릿 행을 먼저 지우지 않는다 — 아이템이 적으면 그 행들이 그대로 "한 페이지
+    채우기"의 빈 행이 된다. 최종 표시 행 수를 정한 뒤 부족분 삽입/초과분 삭제를
+    **한 번만** 하므로, 가장 흔한 1아이템 문서(전체의 절반)가 6행을 지웠다가 7행을
+    되삽입하는 왕복이 없다.
+    """
     if items_df is None:
         items_df = pd.DataFrame([order_data])
     num_items = len(items_df)
 
     total_row = _find_total_row(ws, ITEM_START_ROW)
-    template_item_count = total_row - ITEM_START_ROW
-    logger.debug(f"템플릿 아이템 수: {template_item_count}, 실제 아이템 수: {num_items}")
+    template_count = total_row - ITEM_START_ROW
+    logger.debug(f"템플릿 아이템 수: {template_count}, 실제 아이템 수: {num_items}")
 
-    # 행 수 조정
-    if num_items < template_item_count:
-        rows_to_delete = template_item_count - num_items
-        delete_rows_range(ws, ITEM_START_ROW + num_items, rows_to_delete)
-        _restore_item_borders(ws, num_items)
+    # 0. 템플릿 마지막 아이템 행의 하단 테두리를 미리 지운다 — 최종 행 수가 달라지면
+    #    표 중간에 선이 남는다. 마지막 행이 확정된 뒤 _restore_item_borders가 다시 그린다.
+    last_tpl_row = ITEM_START_ROW + template_count - 1
+    ws.range(f'A{last_tpl_row}:I{last_tpl_row}').api.Borders(
+        XlConstants.xlEdgeBottom
+    ).LineStyle = XlConstants.xlNone
 
-    elif num_items > template_item_count:
-        rows_to_insert = num_items - template_item_count
+    # 1. 부족한 행만 먼저 삽입한다 (남는 행은 빈 행 후보로 유지)
+    if num_items > template_count:
+        insert_copied_rows(
+            ws, ITEM_START_ROW + template_count, num_items - template_count,
+            source_row=ITEM_START_ROW,
+        )
+    rows_now = max(num_items, template_count)
 
-        original_last_row = ITEM_START_ROW + template_item_count - 1
-        ws.range(f'A{original_last_row}:I{original_last_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlNone
+    # 2. 값 채우기 → 병합 보장 + 행 높이 (품목명 칸은 A:D 병합이라 autofit이 먹지 않는다)
+    names = _fill_items_batch(ws, items_df)
+    item_heights = layout_item_rows(ws, ITEM_START_ROW, names)
 
-        source_row = ITEM_START_ROW
-        for i in range(rows_to_insert):
-            insert_row = ITEM_START_ROW + template_item_count + i
-            ws.range(f'{source_row}:{source_row}').api.Copy()
-            ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=XlConstants.xlShiftDown)
-        logger.debug(f"{rows_to_insert}개 행 삽입")
+    # 3. 한 페이지에 들어가는 빈 행 수로 최종 표시 행 수를 확정하고, 한 번에 조정한다
+    display_rows = num_items + _page_blank_capacity(ws, rows_now, item_heights)
+    delta = display_rows - rows_now
+    if delta > 0:
+        at_row = ITEM_START_ROW + rows_now
+        insert_copied_rows(ws, at_row, delta, source_row=ITEM_START_ROW)
+        # 삽입 행은 원본 행 높이를 물려받으므로 기본 높이로 (다중 행 대입 = COM 1회).
+        # 안 하면 첫 품목명이 길 때 빈 행까지 3줄 높이가 되어 페이지를 넘긴다.
+        ws.range(f'{at_row}:{at_row + delta - 1}').api.RowHeight = MIN_ITEM_ROW_HEIGHT
+        # 복사·삽입은 병합을 잃을 수 있다 — 새 행만 다시 보장
+        ensure_row_merges(ws, at_row, at_row + delta - 1)
+    elif delta < 0:
+        delete_rows_range(ws, ITEM_START_ROW + display_rows, -delta)
 
-        _restore_item_borders(ws, num_items)
+    _restore_item_borders(ws, display_rows)
+    _update_total_row(ws, display_rows, order_data)
 
-    _fill_items_batch(ws, items_df)
-    _update_total_row(ws, num_items, order_data)
-
-    return num_items - template_item_count if num_items > template_item_count else 0
+    return display_rows - template_count
 
 
 def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> None:
@@ -233,8 +286,12 @@ def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> No
 def _fill_items_batch(
     ws: xw.Sheet,
     items_df: pd.DataFrame,
-) -> None:
-    """아이템 데이터 배치 쓰기 (SO_해외 기반 + Dispatch date)"""
+) -> list[str]:
+    """아이템 데이터 배치 쓰기 (SO_해외 기반 + Dispatch date)
+
+    Returns:
+        각 행에 쓴 품목명 — 호출부가 행 높이를 재는 데 그대로 쓴다
+    """
     num_items = len(items_df)
     end_row = ITEM_START_ROW + num_items - 1
 
@@ -248,7 +305,7 @@ def _fill_items_batch(
     for item_idx, (_, item) in enumerate(items_df.iterrows()):
         # 품목명: Model number + Item name (model number 있으면 앞에 붙임)
         raw_model = get_value(item, 'model', '')
-        model = _to_text(raw_model)
+        model = to_text(raw_model)
         item_name = get_value(item, 'item_name', '')
         if model and item_name:
             full_name = f"{model} {item_name}"
@@ -302,6 +359,7 @@ def _fill_items_batch(
     ws.range(f'{COL_DISPATCH}{ITEM_START_ROW}:{COL_DISPATCH}{end_row}').value = [[d] for d in dispatch_dates]
     ws.range(f'{COL_AMOUNT}{ITEM_START_ROW}:{COL_AMOUNT}{end_row}').value = [[a] for a in amounts]
 
-    ws.range(f'{ITEM_START_ROW}:{end_row}').rows.autofit()
-
+    # 행 높이는 여기서 만지지 않는다 — 품목명 칸이 병합돼 있어 `rows.autofit()`이
+    # 먹지 않기 때문(오히려 1줄로 줄여 잘라낸다). 호출부가 `layout_item_rows()`로 처리한다.
     logger.debug(f"OC 아이템 배치 쓰기 완료: {num_items}개")
+    return names

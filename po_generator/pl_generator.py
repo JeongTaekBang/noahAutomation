@@ -21,7 +21,7 @@ import pandas as pd
 import xlwings as xw
 
 from po_generator.config import PL_TEMPLATE_FILE
-from po_generator.utils import get_value
+from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
     XlConstants,
     xlwings_app_context,
@@ -29,22 +29,11 @@ from po_generator.excel_helpers import (
     cleanup_temp_file,
     delete_rows_range,
     find_text_in_column_batch,
+    insert_copied_rows,
+    layout_item_rows,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _to_text(value) -> str:
-    """숫자를 문자열로 변환 (앞 0 보존, 뒤 .0 제거)"""
-    if pd.isna(value) or value == '':
-        return ''
-    if isinstance(value, str):
-        return value
-    if isinstance(value, float):
-        if value == int(value):
-            return str(int(value))
-        return str(value)
-    return str(value)
 
 
 # === 셀 매핑 (Packing List - CI와 헤더 동일) ===
@@ -119,11 +108,11 @@ def _collect_customer_pos(order_data: pd.Series, items_df: pd.DataFrame | None) 
     source = items_df if items_df is not None else pd.DataFrame([order_data])
     seen: list[str] = []
     for _, item in source.iterrows():
-        po = _to_text(get_value(item, 'customer_po', ''))
+        po = to_text(get_value(item, 'customer_po', ''))
         if po and po not in seen:
             seen.append(po)
     if not seen:
-        return _to_text(get_value(order_data, 'customer_po', ''))
+        return to_text(get_value(order_data, 'customer_po', ''))
     return ", ".join(seen)
 
 
@@ -231,21 +220,22 @@ def _fill_items(
         _restore_item_borders(ws, num_items)
 
     elif num_items > template_item_count:
-        rows_to_insert = num_items - template_item_count
-
         original_last_row = ITEM_START_ROW + template_item_count - 1
         ws.range(f'A{original_last_row}:I{original_last_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlNone
 
-        source_row = ITEM_START_ROW
-        for i in range(rows_to_insert):
-            insert_row = ITEM_START_ROW + template_item_count + i
-            ws.range(f'{source_row}:{source_row}').api.Copy()
-            ws.range(f'{insert_row}:{insert_row}').api.Insert(Shift=XlConstants.xlShiftDown)
-        logger.debug(f"{rows_to_insert}개 행 삽입")
+        insert_copied_rows(
+            ws, ITEM_START_ROW + template_item_count,
+            num_items - template_item_count, source_row=ITEM_START_ROW,
+        )
 
         _restore_item_borders(ws, num_items)
 
-    _fill_items_batch(ws, items_df)
+    # 아이템 데이터 배치 쓰기 → 병합 보장 + 행 높이 교정
+    # (복사·삽입한 행은 병합을 잃을 수 있고, 병합 칸은 autofit이 먹지 않는다.
+    #  PL과 CI는 늘 같이 첨부되므로 같은 공용 헬퍼를 그대로 쓴다 — 규칙이 갈리면 안 된다)
+    names = _fill_items_batch(ws, items_df)
+    layout_item_rows(ws, ITEM_START_ROW, names)
+
     _update_total_row(ws, num_items)
 
     return num_items - template_item_count if num_items > template_item_count else 0
@@ -281,7 +271,7 @@ def _update_total_row(ws: xw.Sheet, num_items: int) -> None:
 def _fill_items_batch(
     ws: xw.Sheet,
     items_df: pd.DataFrame,
-) -> None:
+) -> list[str]:
     """아이템 데이터 배치 쓰기 (성능 최적화)
 
     PL은 열이 불연속적이므로(A, E, F, G, H, I) 열별로 배치 쓰기 수행
@@ -299,7 +289,7 @@ def _fill_items_batch(
     for item_idx, (_, item) in enumerate(items_df.iterrows()):
         # 품목명: Model number + Item name
         raw_model = get_value(item, 'model', '')
-        model = _to_text(raw_model)
+        model = to_text(raw_model)
         item_name = get_value(item, 'item_name', '')
         if not item_name:
             item_name = item.get('Item', '') if 'Item' in item.index else ''
@@ -313,7 +303,7 @@ def _fill_items_batch(
 
         # Customer PO (행별)
         row_customer_po = get_value(item, 'customer_po', '')
-        customer_pos.append(_to_text(row_customer_po))
+        customer_pos.append(to_text(row_customer_po))
 
         # 수량
         raw_qty = get_value(item, 'item_qty', '')
@@ -359,7 +349,7 @@ def _fill_items_batch(
     ws.range(f'{COL_GROSS_WEIGHT}{ITEM_START_ROW}:{COL_GROSS_WEIGHT}{end_row}').value = [[g] for g in gross_weights]
     ws.range(f'{COL_CBM}{ITEM_START_ROW}:{COL_CBM}{end_row}').value = [[c] for c in cbms]
 
-    # 아이템 영역 행 높이 자동 조정
-    ws.range(f'{ITEM_START_ROW}:{end_row}').rows.autofit()
-
+    # 행 높이는 여기서 만지지 않는다 — 품목명 칸이 A:D 병합이라 `rows.autofit()`이 먹지 않고,
+    # 오히려 1줄로 줄여 긴 품목명을 잘라낸다. 호출부가 `layout_item_rows()`로 처리한다.
     logger.debug(f"PL 아이템 배치 쓰기 완료: {num_items}개")
+    return names

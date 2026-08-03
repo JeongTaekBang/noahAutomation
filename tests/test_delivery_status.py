@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 import delivery_status as ds
+from po_generator import mail_cli
 from po_generator.mail_cli import MailMode, MailOptions
 from po_generator.mailer import MailConfigError, MailResult, Recipient, wrap_body_html
 
@@ -773,7 +774,7 @@ class TestMailSummary:
     @pytest.fixture
     def recipient(self):
         return Recipient(
-            biz_no='6158188675', customer_name='엔이에스',
+            customer_key='6158188675', customer_name='엔이에스',
             to=('nes@example.com',), cc=('cc@example.com',),
         )
 
@@ -803,8 +804,9 @@ class TestMailSummary:
         assert '이메일 컬럼 없음' in capsys.readouterr().out
 
     def test_확인에서_거부하면_보내지_않는다(self, summary, recipient, tmp_path, capsys):
+        # y/N 확인은 공용 관문(mail_cli.confirm_recipient)이 소유하므로 그쪽 confirm을 패치
         with patch.object(ds, 'find_recipient', return_value=recipient), \
-             patch.object(ds, 'confirm', return_value=False), \
+             patch.object(mail_cli, 'confirm', return_value=False), \
              patch.object(ds, 'create_document_mail') as sender:
             assert ds.mail_summary(summary, tmp_path / 'a.xlsx', '1', 'A',
                                    self._opts(MailMode.ASK)) is False
@@ -814,7 +816,7 @@ class TestMailSummary:
     def test_수신자를_먼저_보여준다(self, summary, recipient, tmp_path, capsys):
         """오발송 차단 — 누구에게 나가는지 확인 전에 화면에 찍혀야 한다"""
         with patch.object(ds, 'find_recipient', return_value=recipient), \
-             patch.object(ds, 'confirm', return_value=False):
+             patch.object(mail_cli, 'confirm', return_value=False):
             ds.mail_summary(summary, tmp_path / 'a.xlsx', '1', 'A', self._opts(MailMode.ASK))
         out = capsys.readouterr().out
         assert 'nes@example.com' in out and 'cc@example.com' in out

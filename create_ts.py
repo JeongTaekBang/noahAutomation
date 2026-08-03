@@ -21,13 +21,11 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
 from po_generator.config import (
-    CUSTOMER_DOMESTIC_SHEET,
     TS_MAIL_ATTACH_FORMAT,
     TS_MAIL_CC,
     TS_OUTPUT_DIR,
@@ -37,91 +35,28 @@ from po_generator.utils import (
     load_dn_data,
     load_pmt_data,
     get_value,
-    resolve_column,
 )
 from po_generator.ts_generator import create_ts_xlwings
 from po_generator.cli_common import validate_output_path, generate_output_filename
 from po_generator.logging_config import setup_logging
 from po_generator.mailer import (
-    NO_VALUE,
-    MailBackend,
     MailConfigError,
     create_ts_mail,
     find_recipient_for_order,
-    resolve_backend,
 )
-# 메일 CLI 배선은 delivery_status.py와 공유한다 (po_generator/mail_cli.py).
-# 여기서 다시 노출하는 이유는 `from create_ts import MailMode` 하는 기존 호출부·테스트를
-# 그대로 두기 위해서다.
-from po_generator.mail_cli import (  # noqa: F401  (재노출)
-    MailMode,
+# 메일 CLI 배선은 delivery_status.py·create_oc.py와 공유한다 (po_generator/mail_cli.py).
+from po_generator.mail_cli import (
     MailOptions,
     add_mail_arguments,
-    confirm as _confirm,
+    collect_customer_po as _collect_customer_po,
+    confirm_recipient,
+    format_mail_date as _format_mail_date,
+    prepare_mail_options as _prepare_mail_options,
     report_mail_result,
-    resolve_mail_mode,
-    show_recipient,
 )
 from po_generator.services import DocumentService, GenerationStatus
 
 logger = logging.getLogger(__name__)
-
-
-def _format_mail_date(value: object) -> str:
-    """메일 제목/본문에 쓸 날짜 문자열
-
-    출고일이 비어 있거나(선수금 문서) 파싱되지 않으면 오늘 날짜를 씁니다.
-    빈 값은 None/NaT/NaN 모두로 들어올 수 있어 한 곳에서 흡수합니다.
-
-    Args:
-        value: 출고일 값
-
-    Returns:
-        'YYYY-MM-DD'
-    """
-    try:
-        stamp = pd.to_datetime(value)
-    except (ValueError, TypeError):
-        stamp = None
-
-    if stamp is None or pd.isna(stamp):
-        return datetime.now().strftime('%Y-%m-%d')
-    return stamp.strftime('%Y-%m-%d')
-
-
-def _collect_customer_po(
-    order_data: pd.Series,
-    items_df: pd.DataFrame | None = None,
-) -> str:
-    """거래처 발주번호 표기 문자열
-
-    월합 거래명세표는 DN마다 발주번호가 다를 수 있으므로 **전체 아이템에서** 모읍니다.
-    첫 건만 쓰면 여러 발주가 묶인 문서에 엉뚱한 번호 하나만 나가게 됩니다.
-
-    Args:
-        order_data: 주문 데이터 (items_df가 없을 때 폴백)
-        items_df: 문서에 실린 전체 아이템
-
-    Returns:
-        발주번호 (여러 건이면 ', ' 구분, 없으면 'N/A')
-    """
-    values: list = []
-    if items_df is not None and not items_df.empty:
-        col = resolve_column(items_df.columns, 'customer_po')
-        if col is not None:
-            values = items_df[col].tolist()
-    if not values:
-        values = [get_value(order_data, 'customer_po', '')]
-
-    unique: dict[str, None] = {}
-    for value in values:
-        if value is None or (isinstance(value, float) and pd.isna(value)):
-            continue
-        text = str(value).strip()
-        if text and text.lower() != 'nan':
-            unique.setdefault(text, None)
-
-    return ', '.join(unique) if unique else NO_VALUE
 
 
 def _mail_ts(
@@ -133,6 +68,7 @@ def _mail_ts(
 ) -> bool:
     """생성된 거래명세표를 메일로 발송/초안 생성
 
+    수신자 확인 관문(조회 → 표시 → y/N)은 `mail_cli.confirm_recipient()`가 소유한다.
     메일 실패는 거래명세표 생성 성공을 뒤엎지 않습니다 (경고만 출력).
 
     Args:
@@ -148,34 +84,23 @@ def _mail_ts(
     if not opts.enabled:
         return True
 
-    df_customer = opts.customer_master()
-    if df_customer is None:
-        return False
-
-    try:
-        recipient = find_recipient_for_order(order_data, df_customer)
-    except MailConfigError as e:
-        print(f"  [메일 오류] {e}")
-        return False
-
-    if recipient is None:
-        biz_no = get_value(order_data, 'biz_no', '(사업자번호 없음)')
-        customer = get_value(order_data, 'customer_name', '')
-        print(f"  [메일 생략] 수신자 미등록 — {customer} / {biz_no}")
-        print(f"             {CUSTOMER_DOMESTIC_SHEET} 시트에 해당 사업자번호의 이메일을 입력하세요.")
-        return False
-
+    biz_no = get_value(order_data, 'biz_no', '(사업자번호 없음)')
+    customer = get_value(order_data, 'customer_name', '')
     # 제목/본문 날짜: 출고일 우선, 없으면 오늘
     # (선수금 거래명세표는 SO_국내 기반이라 출고일 자체가 없다)
     date_str = _format_mail_date(get_value(order_data, 'dispatch_date', None))
     customer_po = _collect_customer_po(order_data, items_df)
 
-    # 누구에게 나가는지 먼저 보여주고 확인받는다 (오발송 차단)
-    show_recipient(recipient)
-    print(f"  발주번호: {customer_po}")
-
-    if opts.ask and not _confirm("  이메일을 발송하시겠습니까? [y/N]: "):
-        print("  -> 메일 생략")
+    recipient = confirm_recipient(
+        opts,
+        lambda df: find_recipient_for_order(order_data, df),
+        missing_lines=[
+            f"  [메일 생략] 수신자 미등록 — {customer} / {biz_no}",
+            f"             {opts.sheet_label} 시트에 해당 사업자번호의 이메일을 입력하세요.",
+        ],
+        info_lines=[f"  발주번호: {customer_po}"],
+    )
+    if recipient is None:
         return False
 
     try:
@@ -587,10 +512,10 @@ Outlook 메일 발송:
 
 
 def prepare_mail_options(args: argparse.Namespace) -> MailOptions:
-    """CLI 인자로 메일 옵션 구성
+    """CLI 인자로 거래명세표 메일 옵션 구성
 
-    마스터 로딩은 실제로 메일이 필요한 시점까지 미룹니다
-    (메일을 쓰지 않는 실행에 Excel 로딩 비용을 물리지 않기 위함).
+    판정 규칙은 `mail_cli.prepare_mail_options()`가 소유하고, 여기서는 거래명세표
+    상수만 넘깁니다 (수신자 마스터는 기본값인 `Customer_국내`).
 
     Args:
         args: 파싱된 CLI 인자
@@ -598,30 +523,11 @@ def prepare_mail_options(args: argparse.Namespace) -> MailOptions:
     Returns:
         MailOptions
     """
-    mode = resolve_mail_mode(args, is_tty=sys.stdin.isatty())
-    if mode is MailMode.OFF:
-        return MailOptions.disabled()
-
-    label = {
-        MailMode.ASK: '건별 확인 후 발송',
-        MailMode.DRAFT: '확인 없이 초안 열기',
-        MailMode.SEND: '확인 없이 즉시 발송',
-    }[mode]
-    # auto는 용도에 따라 갈린다 — 초안은 .eml(사용자 기본 메일 앱), 즉시 발송만 COM
-    backend = resolve_backend(send=mode is MailMode.SEND)
-    backend_label = 'Outlook COM' if backend is MailBackend.OUTLOOK else '.eml 초안'
-    # 참조자는 거래처마다 달라서 Customer_국내의 '참조 이메일'로 건별 관리한다.
-    # TS_MAIL_CC는 모든 거래처에 공통으로 붙일 주소가 있을 때만 쓰는 선택 항목.
-    cc_note = f" / 고정 CC {len(TS_MAIL_CC)}명" if TS_MAIL_CC else ""
-    print(f"\n메일: {label} / 첨부 {TS_MAIL_ATTACH_FORMAT.upper()} / "
-          f"방식 {backend_label}{cc_note}")
-
-    # .eml은 작성 창을 띄우는 방식이라 자동 발송이 불가능하다
-    if mode is MailMode.SEND and backend is MailBackend.EML:
-        print("  [주의] .eml 방식은 자동 발송을 지원하지 않습니다 — 초안까지만 진행됩니다.")
-        print("         (Outlook COM 사용 불가 환경 — 클래식 Outlook이 없거나 실행 실패)")
-
-    return MailOptions(mode=mode, backend=backend)
+    return _prepare_mail_options(
+        args,
+        attach_format=TS_MAIL_ATTACH_FORMAT,
+        fixed_cc=TS_MAIL_CC,
+    )
 
 
 def main() -> int:

@@ -86,7 +86,7 @@ DOC_TYPES: tuple[dict[str, object], ...] = (
     {
         'key': 'oc', 'label': 'Order Confirmation (OC)', 'script': 'create_oc.py',
         'id_label': 'SO_ID', 'hint': '예: SOO-2026-0001',
-        'out_attr': 'OC_OUTPUT_DIR', 'options': (), 'multi': True,
+        'out_attr': 'OC_OUTPUT_DIR', 'options': ('mail',), 'multi': True,
     },
     {
         'key': 'ci', 'label': 'Commercial Invoice (CI)', 'script': 'create_ci.py',

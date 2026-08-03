@@ -27,7 +27,9 @@ python create_pi.py NO-0001              # Proforma invoice
 python create_fi.py DNO-2026-0001        # Final invoice (복수 RCK PO 시 발주번호별 자동 분리)
 python create_fi.py --po 26KPO00144     # 발주번호 기준 FI 생성 (복수 DN 통합)
 python create_fi.py --po                # 사용 가능한 발주번호 목록 표시
-python create_oc.py SOO-2026-0001        # Order confirmation
+python create_oc.py SOO-2026-0001        # Order confirmation (생성 후 "이메일 발송?" y/N → 영문 메일)
+python create_oc.py SOO-2026-0001 --mail    # 확인 없이 메일 초안
+python create_oc.py SOO-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
 
 # DB sync & snapshot
 python sync_db.py                         # Excel → SQLite sync
@@ -104,6 +106,8 @@ Reconciliation layer:
 - **Column Alias System** (`config.py: COLUMN_ALIASES`): Maps internal names to multiple possible Excel column headers. `resolve_column()` auto-detects actual names — critical for resilience to Excel schema changes.
 - **Dual Library Strategy**: openpyxl for PO (fast, no image needs); xlwings for TS/PI/FI/OC (preserves images, formulas, COM-dependent).
 - **Template Engine** (`template_engine.py`): Clones rows for multi-item orders, auto-adjusts SUM formulas after row insertion.
+- **병합 셀에는 `rows.autofit()`이 먹지 않는다** (`excel_helpers.py`): 해외 문서 5종(OC·FI·PI·CI·PL)의 품목명 칸은 A:D 병합인데, Excel의 자동 맞춤은 **병합 셀을 측정에서 제외한다**. 105자 품목명에 `autofit()`을 부르면 높이가 15pt → **12.75pt로 오히려 줄면서 1줄로 잘린다** (2026-08-03 실측). 그래서 `autofit_merged_rows()`가 인쇄영역 밖 보조 열(Z)에 같은 텍스트를 넣고 Excel에게 재게 한 뒤 그 높이를 되쓴다. 보조 열 폭은 **문자 단위가 아니라 포인트로** 맞춘다 — 열마다 안쪽 여백이 붙어 A:D(198.00pt)와 같은 문자폭의 단일 열(186.75pt)이 11.25pt 어긋난다. COM 왕복은 배치가 원칙: 높이 합은 `Range.Height` 1회(`sum_row_heights`), 되쓰기는 같은 높이 연속 구간당 1회, 행 삽입은 `insert_copied_rows`(일괄 Insert + 타일 Copy, 3회).
+- **행을 복사해 삽입하면 일부 행이 병합을 잃는다** (`excel_helpers.py`): 48아이템 OC에서 삽입한 41행 중 6행의 A:D 병합이 사라져 품목명이 A열에 갇혀 5~7줄로 흘렀다 (2026-08-03 실측 — 이 결함은 행 높이 교정 이전부터 있었다). 그래서 병합 보장(`ensure_row_merges`)과 높이 교정은 늘 세트고, 5종 생성기는 값 채우기 직후 **복합 헬퍼 `layout_item_rows()` 하나만** 부른다 — 여섯 번째 문서가 한쪽만 부르는 실수를 원천 차단 (`tests/test_page_fit.py`가 감시). 병합 범위 `ITEM_NAME_MERGED_COLS`는 **excel_helpers 한 곳**에만 둔다 — 특히 CI와 PL은 선적서류라 늘 같이 첨부되어 나란히 읽히므로 줄 높이 규칙이 갈리면 바로 눈에 띈다.
 - **History as DB**: `po_history/YYYY/M월/YYYYMMDD_주문번호_고객명.xlsx` — one file per transaction enables duplicate detection without a database.
 - **Result Pattern** (`services/result.py`): `DocumentResult` + `GenerationStatus` enum for structured operation outcomes. `history_saved` field tracks history persistence separately from generation success.
 - **Output File Safety** (`cli_common.py`): Generated files auto-suffix on collision (`_1`, `_2`, ...) to prevent silent overwrites. Raises `FileExistsError` if 100+ collisions.
@@ -137,8 +141,8 @@ Reconciliation layer:
 | `cli_dist/build_portable_gui.py` | 문서생성기 배포판 — `build_common` 위에 이 배포판만의 것을 얹는다: `APP_FILES`(담을 것) · 런처/설치 스크립트 · `verify()`(`DOC_TYPES` 대조 + CLI 전수 `--help` 스모크). **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드하며, 예외는 `build_common`을 찾는 sys.path 한 줄뿐) |
 | `dashboard_dist/build_portable_dashboard.py` | 대시보드 배포판 — `dashboard.py`를 **무수정으로** 담고 `po_generator/`·`sql/`을 동봉한다. 예전 `build_dist.py`는 import를 문자열 치환해 standalone 파일을 만들었는데, import 한 줄이 바뀌자 패턴이 안 맞아 빌드가 죽었고 배포본이 4개월 낡았다 — 그래서 재작성을 아예 없앴다. `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다(import만으로는 트리밍 사고를 못 잡는다). pyarrow는 flight/parquet/dataset/substrait를 잘라내되 `arrow_compute`는 남긴다 (streamlit이 로드한다 — 실측) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
-| `po_generator/mailer.py` | 고객 메일 발송 — 사업자번호로 `Customer_국내` 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
-| `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`confirm`/`add_mail_arguments`. `create_ts.py`와 `delivery_status.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다) |
+| `po_generator/mailer.py` | 고객 메일 발송 — 고객 마스터에서 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **조인키가 국내/해외로 갈린다**: `find_recipient()`는 사업자번호로 `Customer_국내`, `find_recipient_overseas()`는 고객코드로 `Customer_해외` — 둘 다 `_build_recipient()` 하나를 공유한다. **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
+| `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`add_mail_arguments`/`prepare_mail_options`/`confirm_recipient`(수신자 조회→표시→y/N 관문)/`collect_customer_po`/`format_mail_date`. `create_ts.py`·`delivery_status.py`·`create_oc.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다). 어느 마스터를 읽을지는 `MailOptions.loader`/`sheet_label` **짝**으로 주입 — 기본은 국내, OC만 해외. **`loader` 기본값에 함수를 박지 말 것**: 클래스 정의 시점에 굳어 모듈 속성 교체(테스트 monkeypatch)가 무시된다 |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
 | `docs/DATA_STRUCTURE_DESIGN.md` | Excel schema (8 sheets), Power Query setup |
 | `docs/POWER_QUERY.md` | Power Query 수식, Power Pivot 관계 — 데이터 소스 구조 이해 시 참고 |
@@ -178,6 +182,15 @@ Reconciliation layer:
     고객이 섞인 `--merge` 문서는 발송 차단
   - 납기현황: 조회 기준인 사업자번호를 그대로 사용(항상 단일 거래처라 섞임 없음), 고정 참조는 `DS_MAIL_CC`,
     첨부 기본 **xlsx**(고객이 정렬·가공해 보는 표라 원본이 쓸모 있다). 본문에 납기 표를 HTML로 싣는다
+- **OC 메일은 해외 전용이고, 조인키가 사업자번호가 아니라 고객코드다.** `SO_해외`의
+  `Business registration number` 컬럼에는 실제로 `C-0054` 같은 **고객코드**가 들어 있고
+  (이름만 국내 시트와 같다), 이것이 `Customer_해외.C-code by 해외`와 맞물린다.
+  주의: `Customer_해외`의 `고객코드` 컬럼은 **다른 값**(AX 번호)이라
+  `COLUMN_ALIASES['customer_code']`에 별칭으로 넣으면 안 된다 — 앞 별칭이 없는 시트에서
+  조용히 엉뚱한 컬럼으로 풀려 전 건이 미매칭된다. 본문은 **영문**이고 서명은
+  `{supplier}`(한글)가 아니라 `{supplier_en}`을 쓴다. 첨부 기본 PDF, 고정 참조는 `OC_MAIL_CC`.
+  나머지 규약(수신자 확인 후 y/N, 비대화형 자동 OFF, 메일 실패가 문서 생성을 뒤엎지 않음)은
+  거래명세표와 동일하다
 - **Order Book Output = 매출 인식 기준**이다 (출고 기준이 아니다) — `AX_매출대사`와 동일 산식.
   국내 = 세금계산서 발행월(미발행이면 **미인식 = Backlog 잔류**), 해외 = 선적월 + 선적월 환율 재환산.
   환율 재평가분은 `Value_Variance_amount`로 빠져 **Ending은 재환산 도입 전과 동일** —

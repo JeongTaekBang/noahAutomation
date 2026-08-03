@@ -44,6 +44,21 @@ def protect_templates(tmp_path, monkeypatch):
     # 테스트 후 정리는 pytest의 tmp_path가 자동 처리
 
 
+@pytest.fixture(autouse=True)
+def isolate_mail_settings(monkeypatch):
+    """메일 테스트가 로컬 user_settings.py에 좌우되지 않게 고정
+
+    운영 PC는 TS_MAIL_BACKEND='eml'이지만, 백엔드를 지정하지 않은 테스트가
+    사용자 설정을 타고 다른 경로로 흘러가면 안 된다 — 고객 발송 경로라 특히.
+    메일 테스트 파일마다 복사돼 있던 것을 한 곳으로 (한쪽만 고정되면 나머지는
+    작성자 PC 설정에 따라 다른 경로를 탄다).
+    """
+    from po_generator import mailer
+
+    monkeypatch.setattr(mailer, 'TS_MAIL_BACKEND', 'auto')
+    monkeypatch.setattr(mailer, '_com_available', None)
+
+
 @pytest.fixture
 def valid_order_data() -> pd.Series:
     """유효한 주문 데이터"""

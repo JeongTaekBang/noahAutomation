@@ -69,7 +69,6 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 from po_generator.cli_common import generate_output_filename
 from po_generator.config import (
-    CUSTOMER_DOMESTIC_SHEET,
     DS_MAIL_ATTACH_FORMAT,
     DS_MAIL_BODY,
     DS_MAIL_CC,
@@ -83,10 +82,10 @@ from po_generator.logging_config import setup_logging
 from po_generator.mail_cli import (
     MailOptions,
     add_mail_arguments,
-    confirm,
+    confirm_recipient,
+    format_mail_date,
+    prepare_mail_options,
     report_mail_result,
-    resolve_mail_mode,
-    show_recipient,
 )
 from po_generator.mailer import (
     MailConfigError,
@@ -801,6 +800,7 @@ def mail_summary(
 ) -> bool:
     """생성된 납기현황을 메일로 발송/초안 생성
 
+    수신자 확인 관문(조회 → 표시 → y/N)은 `mail_cli.confirm_recipient()`가 소유한다.
     메일 실패는 문서 생성 성공을 뒤엎지 않습니다 (경고만 출력).
 
     Args:
@@ -816,33 +816,21 @@ def mail_summary(
     if not opts.enabled:
         return True
 
-    df_customer = opts.customer_master()
-    if df_customer is None:
-        return False
-
-    try:
-        recipient = find_recipient(
-            biz_no, df_customer, fallback_name=customer_name, fixed_cc=DS_MAIL_CC,
-        )
-    except MailConfigError as e:
-        print(f"  [메일 오류] {e}")
-        return False
-
+    recipient = confirm_recipient(
+        opts,
+        lambda df: find_recipient(
+            biz_no, df, fallback_name=customer_name, fixed_cc=DS_MAIL_CC,
+        ),
+        missing_lines=[
+            f"  [메일 생략] 수신자 미등록 — {customer_name} / {format_biz_no(biz_no)}",
+            f"             {opts.sheet_label} 시트에 해당 사업자번호의 이메일을 입력하세요.",
+        ],
+        info_lines=[f"  내용    : 미출고 {len(summary)}건 / 첨부 {output_file.name}"],
+    )
     if recipient is None:
-        print(f"  [메일 생략] 수신자 미등록 — {customer_name} / {format_biz_no(biz_no)}")
-        print(f"             {CUSTOMER_DOMESTIC_SHEET} 시트에 해당 사업자번호의 이메일을 입력하세요.")
         return False
 
-    # 누구에게 나가는지 먼저 보여주고 확인받는다 (오발송 차단)
-    print()
-    show_recipient(recipient)
-    print(f"  내용    : 미출고 {len(summary)}건 / 첨부 {output_file.name}")
-
-    if opts.ask and not confirm("  이메일을 발송하시겠습니까? [y/N]: "):
-        print("  -> 메일 생략")
-        return False
-
-    date_str = dt.date.today().strftime('%Y-%m-%d')
+    date_str = format_mail_date(None)  # 기준일 = 오늘
     extra = {
         'count': len(summary),
         'qty': f"{summary['수량'].sum():,.0f}",
@@ -937,9 +925,6 @@ def main() -> int:
     args = parser.parse_args()
     setup_logging(verbose=args.verbose)
 
-    # 비대화형 실행(배치·파이프)에서는 묻지 않는다 — input()에서 멈추면 안 된다
-    mail_opts = MailOptions(mode=resolve_mail_mode(args, sys.stdin.isatty()))
-
     if not args.show_list and not args.customer:
         parser.print_help()
         print("\n[오류] 사업자등록번호 또는 거래처명을 입력하세요 (목록은 --list).")
@@ -1006,6 +991,11 @@ def main() -> int:
     print(f"\n출력: {output_file}")
 
     # 6. 메일 (실패해도 문서 생성 성공을 뒤엎지 않는다)
+    # 옵션 판정을 여기서 하는 이유: --list나 빈 결과 등 메일이 성립하지 않는 경로에
+    # "메일: 건별 확인…" 배너가 찍히지 않게. 비대화형이면 자동 OFF (배치가 안 멈추게).
+    mail_opts = prepare_mail_options(
+        args, attach_format=DS_MAIL_ATTACH_FORMAT, fixed_cc=DS_MAIL_CC,
+    )
     mail_summary(summary, output_file, biz_no, customer_name, mail_opts)
 
     warn_if_stale(stale)

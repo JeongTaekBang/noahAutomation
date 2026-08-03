@@ -14,16 +14,17 @@ import pandas as pd
 import pytest
 
 import create_ts
-from create_ts import (
+from create_ts import _mail_ts
+from po_generator import mail_cli, mailer
+from po_generator.mail_cli import (
     MailMode,
     MailOptions,
-    _collect_customer_po,
-    _confirm,
-    _format_mail_date,
-    _mail_ts,
+    collect_customer_po as _collect_customer_po,
+    confirm as _confirm,
+    format_mail_date as _format_mail_date,
+    prepare_mail_options,
     resolve_mail_mode,
 )
-from po_generator import mail_cli, mailer
 from po_generator.mailer import (
     MailBackend,
     MailConfigError,
@@ -36,18 +37,10 @@ from po_generator.mailer import (
 )
 from po_generator.utils import normalize_biz_no, resolve_column
 
+# 메일 백엔드 격리(user_settings 무시)는 conftest.isolate_mail_settings가 전 테스트에 적용
+
 
 # === Fixtures ===
-
-@pytest.fixture(autouse=True)
-def isolate_mail_settings(monkeypatch):
-    """테스트가 로컬 user_settings.py에 좌우되지 않게 고정
-
-    운영 PC는 TS_MAIL_BACKEND='eml'이지만, 백엔드를 지정하지 않은 테스트가
-    사용자 설정을 타고 다른 경로로 흘러가면 안 된다.
-    """
-    monkeypatch.setattr(mailer, 'TS_MAIL_BACKEND', 'auto')
-    monkeypatch.setattr(mailer, '_com_available', None)
 
 @pytest.fixture
 def df_customer():
@@ -66,7 +59,7 @@ def df_customer():
 @pytest.fixture
 def recipient():
     return Recipient(
-        biz_no='220-81-21175',
+        customer_key='220-81-21175',
         customer_name='가나밸브',
         to=('buyer@gana.co.kr',),
         cc=('fixed@rotork.com',),
@@ -311,6 +304,32 @@ class TestResolveMailMode:
         assert resolve_mail_mode(_args(mail=True, send=True), is_tty=True) is MailMode.SEND
 
 
+class TestPrepareMailOptions:
+    """공용 옵션 구성 헬퍼 — 세 CLI가 상수만 넘겨 쓰므로 규칙 검증은 여기 한 곳"""
+
+    def test_no_mail은_OFF(self, monkeypatch):
+        monkeypatch.setattr('sys.stdin', SimpleNamespace(isatty=lambda: True))
+        opts = prepare_mail_options(_args(no_mail=True), attach_format='pdf')
+        assert opts.mode is MailMode.OFF
+
+    def test_비대화형은_묻지_않는다(self, monkeypatch):
+        """배치 실행이 input()에서 멈추면 안 된다"""
+        monkeypatch.setattr('sys.stdin', SimpleNamespace(isatty=lambda: False))
+        assert prepare_mail_options(_args(), attach_format='pdf').mode is MailMode.OFF
+
+    def test_대화형_기본은_건별_확인_및_배너(self, monkeypatch, capsys):
+        monkeypatch.setattr('sys.stdin', SimpleNamespace(isatty=lambda: True))
+        opts = prepare_mail_options(_args(), attach_format='pdf')
+        assert opts.mode is MailMode.ASK
+        assert 'PDF' in capsys.readouterr().out
+
+    def test_기본_마스터는_국내(self, monkeypatch):
+        monkeypatch.setattr('sys.stdin', SimpleNamespace(isatty=lambda: True))
+        opts = prepare_mail_options(_args(mail=True), attach_format='pdf')
+        assert opts.sheet_label == mail_cli.CUSTOMER_DOMESTIC_SHEET
+        assert opts.loader is None  # None = 호출 시점에 국내 로더로 해석 (monkeypatch 가능)
+
+
 class TestConfirm:
     @pytest.mark.parametrize('answer', ['y', 'Y', 'yes', 'YES', ' y ', 'ㅛ', '네', 'ㅇ'])
     def test_accepts_yes_forms(self, answer, monkeypatch):
@@ -463,13 +482,13 @@ class TestRenderTemplate:
         assert render_template(tpl, recipient, 'DN-1', '2026-07-27') == tpl
 
     def test_customer_en_uses_english_name(self):
-        r = Recipient(biz_no='1', customer_name='가나밸브', to=('a@b.com',), cc=(),
+        r = Recipient(customer_key='1', customer_name='가나밸브', to=('a@b.com',), cc=(),
                       customer_name_en='GANA VALVE')
         assert render_template('Dear {customer_en},', r, 'DN-1', '2026-07-27') == 'Dear GANA VALVE,'
 
     def test_customer_en_falls_back_to_korean(self):
         """영문명이 비어 있는 6% 거래처 — 빈칸 대신 한글명으로"""
-        r = Recipient(biz_no='1', customer_name='주식회사 진테크', to=('a@b.com',), cc=())
+        r = Recipient(customer_key='1', customer_name='주식회사 진테크', to=('a@b.com',), cc=())
         assert render_template('Dear {customer_en},', r, 'DN-1', '2026-07-27') == 'Dear 주식회사 진테크,'
 
 
@@ -604,7 +623,7 @@ class TestBuildEml:
         assert names == ['거래명세표.pdf', '거래명세표.xlsx']
 
     def test_no_cc_omits_header(self, pdf, tmp_path):
-        r = Recipient(biz_no='1', customer_name='A', to=('a@b.com',), cc=())
+        r = Recipient(customer_key='1', customer_name='A', to=('a@b.com',), cc=())
         eml = mailer.build_eml(r, '제목', '본문', (pdf,), tmp_path)
         assert self._parse(eml)['Cc'] is None
 
@@ -664,7 +683,7 @@ class TestBuildEml:
 
     def test_html_escapes_special_characters(self, pdf, tmp_path):
         """'S&T중공업' 같은 거래처명이 HTML에서 깨지면 안 된다"""
-        r = Recipient(biz_no='1', customer_name='S&T중공업', to=('a@b.com',), cc=())
+        r = Recipient(customer_key='1', customer_name='S&T중공업', to=('a@b.com',), cc=())
         eml = mailer.build_eml(r, '제목', 'S&T중공업 <귀중>\n', (pdf,), tmp_path)
         raw_html = self._parse(eml).get_body(('html',)).get_content()
 
@@ -800,3 +819,41 @@ class TestCreateTsMail:
             )
         assert result.success is False
         assert 'Outlook' in result.message
+
+
+# === 국내 / 해외 경계 ===
+
+class TestDomesticOverseasBoundary:
+    """국내(사업자번호)와 해외(고객코드)는 `_build_recipient` 하나를 공유한다.
+
+    공유 뒤에도 두 경로가 섞이지 않는지를 지킨다 — 섞이면 고객에게 남의 메일이 간다.
+    """
+
+    def test_국내_조회는_해외_마스터를_읽지_않는다(self, df_customer):
+        """해외 마스터를 국내 함수에 넘기면 사업자번호 컬럼이 없어 설정 오류"""
+        overseas = pd.DataFrame({
+            'C-code by 해외': ['C-0095'],
+            '고객명': ['WATERGATES GMBH'],
+            '이메일': ['buyer@watergates.de'],
+        })
+        with pytest.raises(MailConfigError, match='사업자번호'):
+            find_recipient('220-81-21175', overseas)
+
+    def test_해외_코드를_국내_경로로_찾으면_안_잡힌다(self, df_customer):
+        """'C-0095'를 국내 정규화에 넣으면 '0095'가 되어 엉뚱한 매칭 위험"""
+        assert find_recipient('C-0095', df_customer) is None
+
+    def test_국내_기본_CC는_TS_MAIL_CC로_유지된다(self, df_customer, monkeypatch):
+        """리팩터로 기본 CC가 바뀌면 거래명세표 참조자가 조용히 사라진다"""
+        monkeypatch.setattr(mailer, 'TS_MAIL_CC', ('fixed@rotork.com',))
+        r = find_recipient('220-81-21175', df_customer)
+        assert 'fixed@rotork.com' in r.cc
+
+    def test_해외_기본_CC는_OC_MAIL_CC를_쓴다(self):
+        overseas = pd.DataFrame({
+            'C-code by 해외': ['C-0095'],
+            '고객명': ['WATERGATES GMBH'],
+            '수신자 이메일': ['buyer@watergates.de'],
+        })
+        r = mailer.find_recipient_overseas('C-0095', overseas, fixed_cc=('oc@rotork.com',))
+        assert r.cc == ('oc@rotork.com',)

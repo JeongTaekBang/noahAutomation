@@ -1,8 +1,12 @@
 """고객 메일 발송 모듈 (Outlook COM / .eml 초안)
 ================================================
 
-문서를 발행한 뒤, 사업자번호로 `Customer_국내`에서 수신자를 조회해 첨부 메일을 만듭니다.
-거래명세표(`create_ts.py`)와 납기현황(`delivery_status.py`)이 함께 씁니다.
+문서를 발행한 뒤, 고객 마스터에서 수신자를 조회해 첨부 메일을 만듭니다.
+거래명세표(`create_ts.py`)·납기현황(`delivery_status.py`)·OC(`create_oc.py`)가 함께 씁니다.
+
+**수신자 조인키는 국내/해외가 다르다.** 국내는 사업자번호로 `Customer_국내`를,
+해외는 고객코드(`C-0054`)로 `Customer_해외`를 찾는다 — `find_recipient()` /
+`find_recipient_overseas()`. 두 진입점은 `_build_recipient()` 하나를 공유한다.
 
 동작 원칙:
 - 기본은 **초안 열기**(Display). `send=True`일 때만 즉시 발송.
@@ -26,12 +30,14 @@ from email.message import EmailMessage
 from enum import Enum
 from html import escape as html_escape
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import pandas as pd
 
 from po_generator.config import (
     CUSTOMER_DOMESTIC_SHEET,
+    CUSTOMER_EXPORT_SHEET,
+    OC_MAIL_CC,
     SUPPLIER_INFO,
     TS_MAIL_ATTACH_FORMAT,
     TS_MAIL_BACKEND,
@@ -43,7 +49,9 @@ from po_generator.excel_helpers import cleanup_temp_file, xlwings_app_context
 from po_generator.utils import (
     get_value,
     load_customer_domestic,
+    load_customer_overseas,
     normalize_biz_no,
+    normalize_customer_code,
     resolve_column,
 )
 
@@ -73,8 +81,9 @@ class MailBackend(str, Enum):
 
 @dataclass(frozen=True)
 class Recipient:
-    """거래명세표 메일 수신자"""
-    biz_no: str
+    """고객 메일 수신자"""
+    # 조인키 원본 — 국내는 사업자번호, 해외는 고객코드(C-0054). 표시·로그용.
+    customer_key: str
     customer_name: str
     to: tuple[str, ...]
     cc: tuple[str, ...]
@@ -141,38 +150,49 @@ def split_emails(value: object) -> tuple[str, ...]:
 
 # === 수신자 조회 ===
 
-def find_recipient(
-    biz_no: object,
-    df_customer: pd.DataFrame | None = None,
-    fallback_name: str = '',
-    fixed_cc: Sequence[str] | None = None,
+def _build_recipient(
+    raw_key: object,
+    df_customer: pd.DataFrame,
+    sheet_label: str,
+    norm_column: str,
+    key_alias: str,
+    key_label: str,
+    normalizer: Callable[[object], str],
+    fallback_name: str,
+    fixed_cc: Sequence[str],
 ) -> Recipient | None:
-    """사업자번호로 Customer_국내에서 메일 수신자 조회
+    """고객 마스터에서 조인키로 수신자 조립 (국내·해외 공통)
+
+    국내(사업자번호)와 해외(고객코드)는 **조인키만 다르고** 이메일 컬럼 해석·다중 주소
+    분리·CC 중복 제거 규칙이 같다. 복사하면 한쪽만 고쳐지고, 그 갈라짐은 고객에게
+    메일이 나가는 경로에서 벌어진다.
 
     Args:
-        biz_no: 사업자번호 (DN_국내의 Business registration number)
-        df_customer: Customer_국내 DataFrame (없으면 로드)
-        fallback_name: 마스터에 거래처명이 없을 때 쓸 이름 (보통 DN의 Customer name)
-        fixed_cc: 문서 종류별 고정 참조 (None이면 거래명세표 설정 `TS_MAIL_CC`)
+        raw_key: 원본 조인키 값 (로그·Recipient 표시용)
+        df_customer: 고객 마스터 DataFrame
+        sheet_label: 안내 메시지에 쓸 시트 이름
+        norm_column: 마스터에 붙은 정규화 컬럼명
+        key_alias: 조인키 컬럼의 COLUMN_ALIASES 키 (정규화 컬럼이 없을 때 폴백용)
+        key_label: 메시지에 쓸 조인키 이름
+        normalizer: 조인키 정규화 함수
+        fallback_name: 마스터에 거래처명이 없을 때 쓸 이름
+        fixed_cc: 문서 종류별 고정 참조
 
     Returns:
-        Recipient (고정 CC 포함) 또는 None (사업자번호 미매칭/메일 미등록)
+        Recipient 또는 None (키 미매칭/메일 미등록)
 
     Raises:
-        MailConfigError: Customer_국내에 이메일 컬럼 자체가 없는 경우
+        MailConfigError: 마스터에 이메일 컬럼 자체가 없는 경우
     """
-    key = normalize_biz_no(biz_no)
+    key = normalizer(raw_key)
     if not key:
-        logger.warning("사업자번호가 비어 있어 수신자를 조회할 수 없습니다.")
+        logger.warning(f"{key_label}가 비어 있어 수신자를 조회할 수 없습니다.")
         return None
-
-    if df_customer is None:
-        df_customer = load_customer_domestic()
 
     email_col = resolve_column(df_customer.columns, 'customer_email')
     if email_col is None:
         raise MailConfigError(
-            f"'{CUSTOMER_DOMESTIC_SHEET}' 시트에 이메일 컬럼이 없습니다.\n"
+            f"'{sheet_label}' 시트에 이메일 컬럼이 없습니다.\n"
             f"  시트 끝에 '수신자 이메일' 컬럼을 추가하고 거래처별 주소를 입력하세요.\n"
             f"  (인식 가능한 헤더: 수신자 이메일 / 이메일 / 메일 / Email / E-mail / 담당자 이메일)"
         )
@@ -180,23 +200,21 @@ def find_recipient(
     name_col = resolve_column(df_customer.columns, 'customer_name') or '거래처명'
     name_en_col = resolve_column(df_customer.columns, 'customer_name_en')
 
-    # 정규화 컬럼은 load_customer_domestic()이 붙여주지만, 원본 시트를 그대로
-    # 넘겨도 KeyError 대신 동작하도록 보강한다.
-    if '_사업자번호_정규화' not in df_customer.columns:
-        biz_col = resolve_column(df_customer.columns, 'biz_no')
-        if biz_col is None:
+    # 정규화 컬럼은 load_customer_*()가 붙여주지만, 원본 시트를 그대로 넘겨도
+    # KeyError 대신 동작하도록 보강한다.
+    if norm_column not in df_customer.columns:
+        key_col = resolve_column(df_customer.columns, key_alias)
+        if key_col is None:
             raise MailConfigError(
-                f"'{CUSTOMER_DOMESTIC_SHEET}' 시트에서 사업자번호 컬럼을 찾을 수 없습니다."
+                f"'{sheet_label}' 시트에서 {key_label} 컬럼을 찾을 수 없습니다."
             )
         df_customer = df_customer.assign(
-            _사업자번호_정규화=df_customer[biz_col].map(normalize_biz_no)
+            **{norm_column: df_customer[key_col].map(normalizer)}
         )
 
-    matched = df_customer[df_customer['_사업자번호_정규화'] == key]
+    matched = df_customer[df_customer[norm_column] == key]
     if matched.empty:
-        logger.warning(
-            f"{CUSTOMER_DOMESTIC_SHEET}에 사업자번호 미등록: {biz_no} ({fallback_name})"
-        )
+        logger.warning(f"{sheet_label}에 {key_label} 미등록: {raw_key} ({fallback_name})")
         return None
 
     row = matched.iloc[0]
@@ -212,13 +230,11 @@ def find_recipient(
 
     to = split_emails(row[email_col])
     if not to:
-        logger.warning(
-            f"{CUSTOMER_DOMESTIC_SHEET}에 메일 주소 미입력: {biz_no} ({customer_name})"
-        )
+        logger.warning(f"{sheet_label}에 메일 주소 미입력: {raw_key} ({customer_name})")
         return None
 
     # 고정 CC + 거래처별 참조메일 (중복 제거, To에 이미 있는 주소는 제외)
-    cc_values: list[str] = list(TS_MAIL_CC if fixed_cc is None else fixed_cc)
+    cc_values: list[str] = list(fixed_cc)
     if cc_col is not None:
         cc_values.extend(split_emails(row[cc_col]))
 
@@ -231,11 +247,91 @@ def find_recipient(
             cc.append(addr)
 
     return Recipient(
-        biz_no=str(biz_no),
+        customer_key=str(raw_key),
         customer_name=customer_name,
         to=to,
         cc=tuple(cc),
         customer_name_en=customer_name_en,
+    )
+
+
+def find_recipient(
+    biz_no: object,
+    df_customer: pd.DataFrame | None = None,
+    fallback_name: str = '',
+    fixed_cc: Sequence[str] | None = None,
+) -> Recipient | None:
+    """사업자번호로 Customer_국내에서 메일 수신자 조회 (국내 문서)
+
+    거래명세표(`create_ts.py`)·납기현황(`delivery_status.py`)이 씁니다.
+
+    Args:
+        biz_no: 사업자번호 (DN_국내의 Business registration number)
+        df_customer: Customer_국내 DataFrame (없으면 로드)
+        fallback_name: 마스터에 거래처명이 없을 때 쓸 이름 (보통 DN의 Customer name)
+        fixed_cc: 문서 종류별 고정 참조 (None이면 거래명세표 설정 `TS_MAIL_CC`)
+
+    Returns:
+        Recipient (고정 CC 포함) 또는 None (사업자번호 미매칭/메일 미등록)
+
+    Raises:
+        MailConfigError: Customer_국내에 이메일 컬럼 자체가 없는 경우
+    """
+    if df_customer is None:
+        df_customer = load_customer_domestic()
+
+    return _build_recipient(
+        raw_key=biz_no,
+        df_customer=df_customer,
+        sheet_label=CUSTOMER_DOMESTIC_SHEET,
+        norm_column='_사업자번호_정규화',
+        key_alias='biz_no',
+        key_label='사업자번호',
+        normalizer=normalize_biz_no,
+        fallback_name=fallback_name,
+        fixed_cc=TS_MAIL_CC if fixed_cc is None else fixed_cc,
+    )
+
+
+def find_recipient_overseas(
+    customer_code: object,
+    df_customer: pd.DataFrame | None = None,
+    fallback_name: str = '',
+    fixed_cc: Sequence[str] | None = None,
+) -> Recipient | None:
+    """고객코드로 Customer_해외에서 메일 수신자 조회 (해외 문서)
+
+    Order Confirmation(`create_oc.py`)이 씁니다.
+
+    **조인키가 국내와 다르다.** 해외 고객은 사업자번호가 없어 고객코드(`C-0054`)로
+    맞물린다 — `SO_해외`의 'Business registration number' 컬럼에 담긴 값이 그것이다
+    (컬럼 이름만 국내와 같고 내용이 다르다).
+
+    Args:
+        customer_code: 고객코드 (SO_해외의 Business registration number)
+        df_customer: Customer_해외 DataFrame (없으면 로드)
+        fallback_name: 마스터에 거래처명이 없을 때 쓸 이름 (보통 SO의 Customer name)
+        fixed_cc: 고정 참조 (None이면 `OC_MAIL_CC`)
+
+    Returns:
+        Recipient (고정 CC 포함) 또는 None (고객코드 미매칭/메일 미등록)
+
+    Raises:
+        MailConfigError: Customer_해외에 이메일 컬럼 자체가 없는 경우
+    """
+    if df_customer is None:
+        df_customer = load_customer_overseas()
+
+    return _build_recipient(
+        raw_key=customer_code,
+        df_customer=df_customer,
+        sheet_label=CUSTOMER_EXPORT_SHEET,
+        norm_column='_고객코드_정규화',
+        key_alias='customer_code',
+        key_label='고객코드',
+        normalizer=normalize_customer_code,
+        fallback_name=fallback_name,
+        fixed_cc=OC_MAIL_CC if fixed_cc is None else fixed_cc,
     )
 
 
@@ -255,6 +351,27 @@ def find_recipient_for_order(
     biz_no = get_value(order_data, 'biz_no', '')
     customer_name = str(get_value(order_data, 'customer_name', ''))
     return find_recipient(biz_no, df_customer, fallback_name=customer_name)
+
+
+def find_recipient_overseas_for_order(
+    order_data: pd.Series,
+    df_customer: pd.DataFrame | None = None,
+) -> Recipient | None:
+    """주문(SO_해외) 데이터에서 고객코드를 뽑아 수신자 조회
+
+    `find_recipient_for_order()`의 해외판 — 행에서 어느 별칭 키를 읽어 조인하는지는
+    CLI가 아니라 여기(mailer)가 안다. 두 층에 흩어지면 조인키 변경이 한쪽만 고쳐진다.
+
+    Args:
+        order_data: SO_해외 행 (Business registration number = 고객코드 포함)
+        df_customer: Customer_해외 DataFrame (없으면 로드)
+
+    Returns:
+        Recipient 또는 None
+    """
+    customer_code = get_value(order_data, 'customer_code', '')
+    customer_name = str(get_value(order_data, 'customer_name', ''))
+    return find_recipient_overseas(customer_code, df_customer, fallback_name=customer_name)
 
 
 # === PDF 변환 ===
@@ -548,6 +665,10 @@ def render_template(
 
     Returns:
         치환된 문자열 (알 수 없는 치환자가 있으면 원본 유지)
+
+    Note:
+        `{supplier}`는 한글 상호, `{supplier_en}`은 영문 상호다. 해외로 나가는
+        문서(OC)의 템플릿은 후자를 쓴다.
     """
     values: dict[str, object] = {
         'customer': recipient.customer_name,
@@ -556,6 +677,7 @@ def render_template(
         'doc_id': doc_id,
         'date': date_str,
         'supplier': SUPPLIER_INFO.name,
+        'supplier_en': SUPPLIER_INFO.name_en,
     }
     if extra:
         values.update(extra)
