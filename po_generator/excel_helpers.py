@@ -13,6 +13,7 @@ Excel 헬퍼 함수 모듈
 - batch_read_column: 열의 값을 한 번에 읽기 (성능 최적화)
 - delete_rows_range / insert_copied_rows: 연속 행을 한 번에 삭제/삽입 (성능 최적화)
 - layout_item_rows: 아이템 행 마무리 손질 = 병합 보장 + 행 높이 교정 (문서 5종 공통 진입점)
+- layout_address_rows: 헤더 주소 블록 줄바꿈 + 행 높이 확보 (OC·FI 공통)
 - fit_blank_rows / printable_height / sum_row_heights / print_area_last_row: 한 페이지 채우기 계산
 """
 
@@ -450,6 +451,13 @@ ITEM_NAME_MERGED_COLS: str = 'ABCD'
 # (문서 5종 템플릿 전부 PaperSize=9 = A4 세로 — 실측 확인)
 A4_HEIGHT_PT: float = 841.89
 
+# 아이템 그리드 내부 가로선 색 — 템플릿 상단 규칙선(#BBBBBB thin)과 같은 톤.
+# 검정 thin은 PDF로 나가면 0.96pt 실선이라(캘리브레이션 실측: hairline=0.12 /
+# thin=0.96 / medium=1.92pt) 격자 전체가 유독 무겁게 보인다(2026-08-05 보고).
+# 내부선만 회색으로 누르고 표 프레임(헤더밴드 하단·마지막 행 하단)은 검정을 유지한다.
+# COM의 Border.Color는 BGR 정수지만 회색은 대칭이라 RGB와 값이 같다.
+ITEM_GRID_INNER_COLOR: int = 0xBBBBBB
+
 
 def ensure_row_merges(ws: xw.Sheet, start_row: int, end_row: int) -> None:
     """아이템 행마다 품목명 칸(A:D) 병합을 다시 보장한다
@@ -511,53 +519,34 @@ def insert_copied_rows(ws: xw.Sheet, at_row: int, count: int, source_row: int) -
     logger.debug(f"행 삽입: Row {at_row}부터 {count}개 (원본 Row {source_row})")
 
 
-def autofit_merged_rows(
+def _measure_wrapped_heights(
     ws: xw.Sheet,
     start_row: int,
     end_row: int,
     texts: list[str],
+    cols: str,
 ) -> list[float]:
-    """병합 셀이 든 행의 높이를 내용에 맞게 키운다
+    """줄바꿈 텍스트가 요구하는 행 높이를 보조 열로 잰다 (pt)
 
-    **왜 `rows.autofit()`을 쓸 수 없나.** Excel의 자동 맞춤은 병합 셀을 측정 대상에서
-    제외한다. 품목명 칸(A:D 병합)에 105자를 넣고 `autofit()`을 부르면 높이가
-    15pt → 12.75pt로 **오히려 줄면서 1줄로 잘린다** (2026-08-03 실측). 즉 긴 품목명이
-    조용히 사라지는데, 생성은 성공으로 끝나므로 PDF를 열어보기 전엔 모른다.
+    병합 셀은 Excel 자동 맞춤이 측정에서 제외하므로 직접 잴 수 없다 — 인쇄영역
+    밖 보조 열(`PROBE_COLUMN`)의 폭을 병합 폭과 맞추고 같은 텍스트를 넣어
+    Excel에게 재게 한다. 측정 원리·포인트 보정의 근거는 `autofit_merged_rows`
+    docstring에 있다 (그쪽 실측을 이 함수가 그대로 수행한다).
 
-    **어떻게 재나.** 폰트 폭을 코드로 추정하지 않는다 — 인쇄영역 밖 보조 열의 폭을
-    병합 셀과 같게 맞추고 같은 텍스트를 넣은 뒤, Excel에게 그 행을 재게 한다.
-    보조 열은 병합돼 있지 않으므로 자동 맞춤이 정상 동작하고, 폭이 같으므로 줄 수도 같다.
-
-    **폭은 문자 단위가 아니라 포인트로 맞춘다.** Excel은 열마다 안쪽 여백을 따로 붙여서,
-    4개 열을 병합하면 1개 열보다 3개분 더 넓다 — OC 템플릿 실측으로 A:D는 198.00pt인데
-    같은 문자폭(40.66)을 준 단일 열은 186.75pt였다. 이 11.25pt 차이 때문에 36자짜리
-    품목명이 실제로는 한 줄에 들어가는데도 두 줄로 재어져 행이 쓸데없이 높아졌다
-    (2026-08-03 실측). 그래서 한 번 재본 뒤 포인트 비율로 보정한다.
-
-    측정 뒤에는 높이를 **명시적으로 되쓴다**. 보조 열을 비우면 행이 자동 모드로 남아
-    다시 한 줄로 줄어들기 때문이다. 쓰기는 같은 높이의 연속 구간을 묶어 구간당 1회 —
-    행높이 분포는 보통 두어 종류라(실측 48행 문서에서 3종) 행 수만큼 쓰지 않는다.
+    부수효과: 측정에 `rows.autofit()`을 쓰므로 대상 행들이 **잰 높이로 바뀐 채
+    남는다** — 호출부가 최종 높이를 반드시 되써야 한다. 보조 열은 원복한다.
 
     Args:
         ws: xlwings Sheet
-        start_row: 첫 아이템 행
-        end_row: 마지막 아이템 행
-        texts: 각 행에 들어간 텍스트 (길이가 행 수와 같아야 한다)
+        start_row: 첫 행
+        end_row: 마지막 행
+        texts: 각 행에서 잴 텍스트 (길이 = 행 수)
+        cols: 대상 병합이 걸친 열들 (예: 'ABCD')
 
     Returns:
-        각 행에 적용된 높이 (pt) — 페이지 계산에 그대로 쓴다
-
-    Raises:
-        ValueError: texts 길이가 행 수와 다른 경우 — 어긋난 채 조용히 진행하면
-            그 아래 모든 행이 엉뚱한 높이를 받는다
+        각 행의 측정 높이 (pt, 여유 미포함)
     """
     num_rows = end_row - start_row + 1
-    if num_rows <= 0:
-        return []
-    if len(texts) != num_rows:
-        raise ValueError(f"texts {len(texts)}개 != 행 {num_rows}개 ({start_row}~{end_row})")
-
-    cols = ITEM_NAME_MERGED_COLS
     source = ws.range(f'{cols[0]}{start_row}')
     char_width = sum(ws.range(f'{col}{start_row}').column_width for col in cols)
     target_pt = ws.range(f'{cols[0]}{start_row}:{cols[-1]}{start_row}').api.Width
@@ -603,6 +592,59 @@ def autofit_merged_rows(
         ws.range(probe_range).clear_contents()
         ws.range(f'{PROBE_COLUMN}{start_row}').column_width = original_width
 
+    return measured
+
+
+def autofit_merged_rows(
+    ws: xw.Sheet,
+    start_row: int,
+    end_row: int,
+    texts: list[str],
+) -> list[float]:
+    """병합 셀이 든 행의 높이를 내용에 맞게 키운다
+
+    **왜 `rows.autofit()`을 쓸 수 없나.** Excel의 자동 맞춤은 병합 셀을 측정 대상에서
+    제외한다. 품목명 칸(A:D 병합)에 105자를 넣고 `autofit()`을 부르면 높이가
+    15pt → 12.75pt로 **오히려 줄면서 1줄로 잘린다** (2026-08-03 실측). 즉 긴 품목명이
+    조용히 사라지는데, 생성은 성공으로 끝나므로 PDF를 열어보기 전엔 모른다.
+
+    **어떻게 재나.** 폰트 폭을 코드로 추정하지 않는다 — 인쇄영역 밖 보조 열의 폭을
+    병합 셀과 같게 맞추고 같은 텍스트를 넣은 뒤, Excel에게 그 행을 재게 한다.
+    보조 열은 병합돼 있지 않으므로 자동 맞춤이 정상 동작하고, 폭이 같으므로 줄 수도 같다.
+
+    **폭은 문자 단위가 아니라 포인트로 맞춘다.** Excel은 열마다 안쪽 여백을 따로 붙여서,
+    4개 열을 병합하면 1개 열보다 3개분 더 넓다 — OC 템플릿 실측으로 A:D는 198.00pt인데
+    같은 문자폭(40.66)을 준 단일 열은 186.75pt였다. 이 11.25pt 차이 때문에 36자짜리
+    품목명이 실제로는 한 줄에 들어가는데도 두 줄로 재어져 행이 쓸데없이 높아졌다
+    (2026-08-03 실측). 그래서 한 번 재본 뒤 포인트 비율로 보정한다.
+    (측정 자체는 `_measure_wrapped_heights`가 수행 — 주소 블록도 같은 원리를 쓴다.)
+
+    측정 뒤에는 높이를 **명시적으로 되쓴다**. 보조 열을 비우면 행이 자동 모드로 남아
+    다시 한 줄로 줄어들기 때문이다. 쓰기는 같은 높이의 연속 구간을 묶어 구간당 1회 —
+    행높이 분포는 보통 두어 종류라(실측 48행 문서에서 3종) 행 수만큼 쓰지 않는다.
+
+    Args:
+        ws: xlwings Sheet
+        start_row: 첫 아이템 행
+        end_row: 마지막 아이템 행
+        texts: 각 행에 들어간 텍스트 (길이가 행 수와 같아야 한다)
+
+    Returns:
+        각 행에 적용된 높이 (pt) — 페이지 계산에 그대로 쓴다
+
+    Raises:
+        ValueError: texts 길이가 행 수와 다른 경우 — 어긋난 채 조용히 진행하면
+            그 아래 모든 행이 엉뚱한 높이를 받는다
+    """
+    num_rows = end_row - start_row + 1
+    if num_rows <= 0:
+        return []
+    if len(texts) != num_rows:
+        raise ValueError(f"texts {len(texts)}개 != 행 {num_rows}개 ({start_row}~{end_row})")
+
+    measured = _measure_wrapped_heights(
+        ws, start_row, end_row, texts, ITEM_NAME_MERGED_COLS
+    )
     heights = [max(MIN_ITEM_ROW_HEIGHT, m + ROW_HEIGHT_PAD) for m in measured]
 
     # 같은 높이의 연속 구간을 묶어 쓴다 (행 범위 RowHeight 대입은 전 행에 적용된다)
@@ -615,10 +657,101 @@ def autofit_merged_rows(
             run_start = idx
 
     logger.debug(
-        f"병합 셀 행 높이 조정: Row {start_row}-{end_row}, "
-        f"폭 {target_pt:.2f}pt -> 높이 {[round(h, 1) for h in heights]}"
+        f"병합 셀 행 높이 조정: Row {start_row}-{end_row} "
+        f"-> 높이 {[round(h, 1) for h in heights]}"
     )
     return heights
+
+
+def address_row_heights(
+    current: list[float],
+    left_needs: list[float],
+    right_need: float,
+    pad: float = ROW_HEIGHT_PAD,
+) -> list[float]:
+    """주소 블록 행 높이 계산 (COM과 분리된 순수 함수)
+
+    왼쪽은 행마다 독립된 한 줄 병합(A13:E13 꼴), 오른쪽은 같은 행들을 세로로
+    걸친 병합 하나(G13:I15 꼴) — 행 높이는 두 요구를 동시에 만족해야 한다.
+
+    - 각 행은 최소한 현재 높이를 유지한다 (짧은 주소 문서는 모양이 안 변한다)
+    - 왼쪽 줄이 접히면 그 행만 자란다
+    - 오른쪽 블록이 행 합보다 크면 부족분을 전 행에 균등 분배한다
+      (한 행에 몰면 왼쪽 줄들의 간격이 들쭉날쭉해진다)
+
+    Args:
+        current: 각 행의 현재 높이 (pt)
+        left_needs: 왼쪽 각 줄의 측정 높이 (pt, 여유 미포함)
+        right_need: 오른쪽 블록 전체의 측정 높이 (pt, 없으면 0)
+        pad: 병합 셀 여유 (`ROW_HEIGHT_PAD` 참조)
+
+    Returns:
+        각 행의 최종 높이 (pt)
+    """
+    heights = [
+        max(cur, need + pad)
+        for cur, need in zip(current, left_needs, strict=True)
+    ]
+    if right_need > 0 and heights:
+        deficit = (right_need + pad) - sum(heights)
+        if deficit > 0:
+            share = deficit / len(heights)
+            heights = [h + share for h in heights]
+    return heights
+
+
+def layout_address_rows(
+    ws: xw.Sheet,
+    start_row: int,
+    left_texts: list[str],
+    right_text: str,
+    left_cols: str = 'ABCDE',
+    right_cols: str = 'GHI',
+) -> None:
+    """헤더 주소 블록 손질: 줄바꿈 켜기 + 행 높이 확보 (OC·FI 공통)
+
+    주소 칸은 병합 셀이라 넘친 텍스트가 옆 칸으로 흐르지 않고 **병합 경계에서
+    잘린다** (2026-08-05 실측: 74자 bill-to가 A:E 끝에서, 81자 납품 주소가
+    G:I 끝에서 잘린 채 PDF로 나감). wrap을 켜는 것만으로는 부족하다 — 병합
+    셀은 autofit이 먹지 않아 행 높이가 그대로면 둘째 줄이 세로로 숨는다.
+    그래서 아이템 행과 같은 보조 열 측정으로 높이까지 확보한다.
+
+    값은 여기서 쓰지 않는다 — 생성기가 이미 셀에 쓴 텍스트를 측정용으로 받을
+    뿐이다. 주소가 전부 짧으면 행 높이가 그대로라 기존 문서와 모양이 같다.
+
+    Args:
+        ws: xlwings Sheet
+        start_row: 주소 첫 행 (OC=13, FI=12)
+        left_texts: 왼쪽 각 행의 텍스트 (빈 문자열 허용) — 행 수를 정한다
+        right_text: 오른쪽 세로 병합 블록의 텍스트 (없으면 '')
+        left_cols: 왼쪽 병합이 걸친 열들
+        right_cols: 오른쪽 병합이 걸친 열들
+    """
+    if not left_texts:
+        return
+    end_row = start_row + len(left_texts) - 1
+    rows = range(start_row, end_row + 1)
+
+    # 현재 높이는 측정 전에 읽는다 — 측정이 autofit으로 행 높이를 흐트러뜨린다
+    current = [float(ws.range(f'{r}:{r}').api.RowHeight) for r in rows]
+
+    ws.range(f'{left_cols[0]}{start_row}:{left_cols[-1]}{end_row}').api.WrapText = True
+    ws.range(f'{right_cols[0]}{start_row}:{right_cols[-1]}{end_row}').api.WrapText = True
+
+    left_needs = _measure_wrapped_heights(ws, start_row, end_row, left_texts, left_cols)
+    right_need = 0.0
+    if right_text:
+        right_need = _measure_wrapped_heights(
+            ws, start_row, start_row, [right_text], right_cols
+        )[0]
+
+    heights = address_row_heights(current, left_needs, right_need)
+    for row, height in zip(rows, heights):
+        ws.range(f'{row}:{row}').api.RowHeight = height
+    logger.debug(
+        f"주소 행 높이: Row {start_row}-{end_row} "
+        f"{[round(c, 1) for c in current]} -> {[round(h, 1) for h in heights]}"
+    )
 
 
 def layout_item_rows(ws: xw.Sheet, start_row: int, texts: list[str]) -> list[float]:

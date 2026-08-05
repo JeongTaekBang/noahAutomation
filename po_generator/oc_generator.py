@@ -20,6 +20,7 @@ import xlwings as xw
 
 from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
+    ITEM_GRID_INNER_COLOR,
     MIN_ITEM_ROW_HEIGHT,
     XlConstants,
     ensure_row_merges,
@@ -30,6 +31,7 @@ from po_generator.excel_helpers import (
     find_text_in_column_batch,
     fit_blank_rows,
     insert_copied_rows,
+    layout_address_rows,
     layout_item_rows,
     print_area_last_row,
     printable_height,
@@ -54,6 +56,7 @@ CELL_CUST_ADDR_3 = 'A15'
 CELL_DELV_ADDR_1 = 'G13'
 CELL_DELV_ADDR_2 = 'G14'
 CELL_DELV_ADDR_3 = 'G15'
+ADDR_START_ROW = 13     # 주소 블록 첫 행 — 왼쪽 A13:E15(행별 병합), 오른쪽 G13:I15(세로 병합)
 
 # 아이템 (헤더 Row 17, 데이터 Row 18~)
 ITEM_START_ROW = 18
@@ -138,18 +141,32 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
         ws.range(CELL_SHIPPING_METHOD).value = shipping_method
 
     # Customer Address → Customer_해외.Bill to 1/2/3
-    ws.range(CELL_CUST_ADDR_1).value = get_value(order_data, 'bill_to_1', '')
-    ws.range(CELL_CUST_ADDR_2).value = get_value(order_data, 'bill_to_2', '')
-    ws.range(CELL_CUST_ADDR_3).value = get_value(order_data, 'bill_to_3', '')
+    bill_tos = [
+        to_text(get_value(order_data, 'bill_to_1', '')),
+        to_text(get_value(order_data, 'bill_to_2', '')),
+        to_text(get_value(order_data, 'bill_to_3', '')),
+    ]
+    ws.range(CELL_CUST_ADDR_1).value = bill_tos[0]
+    ws.range(CELL_CUST_ADDR_2).value = bill_tos[1]
+    ws.range(CELL_CUST_ADDR_3).value = bill_tos[2]
 
     # Delivery Address → SO_해외.납품 주소
-    ws.range(CELL_DELV_ADDR_1).value = get_value(order_data, 'delivery_address', '')
+    delivery_addr = to_text(get_value(order_data, 'delivery_address', ''))
+    ws.range(CELL_DELV_ADDR_1).value = delivery_addr
+
+    # 주소 칸은 병합 셀이라 길면 경계에서 잘린다 — 줄바꿈 + 행 높이 확보
+    layout_address_rows(ws, ADDR_START_ROW, bill_tos, delivery_addr)
 
     logger.debug(f"헤더 채우기 완료: SO_ID={so_id}")
 
 
 def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
-    """행 삭제 후 아이템 영역 테두리 복원"""
+    """행 조정 후 아이템 영역 테두리 정리
+
+    프레임(헤더밴드 하단·마지막 행 하단)은 검정 thin으로 되그리고, 행 사이
+    내부 가로선은 상단 규칙선과 같은 회색(`ITEM_GRID_INNER_COLOR`)으로 누른다
+    — 검정 thin 격자는 PDF에서 0.96pt 실선이라 유독 무겁게 보인다(2026-08-05 보고).
+    """
     last_item_row = ITEM_START_ROW + num_items - 1
 
     header_bottom_row = ITEM_START_ROW - 1
@@ -158,6 +175,11 @@ def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
 
     ws.range(f'A{last_item_row}:I{last_item_row}').api.Borders(XlConstants.xlEdgeBottom).LineStyle = XlConstants.xlContinuous
     ws.range(f'A{last_item_row}:I{last_item_row}').api.Borders(XlConstants.xlEdgeBottom).Weight = XlConstants.xlThin
+
+    if last_item_row > ITEM_START_ROW:
+        ws.range(f'A{ITEM_START_ROW}:I{last_item_row}').api.Borders(
+            XlConstants.xlInsideHorizontal
+        ).Color = ITEM_GRID_INNER_COLOR
 
     logger.debug(f"테두리 복원: Row {header_bottom_row} 하단, Row {last_item_row} 하단")
 

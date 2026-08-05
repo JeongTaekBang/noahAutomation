@@ -19,7 +19,7 @@ import pandas as pd
 import xlwings as xw
 
 from po_generator.config import FI_TEMPLATE_FILE
-from po_generator.utils import get_value
+from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
     XlConstants,
     xlwings_app_context,
@@ -28,6 +28,7 @@ from po_generator.excel_helpers import (
     delete_rows_range,
     find_text_in_column_batch,
     insert_copied_rows,
+    layout_address_rows,
     layout_item_rows,
 )
 
@@ -50,6 +51,7 @@ CELL_CUST_ADDR_3 = 'A14'
 CELL_DELV_ADDR_1 = 'G12'
 CELL_DELV_ADDR_2 = 'G13'
 CELL_DELV_ADDR_3 = 'G14'
+ADDR_START_ROW = 12     # 주소 블록 첫 행 — 왼쪽 A12:E14(행별 병합), 오른쪽 G12:I14(세로 병합)
 
 # 아이템 (헤더 Row 16, 데이터 Row 17~)
 ITEM_START_ROW = 17
@@ -147,18 +149,23 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
     ws.range(CELL_DELIVERY_TERMS).value = incoterms
 
     # Customer Address → A12/A13/A14
-    bill_to_1 = get_value(order_data, 'bill_to_1', '')
-    bill_to_2 = get_value(order_data, 'bill_to_2', '')
-    bill_to_3 = get_value(order_data, 'bill_to_3', '')
-    ws.range(CELL_CUST_ADDR_1).value = bill_to_1
-    ws.range(CELL_CUST_ADDR_2).value = bill_to_2
-    ws.range(CELL_CUST_ADDR_3).value = bill_to_3
+    bill_tos = [
+        to_text(get_value(order_data, 'bill_to_1', '')),
+        to_text(get_value(order_data, 'bill_to_2', '')),
+        to_text(get_value(order_data, 'bill_to_3', '')),
+    ]
+    ws.range(CELL_CUST_ADDR_1).value = bill_tos[0]
+    ws.range(CELL_CUST_ADDR_2).value = bill_tos[1]
+    ws.range(CELL_CUST_ADDR_3).value = bill_tos[2]
 
     # Delivery Address → G12 (DN_해외의 Delivery Address)
-    delivery_addr = get_value(order_data, 'delivery_address', '')
+    delivery_addr = to_text(get_value(order_data, 'delivery_address', ''))
     ws.range(CELL_DELV_ADDR_1).value = delivery_addr
 
-    logger.debug(f"헤더 채우기 완료: DN_ID={dn_id}, Customer={bill_to_1}")
+    # 주소 칸은 병합 셀이라 길면 경계에서 잘린다 — 줄바꿈 + 행 높이 확보
+    layout_address_rows(ws, ADDR_START_ROW, bill_tos, delivery_addr)
+
+    logger.debug(f"헤더 채우기 완료: DN_ID={dn_id}, Customer={bill_tos[0]}")
 
 
 def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:

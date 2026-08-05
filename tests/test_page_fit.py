@@ -19,6 +19,7 @@ from po_generator.excel_helpers import (
     ITEM_NAME_MERGED_COLS,
     MIN_ITEM_ROW_HEIGHT,
     ROW_HEIGHT_PAD,
+    address_row_heights,
     fit_blank_rows,
 )
 
@@ -89,6 +90,78 @@ class TestFitBlankRows:
     def test_반환값은_음수가_아니다(self):
         """쓸 수 있는 높이가 이미 음수여도 0 (넘친 문서)"""
         assert fit_blank_rows(-500.0, [15.0], blank_height=ROW) == 0
+
+
+class TestAddressRowHeights:
+    """주소 블록 행 높이 계산 (순수 함수) — 기준값은 OC 템플릿 실측치
+
+    주소 행 3개는 각 15.95pt. 왼쪽은 행별 한 줄 병합(A:E), 오른쪽은 3행을
+    세로로 걸친 병합(G13:I15) 하나다.
+    """
+
+    CUR = [15.95, 15.95, 15.95]
+
+    def test_짧은_주소는_현재_높이를_유지한다(self):
+        """한 줄 측정치(~13pt)+여유가 15.95를 넘지 않으면 모양이 안 변한다"""
+        assert address_row_heights(self.CUR, [13.0, 13.0, 13.0], 0.0, pad=2.0) == self.CUR
+
+    def test_접힌_왼쪽_줄만_자란다(self):
+        """SECTORIEL 실측: 74자 bill_to_2가 2줄(26pt)로 접히면 그 행만 커진다"""
+        heights = address_row_heights(self.CUR, [13.0, 26.0, 13.0], 0.0, pad=2.0)
+        assert heights == [15.95, 28.0, 15.95]
+
+    def test_오른쪽_블록_부족분은_균등_분배된다(self):
+        """납품 주소가 3행 합(47.85pt)보다 크면 세 행이 같이 자란다"""
+        heights = address_row_heights(self.CUR, [13.0] * 3, 60.0, pad=2.0)
+        assert sum(heights) == pytest.approx(62.0)
+        assert heights[0] == pytest.approx(heights[1]) == pytest.approx(heights[2])
+
+    def test_오른쪽이_행_합에_들어가면_분배하지_않는다(self):
+        """2줄 납품 주소(~28pt)는 3행 합 47.85pt에 이미 들어간다 — SECTORIEL 실측"""
+        assert address_row_heights(self.CUR, [13.0] * 3, 28.0, pad=2.0) == self.CUR
+
+    def test_왼쪽_성장으로_이미_충분하면_더_키우지_않는다(self):
+        heights = address_row_heights(self.CUR, [13.0, 40.0, 13.0], 50.0, pad=2.0)
+        assert heights == [15.95, 42.0, 15.95]  # 합 73.9 >= 52
+
+    def test_두_요구를_동시에_만족한다(self):
+        """어느 쪽이 이기든 최종 합은 오른쪽 요구 이상, 각 행은 왼쪽 요구 이상"""
+        for right in (0.0, 30.0, 55.0, 90.0):
+            heights = address_row_heights(self.CUR, [13.0, 26.0, 13.0], right, pad=2.0)
+            assert all(h >= n + 2.0 for h, n in zip(heights, [13.0, 26.0, 13.0]))
+            assert all(h >= c for h, c in zip(heights, self.CUR))
+            if right > 0:
+                assert sum(heights) >= right + 2.0 - 1e-9
+
+    def test_길이가_어긋나면_조용히_진행하지_않는다(self):
+        with pytest.raises(ValueError):
+            address_row_heights([15.95, 15.95], [13.0] * 3, 0.0)
+
+    def test_빈_입력은_빈_결과(self):
+        assert address_row_heights([], [], 60.0) == []
+
+
+class TestGeneratorsLayoutAddresses:
+    """주소를 쓰는 생성기(OC·FI)가 공용 주소 레이아웃을 부르는지 감시
+
+    주소 칸은 병합 셀이라 wrap 없이 길면 병합 경계에서 잘린다(2026-08-05 실측
+    74자/81자 클립). 값만 쓰고 layout_address_rows를 빼먹으면 재발한다.
+    PI·CI·PL은 주소 셀을 채우지 않아 대상이 아니다.
+    """
+
+    @pytest.mark.parametrize('module_name', [
+        'po_generator.oc_generator',
+        'po_generator.fi_generator',
+    ])
+    def test_주소를_쓰면_layout_address_rows를_부른다(self, module_name):
+        import importlib
+        import inspect
+
+        source = inspect.getsource(importlib.import_module(module_name))
+        assert 'layout_address_rows(' in source, (
+            f"{module_name}: 주소 셀을 채우면서 layout_address_rows를 부르지 않는다 — "
+            f"긴 주소가 병합 경계에서 잘린다"
+        )
 
 
 class TestLayoutConstants:
