@@ -146,14 +146,16 @@ class TestEnglishTemplate:
         assert 'Order Confirmation' in subject
         assert '88826' in subject
 
-    def test_본문은_발주번호_확인과_자동발송_안내뿐이다(self, recipient):
-        """인사말·서명 없이 짧게 — 2026-08-05 사용자 결정"""
+    def test_본문은_인사말과_발주번호_자동발송_안내다(self, recipient):
+        """Dear {customer} + 발주번호 확인 + 자동발송 안내 — 안내문·서명 없이 짧게
+        (2026-08-05 사용자 결정)"""
         body = render_template(
             OC_MAIL_BODY, recipient, 'SOO-2026-0001', '2026-08-03', customer_po='88826',
         )
+        assert 'Dear WATERGATES GMBH' in body
         assert '88826' in body
         assert 'Order Confirmation' in body
-        assert 'Dear' not in body
+        assert 'Best regards' not in body
 
     def test_본문에_자동발송_안내가_있다(self, recipient):
         body = render_template(OC_MAIL_BODY, recipient, 'SOO-1', '2026-08-03')

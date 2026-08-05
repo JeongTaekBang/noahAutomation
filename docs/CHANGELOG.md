@@ -10,8 +10,9 @@
 
 - 제목: `[Rotork Controls Korea] Order Confirmation - Your PO: {customer_po}` —
   고객은 자기 PO 번호로 메일을 찾으므로 그것만 밝힌다 (SOO 번호는 첨부의 O.C. No에 있음)
-- 본문: 발주번호 확인 한 줄 + `* This email has been sent automatically.*` —
-  인사말(Dear)·안내문·서명({supplier_en}) 제거. 발신 조직은 제목이 밝힌다
+- 본문: `Dear {customer},` + 발주번호 확인 한 줄 +
+  `* This email has been sent automatically.*` — 검토 안내문과 서명({supplier_en})은
+  제거(발신 조직은 제목이 밝힘), 인사말은 같은 날 재검토로 유지
 
 `tests/test_oc_mail.py`의 템플릿 단언을 새 문구로 갱신 (한글 상호 금지 검사는
 제목·본문 양쪽으로 확대). CLAUDE.md·user_settings.py 주석 예시 동기화.

@@ -187,11 +187,11 @@ Reconciliation layer:
   (이름만 국내 시트와 같다), 이것이 `Customer_해외.C-code by 해외`와 맞물린다.
   주의: `Customer_해외`의 `고객코드` 컬럼은 **다른 값**(AX 번호)이라
   `COLUMN_ALIASES['customer_code']`에 별칭으로 넣으면 안 된다 — 앞 별칭이 없는 시트에서
-  조용히 엉뚱한 컬럼으로 풀려 전 건이 미매칭된다. 본문은 **영문**이며 발주번호 확인
-  한 줄 + 자동발송 안내만으로 짧게 간다 — 인사말·서명 없음 (2026-08-05 결정. 제목
-  `[Rotork Controls Korea] Order Confirmation - Your PO: {customer_po}`가 발신 조직을
-  밝힌다). 서명을 넣는 오버라이드라면 `{supplier}`(한글)가 아니라 `{supplier_en}`.
-  첨부 기본 PDF, 고정 참조는 `OC_MAIL_CC`.
+  조용히 엉뚱한 컬럼으로 풀려 전 건이 미매칭된다. 본문은 **영문**이며 인사말(Dear
+  {customer}) + 발주번호 확인 한 줄 + 자동발송 안내로 짧게 간다 — 안내문·서명 없음
+  (2026-08-05 결정. 제목 `[Rotork Controls Korea] Order Confirmation - Your PO:
+  {customer_po}`가 발신 조직을 밝힌다). 서명을 넣는 오버라이드라면 `{supplier}`(한글)가
+  아니라 `{supplier_en}`. 첨부 기본 PDF, 고정 참조는 `OC_MAIL_CC`.
   나머지 규약(수신자 확인 후 y/N, 비대화형 자동 OFF, 메일 실패가 문서 생성을 뒤엎지 않음)은
   거래명세표와 동일하다
 - **Order Book Output = 매출 인식 기준**이다 (출고 기준이 아니다) — `AX_매출대사`와 동일 산식.

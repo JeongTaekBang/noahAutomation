@@ -508,7 +508,7 @@ OC_MAIL_CC: Final[tuple[str, ...]] = tuple(_load_user_setting('OC_MAIL_CC', ()) 
 OC_MAIL_ATTACH_FORMAT: Final[str] = _load_user_setting('OC_MAIL_ATTACH_FORMAT', 'pdf')
 
 # 제목/본문 템플릿 — 해외 고객이 받으므로 **영문**이다.
-# 본문은 발주번호 확인 한 줄 + 자동발송 안내만 — 인사말·서명 없이 짧게 간다
+# 본문은 인사말 + 발주번호 확인 한 줄 + 자동발송 안내 — 안내문·서명 없이 짧게 간다
 # (2026-08-05 사용자 결정. 제목이 발신 조직을 밝히고, 서명은 발송자 메일 클라이언트 몫).
 # 치환자: {customer} 거래처명(Customer_해외.고객명, 이미 영문), {customer_po} 고객 발주번호,
 #         {doc_id} SO_ID(= O.C. No), {date} 발행일, {supplier_en} 영문 상호
@@ -519,6 +519,7 @@ OC_MAIL_SUBJECT: Final[str] = _load_user_setting(
 )
 OC_MAIL_BODY: Final[str] = _load_user_setting(
     'OC_MAIL_BODY',
+    'Dear {customer},\n\n'
     'Please find attached our Order Confirmation for your purchase order {customer_po}.\n\n'
     '* This email has been sent automatically.*\n',
 )
