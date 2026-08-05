@@ -14,7 +14,6 @@ Excel 헬퍼 함수 모듈
 - delete_rows_range / insert_copied_rows: 연속 행을 한 번에 삭제/삽입 (성능 최적화)
 - layout_item_rows: 아이템 행 마무리 손질 = 병합 보장 + 행 높이 교정 (문서 5종 공통 진입점)
 - layout_address_rows: 헤더 주소 블록 줄바꿈 + 행 높이 확보 (OC·FI 공통)
-- fit_blank_rows / printable_height / sum_row_heights / print_area_last_row: 한 페이지 채우기 계산
 """
 
 from __future__ import annotations
@@ -447,10 +446,6 @@ PROBE_COLUMN: str = 'Z'
 # 놓고 읽히므로, 두 문서의 줄 높이 규칙이 갈리면 바로 눈에 띈다.
 ITEM_NAME_MERGED_COLS: str = 'ABCD'
 
-# A4 세로 크기(pt). PageSetup은 여백만 알려주고 용지 크기는 알려주지 않아 상수로 둔다.
-# (문서 5종 템플릿 전부 PaperSize=9 = A4 세로 — 실측 확인)
-A4_HEIGHT_PT: float = 841.89
-
 # 아이템 그리드 내부 가로선 색 — 템플릿 상단 규칙선(#BBBBBB thin)과 같은 톤.
 # 검정 thin은 PDF로 나가면 0.96pt 실선이라(캘리브레이션 실측: hairline=0.12 /
 # thin=0.96 / medium=1.92pt) 격자 전체가 유독 무겁게 보인다(2026-08-05 보고).
@@ -775,107 +770,5 @@ def layout_item_rows(ws: xw.Sheet, start_row: int, texts: list[str]) -> list[flo
     end_row = start_row + len(texts) - 1
     ensure_row_merges(ws, start_row, end_row)
     return autofit_merged_rows(ws, start_row, end_row, texts)
-
-
-def printable_height(ws: xw.Sheet) -> float:
-    """인쇄 가능한 세로 높이 (pt) — A4 세로 기준
-
-    머리글/바닥글 여백은 위/아래 여백 **안쪽**이라 따로 빼지 않는다.
-    용지 크기는 `A4_HEIGHT_PT` 고정 — 문서 5종 템플릿 전부 A4 세로다(실측).
-
-    Args:
-        ws: xlwings Sheet
-
-    Returns:
-        인쇄 가능 높이 (pt)
-    """
-    page = ws.api.PageSetup
-    return A4_HEIGHT_PT - page.TopMargin - page.BottomMargin
-
-
-def sum_row_heights(ws: xw.Sheet, start_row: int, end_row: int) -> float:
-    """행 범위의 인쇄 높이 합 (pt) — COM 1회
-
-    다중 행 범위의 `Range.Height`는 행 높이의 **합**을 돌려준다. 행별 `RowHeight`를
-    돌며 더하면 행 수만큼 왕복한다(42행 헤더+하단 ≈ 84회 실측) — 쓰지 말 것.
-    숨긴 행은 0으로 치는데, 숨긴 행은 인쇄되지도 않으므로 페이지 계산에는 이쪽이 맞다.
-
-    Args:
-        ws: xlwings Sheet
-        start_row: 시작 행
-        end_row: 끝 행 (포함)
-
-    Returns:
-        높이 합계 (pt)
-    """
-    if end_row < start_row:
-        return 0.0
-    return float(ws.range(f'{start_row}:{end_row}').api.Height)
-
-
-def print_area_last_row(ws: xw.Sheet) -> int | None:
-    """인쇄영역의 마지막 행 (없거나 못 읽으면 None)
-
-    하단 고정 블록(은행 정보·약관)이 어디까지인지 알아야 페이지 여유를 계산할 수 있다.
-    행을 넣거나 지우면 Excel이 인쇄영역을 따라 조정하므로, 하드코딩 대신 여기서 읽는다.
-
-    폴백을 두지 않는다 — 인쇄영역을 못 읽었으면 페이지 계산 자체가 성립하지 않으므로,
-    호출부가 채움을 **접는 것**이 정직하다. (UsedRange 폴백은 인쇄영역 밖 잔여 서식
-    셀까지 집어 하단 블록을 부풀리고, 그러면 채움이 조용히 모자라는 쪽으로 틀린다.)
-
-    Args:
-        ws: xlwings Sheet
-
-    Returns:
-        마지막 행 번호 또는 None
-    """
-    try:
-        area = str(ws.api.PageSetup.PrintArea or '')
-    except Exception as e:  # COM 예외 종류가 환경마다 달라 광범위하게 잡는다
-        logger.debug(f"인쇄영역 조회 실패: {e}")
-        return None
-
-    # "'Table 1'!$A$1:$I$43" -> 43
-    if '$' in area:
-        digits = ''.join(ch for ch in area.split(':')[-1] if ch.isdigit())
-        if digits:
-            return int(digits)
-    return None
-
-
-def fit_blank_rows(
-    available: float,
-    item_heights: list[float],
-    blank_height: float = MIN_ITEM_ROW_HEIGHT,
-    max_rows: int = 100,
-) -> int:
-    """한 페이지를 채우기 위해 더 넣을 빈 아이템 행 수
-
-    아이템이 적으면 표가 한 줄만 남고 그 아래로 큰 여백이 생긴다. 서식 문서로서는
-    빈 행이라도 격자가 이어지는 쪽이 자연스러우므로, **남는 높이만큼** 빈 행을 채운다.
-
-    이미 한 페이지를 넘긴 문서는 채우지 않는다 — 넘친 문서에 빈 행을 더하면
-    마지막 페이지에 빈 격자만 늘어난다.
-
-    COM과 분리된 순수 함수다 (Excel 없이 단위 테스트할 수 있게).
-
-    Args:
-        available: 아이템 표에 쓸 수 있는 높이 (pt) — 인쇄 가능 높이에서
-            위 고정 블록(헤더)과 아래 고정 블록(Total·은행정보)을 뺀 값
-        item_heights: 실제 아이템 행 높이들 (pt)
-        blank_height: 빈 행 하나의 높이 (pt)
-        max_rows: 안전 상한 (템플릿이 이상할 때 무한정 채우지 않게)
-
-    Returns:
-        추가할 빈 행 수 (0 이상)
-    """
-    if blank_height <= 0:
-        return 0
-
-    slack = available - sum(item_heights)
-    if slack < blank_height:
-        return 0
-
-    return min(int(slack // blank_height), max_rows)
 
 

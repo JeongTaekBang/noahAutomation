@@ -1,3 +1,19 @@
+# OC "한 페이지 빈 행 채우기" 제거 (2026-08-05 오후) — 완료
+
+사용자 보고: 1아이템 OC가 빈 격자 예닐곱 줄을 달고 나감 → 표는 마지막 아이템
+바로 다음 Total로 끝나도록 채움 기능 자체를 제거 (8/3 도입분 되돌림).
+
+- [x] oc_generator: `_page_blank_capacity` 제거, `_fill_items`를
+      "부족분 삽입 → 값·행높이 → 남는 행 삭제"로 단순화
+- [x] excel_helpers: 채움 전용 스택 제거 (`fit_blank_rows`/`printable_height`/
+      `sum_row_heights`/`print_area_last_row`/`A4_HEIGHT_PT`)
+- [x] tests/test_page_fit.py → test_doc_layout.py 개명(git mv), 채움 테스트 13개 삭제
+- [x] CLAUDE.md 참조 2곳·CHANGELOG 갱신
+- [x] 검증: pytest 638 passed · 1아이템(SOO-2026-0239) 재생성 = 아이템+Total만 ·
+      27아이템(SOO-2026-0235) 재생성 = 행 18-44 + Total 45 (기존과 동일 구조)
+
+---
+
 # OC PDF 레이아웃 결함 2건 (2026-08-05) — 완료
 
 사용자 보고: OC PDF에서 (1) Customer Address 왼쪽 가운데 줄과 오른쪽 Delivery Address가

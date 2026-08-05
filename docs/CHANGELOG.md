@@ -4,6 +4,26 @@
 
 ---
 
+## 2026-08-05: OC "한 페이지 빈 행 채우기" 제거 — 표는 아이템에서 끝난다
+
+8/3에 넣은 페이지 채움(아이템이 적으면 남는 높이만큼 빈 행을 넣어 한 페이지를
+완성)이 실물에서 역효과였다 — 1아이템 OC(전체의 절반)가 빈 격자 예닐곱 줄을
+달고 나갔고, 회색 내부선 적용 후 그 빈 줄들이 더 도드라졌다(사용자 보고).
+표는 마지막 아이템 바로 다음 Total로 끝나는 쪽이 깔끔하다.
+
+- `oc_generator._fill_items` — 부족분 삽입 → 값·행 높이 → **남는 템플릿 행 삭제**
+  (빈 행 후보 유지 로직·`_page_blank_capacity` 제거)
+- `excel_helpers` — 채움 전용이던 `fit_blank_rows`/`printable_height`/
+  `sum_row_heights`/`print_area_last_row`/`A4_HEIGHT_PT` 제거 (OC만 쓰던 스택)
+- `tests/test_page_fit.py` → **`tests/test_doc_layout.py`** 개명(git mv) —
+  채움 테스트 13개는 기능과 함께 삭제, 남은 내용(주소 높이·상수 불변식·
+  생성기 소스 감시)에 맞는 이름으로. CLAUDE.md 참조 2곳 갱신
+
+검증: pytest 전체 통과 · 1아이템 OC(SOO-2026-0239) 재생성 — 아이템 1행 + Total,
+빈 행 없음 · 27아이템 OC(SOO-2026-0235) 재생성 — 행 수·합계 불변(원래 채움 미적용).
+
+---
+
 ## 2026-08-05: OC 메일 제목·본문 간소화
 
 사용자 결정으로 기본 템플릿 변경 (`config.py`, user_settings로 오버라이드 가능):

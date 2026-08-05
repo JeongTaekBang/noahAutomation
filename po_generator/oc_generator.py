@@ -21,21 +21,15 @@ import xlwings as xw
 from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
     ITEM_GRID_INNER_COLOR,
-    MIN_ITEM_ROW_HEIGHT,
     XlConstants,
-    ensure_row_merges,
     xlwings_app_context,
     prepare_template,
     cleanup_temp_file,
     delete_rows_range,
     find_text_in_column_batch,
-    fit_blank_rows,
     insert_copied_rows,
     layout_address_rows,
     layout_item_rows,
-    print_area_last_row,
-    printable_height,
-    sum_row_heights,
 )
 
 logger = logging.getLogger(__name__)
@@ -191,54 +185,16 @@ def _find_total_row(ws: xw.Sheet, start_row: int, max_search: int = 20) -> int:
     return row if row is not None else start_row + 10
 
 
-def _page_blank_capacity(ws: xw.Sheet, rows_now: int, item_heights: list[float]) -> int:
-    """한 페이지를 채우려면 아이템 행이 몇 개 더 들어가는지
-
-    계산은 `fit_blank_rows()`(순수 함수)가 하고, 여기서는 시트에서 실제 치수를 읽어
-    넘긴다. 하단 블록은 현재 Total 행부터 인쇄영역 끝까지 (은행 정보·약관) — 행을
-    넣고 지우면 인쇄영역도 따라 움직이므로 하드코딩하지 않고 매번 읽는다.
-
-    **행 높이 확정 뒤에 불러야 한다** — 긴 품목명이 3줄을 먹으면 들어갈 빈 행 수가 준다.
-
-    Args:
-        ws: xlwings Sheet
-        rows_now: 현재 아이템 영역의 행 수 (Total 행 위치 계산용)
-        item_heights: 실제 아이템 행 높이들 (pt)
-
-    Returns:
-        추가로 들어가는 빈 행 수 (인쇄영역을 못 읽으면 0 — 못 재면 채우지 않는다)
-    """
-    last_row = print_area_last_row(ws)
-    if last_row is None:
-        logger.debug("인쇄영역을 읽지 못해 페이지 채움 생략")
-        return 0
-
-    total_row = ITEM_START_ROW + rows_now
-    printable = printable_height(ws)
-    header = sum_row_heights(ws, 1, ITEM_START_ROW - 1)
-    footer = sum_row_heights(ws, total_row, last_row)
-
-    blank_rows = fit_blank_rows(printable - header - footer, item_heights)
-    if blank_rows and logger.isEnabledFor(logging.DEBUG):
-        logger.debug(
-            f"한 페이지 채우기: 빈 행 {blank_rows}개 "
-            f"(헤더 {header:.1f} + 아이템 {sum(item_heights):.1f} + 하단 {footer:.1f} "
-            f"/ 인쇄가능 {printable:.1f}pt)"
-        )
-    return blank_rows
-
-
 def _fill_items(
     ws: xw.Sheet,
     order_data: pd.Series,
     items_df: pd.DataFrame | None,
 ) -> int:
-    """아이템 데이터 채우기 (값 → 행 높이 → 최종 행 수 확정 → 한 번에 조정)
+    """아이템 데이터 채우기 (부족분 삽입 → 값·행 높이 → 남는 행 삭제)
 
-    남는 템플릿 행을 먼저 지우지 않는다 — 아이템이 적으면 그 행들이 그대로 "한 페이지
-    채우기"의 빈 행이 된다. 최종 표시 행 수를 정한 뒤 부족분 삽입/초과분 삭제를
-    **한 번만** 하므로, 가장 흔한 1아이템 문서(전체의 절반)가 6행을 지웠다가 7행을
-    되삽입하는 왕복이 없다.
+    표는 마지막 아이템에서 끝난다 — 남는 템플릿 행은 지운다. 예전에는 남는 높이만큼
+    빈 행을 채워 한 페이지를 완성했는데, 아이템이 적은 문서(1아이템이 전체의 절반)가
+    빈 격자 여러 줄을 달고 나가 정리했다 (2026-08-05 사용자 결정).
     """
     if items_df is None:
         items_df = pd.DataFrame([order_data])
@@ -248,43 +204,32 @@ def _fill_items(
     template_count = total_row - ITEM_START_ROW
     logger.debug(f"템플릿 아이템 수: {template_count}, 실제 아이템 수: {num_items}")
 
-    # 0. 템플릿 마지막 아이템 행의 하단 테두리를 미리 지운다 — 최종 행 수가 달라지면
+    # 0. 템플릿 마지막 아이템 행의 하단 테두리를 미리 지운다 — 최종 행 수가 더 많으면
     #    표 중간에 선이 남는다. 마지막 행이 확정된 뒤 _restore_item_borders가 다시 그린다.
     last_tpl_row = ITEM_START_ROW + template_count - 1
     ws.range(f'A{last_tpl_row}:I{last_tpl_row}').api.Borders(
         XlConstants.xlEdgeBottom
     ).LineStyle = XlConstants.xlNone
 
-    # 1. 부족한 행만 먼저 삽입한다 (남는 행은 빈 행 후보로 유지)
+    # 1. 부족한 행 삽입 (값 채우기 전에 — 배치 쓰기가 전 행을 덮도록)
     if num_items > template_count:
         insert_copied_rows(
             ws, ITEM_START_ROW + template_count, num_items - template_count,
             source_row=ITEM_START_ROW,
         )
-    rows_now = max(num_items, template_count)
 
     # 2. 값 채우기 → 병합 보장 + 행 높이 (품목명 칸은 A:D 병합이라 autofit이 먹지 않는다)
     names = _fill_items_batch(ws, items_df)
-    item_heights = layout_item_rows(ws, ITEM_START_ROW, names)
+    layout_item_rows(ws, ITEM_START_ROW, names)
 
-    # 3. 한 페이지에 들어가는 빈 행 수로 최종 표시 행 수를 확정하고, 한 번에 조정한다
-    display_rows = num_items + _page_blank_capacity(ws, rows_now, item_heights)
-    delta = display_rows - rows_now
-    if delta > 0:
-        at_row = ITEM_START_ROW + rows_now
-        insert_copied_rows(ws, at_row, delta, source_row=ITEM_START_ROW)
-        # 삽입 행은 원본 행 높이를 물려받으므로 기본 높이로 (다중 행 대입 = COM 1회).
-        # 안 하면 첫 품목명이 길 때 빈 행까지 3줄 높이가 되어 페이지를 넘긴다.
-        ws.range(f'{at_row}:{at_row + delta - 1}').api.RowHeight = MIN_ITEM_ROW_HEIGHT
-        # 복사·삽입은 병합을 잃을 수 있다 — 새 행만 다시 보장
-        ensure_row_merges(ws, at_row, at_row + delta - 1)
-    elif delta < 0:
-        delete_rows_range(ws, ITEM_START_ROW + display_rows, -delta)
+    # 3. 남는 템플릿 행 삭제 — 표가 마지막 아이템 바로 다음의 Total로 이어진다
+    if num_items < template_count:
+        delete_rows_range(ws, ITEM_START_ROW + num_items, template_count - num_items)
 
-    _restore_item_borders(ws, display_rows)
-    _update_total_row(ws, display_rows, order_data)
+    _restore_item_borders(ws, num_items)
+    _update_total_row(ws, num_items, order_data)
 
-    return display_rows - template_count
+    return num_items - template_count
 
 
 def _update_total_row(ws: xw.Sheet, num_items: int, order_data: pd.Series) -> None:
