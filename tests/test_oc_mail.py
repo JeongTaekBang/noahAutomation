@@ -137,29 +137,33 @@ class TestEnglishTemplate:
             to=('buyer@watergates.de',), cc=(),
         )
 
-    def test_제목에_문서번호와_발주번호가_들어간다(self, recipient):
+    def test_제목은_발신_조직과_고객_발주번호를_밝힌다(self, recipient):
+        """고객은 자기 PO 번호로 메일을 찾는다 — 제목에 그게 바로 보여야 한다"""
         subject = render_template(
             OC_MAIL_SUBJECT, recipient, 'SOO-2026-0001', '2026-08-03', customer_po='88826',
         )
-        assert 'SOO-2026-0001' in subject
+        assert 'Rotork Controls Korea' in subject
+        assert 'Order Confirmation' in subject
         assert '88826' in subject
 
-    def test_본문은_영문이고_고객명과_발주번호가_들어간다(self, recipient):
+    def test_본문은_발주번호_확인과_자동발송_안내뿐이다(self, recipient):
+        """인사말·서명 없이 짧게 — 2026-08-05 사용자 결정"""
         body = render_template(
             OC_MAIL_BODY, recipient, 'SOO-2026-0001', '2026-08-03', customer_po='88826',
         )
-        assert 'Dear WATERGATES GMBH' in body
         assert '88826' in body
         assert 'Order Confirmation' in body
+        assert 'Dear' not in body
 
     def test_본문에_자동발송_안내가_있다(self, recipient):
         body = render_template(OC_MAIL_BODY, recipient, 'SOO-1', '2026-08-03')
         assert 'automatically' in body.lower()
 
-    def test_서명은_영문_상호다(self, recipient):
-        """{supplier}는 한글이라 영문 메일에 쓰면 안 된다"""
+    def test_한글_상호가_들어가지_않는다(self, recipient):
+        """해외 고객 메일 — 제목·본문 어디에도 {supplier}(한글)가 나오면 안 된다"""
+        subject = render_template(OC_MAIL_SUBJECT, recipient, 'SOO-1', '2026-08-03')
         body = render_template(OC_MAIL_BODY, recipient, 'SOO-1', '2026-08-03')
-        assert SUPPLIER_INFO.name_en in body
+        assert SUPPLIER_INFO.name not in subject
         assert SUPPLIER_INFO.name not in body
 
     def test_치환자가_남지_않는다(self, recipient):

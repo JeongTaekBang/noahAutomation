@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-08-05: OC 메일 제목·본문 간소화
+
+사용자 결정으로 기본 템플릿 변경 (`config.py`, user_settings로 오버라이드 가능):
+
+- 제목: `[Rotork Controls Korea] Order Confirmation - Your PO: {customer_po}` —
+  고객은 자기 PO 번호로 메일을 찾으므로 그것만 밝힌다 (SOO 번호는 첨부의 O.C. No에 있음)
+- 본문: 발주번호 확인 한 줄 + `* This email has been sent automatically.*` —
+  인사말(Dear)·안내문·서명({supplier_en}) 제거. 발신 조직은 제목이 밝힌다
+
+`tests/test_oc_mail.py`의 템플릿 단언을 새 문구로 갱신 (한글 상호 금지 검사는
+제목·본문 양쪽으로 확대). CLAUDE.md·user_settings.py 주석 예시 동기화.
+
+---
+
 ## 2026-08-05: OC·FI 주소 잘림 수정 + OC 아이템 그리드 톤 조정
 
 사용자 보고(OC PDF): Customer Address 둘째 줄과 Delivery Address가 중간에서 잘리고,
