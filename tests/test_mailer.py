@@ -692,6 +692,59 @@ class TestBuildEml:
         assert '<귀중>' not in raw_html   # 태그로 해석될 여지 없음
 
 
+class TestBuildAttachments:
+    """첨부는 여러 장일 수 있다 — 같은 날 같은 거래처로 나간 DN이 여러 건인 경우"""
+
+    @pytest.fixture
+    def docs(self, tmp_path):
+        paths = []
+        for name in ('TS_A', 'TS_B', 'TS_C'):
+            p = tmp_path / f"{name}.xlsx"
+            p.write_bytes(b'dummy')
+            paths.append(p)
+        return paths
+
+    def test_single_path_still_works(self, docs, monkeypatch):
+        monkeypatch.setattr(mailer, 'export_pdfs', _fake_export_pdfs)
+        assert mailer.build_attachments(docs[0], 'pdf') == (docs[0].with_suffix('.pdf'),)
+
+    def test_many_paths_keep_order(self, docs, monkeypatch):
+        monkeypatch.setattr(mailer, 'export_pdfs', _fake_export_pdfs)
+        assert mailer.build_attachments(docs, 'pdf') == tuple(
+            p.with_suffix('.pdf') for p in docs)
+
+    def test_converts_in_one_excel_launch(self, docs, monkeypatch):
+        """장마다 Excel을 새로 띄우면 8장짜리 하루치가 하염없이 느려진다"""
+        calls = []
+
+        def spy(paths, targets=None):
+            calls.append(list(paths))
+            return _fake_export_pdfs(paths)
+
+        monkeypatch.setattr(mailer, 'export_pdfs', spy)
+        mailer.build_attachments(docs, 'pdf')
+
+        assert len(calls) == 1
+        assert len(calls[0]) == 3
+
+    def test_xlsx_format_skips_excel(self, docs, monkeypatch):
+        monkeypatch.setattr(
+            mailer, 'export_pdfs',
+            lambda paths, targets=None: pytest.fail('xlsx 첨부는 변환이 필요 없다'),
+        )
+        assert mailer.build_attachments(docs, 'xlsx') == tuple(docs)
+
+    def test_both_lists_pdfs_then_xlsx(self, docs, monkeypatch):
+        monkeypatch.setattr(mailer, 'export_pdfs', _fake_export_pdfs)
+        got = mailer.build_attachments(docs, 'both')
+        assert got == tuple(p.with_suffix('.pdf') for p in docs) + tuple(docs)
+
+    def test_as_paths_accepts_str_path_and_sequence(self, docs):
+        assert mailer.as_paths(str(docs[0])) == (docs[0],)
+        assert mailer.as_paths(docs[0]) == (docs[0],)
+        assert mailer.as_paths(docs) == tuple(docs)
+
+
 class TestCreateViaEml:
     @pytest.fixture
     def xlsx(self, tmp_path):
@@ -703,8 +756,10 @@ class TestCreateViaEml:
         opened = []
         monkeypatch.setattr(mailer, 'open_eml', lambda p: opened.append(p))
         monkeypatch.setattr(
-            mailer, 'export_pdf',
-            lambda p, o=None: _write_pdf(tmp_path / (Path(p).stem + '.pdf')),
+            mailer, 'export_pdfs',
+            lambda paths, targets=None: tuple(
+                _write_pdf(tmp_path / (Path(p).stem + '.pdf')) for p in paths
+            ),
         )
         result = create_ts_mail(
             xlsx_path=xlsx, recipient=recipient, doc_id='DN-1',
@@ -729,8 +784,8 @@ class TestCreateViaEml:
 
     def test_open_failure_is_reported(self, xlsx, recipient, monkeypatch, tmp_path):
         monkeypatch.setattr(
-            mailer, 'export_pdf',
-            lambda p, o=None: _write_pdf(tmp_path / 'x.pdf'),
+            mailer, 'export_pdfs',
+            lambda paths, targets=None: (_write_pdf(tmp_path / 'x.pdf'),),
         )
         monkeypatch.setattr(
             mailer, 'open_eml',
@@ -748,6 +803,11 @@ def _write_pdf(path: Path) -> Path:
     return path
 
 
+def _fake_export_pdfs(paths, targets=None) -> tuple[Path, ...]:
+    """Excel 없이 PDF 변환 흉내 — 경로만 .pdf로 바꿔 돌려준다"""
+    return tuple(Path(p).with_suffix('.pdf') for p in paths)
+
+
 # === Outlook 메일 생성 (COM mock) ===
 
 class TestCreateTsMail:
@@ -761,7 +821,7 @@ class TestCreateTsMail:
         mock_outlook = MagicMock()
         mock_outlook.CreateItem.return_value = mock_mail
         with patch.object(mailer, '_get_outlook', return_value=mock_outlook), \
-             patch.object(mailer, 'export_pdf', side_effect=lambda p, o=None: Path(p).with_suffix('.pdf')):
+             patch.object(mailer, 'export_pdfs', side_effect=_fake_export_pdfs):
             return create_ts_mail(
                 xlsx_path=xlsx, recipient=recipient,
                 doc_id='DN-2026-0001', date_str='2026-07-27', send=send,
@@ -796,9 +856,30 @@ class TestCreateTsMail:
         mail.Attachments.Add.assert_called_once()
         assert mail.Attachments.Add.call_args[0][0].endswith('.pdf')
 
+    def test_many_documents_go_in_one_mail(self, xlsx, recipient, tmp_path):
+        """DN이 여러 건 나간 날 — 메일은 한 통, 첨부만 여러 개"""
+        second = tmp_path / "TS_DN-2026-0002_가나밸브.xlsx"
+        second.write_bytes(b'dummy')
+
+        mail = MagicMock()
+        mock_outlook = MagicMock()
+        mock_outlook.CreateItem.return_value = mail
+        with patch.object(mailer, '_get_outlook', return_value=mock_outlook), \
+             patch.object(mailer, 'export_pdfs', side_effect=_fake_export_pdfs):
+            result = create_ts_mail(
+                xlsx_path=[xlsx, second], recipient=recipient,
+                doc_id='DN-2026-0001 외 1건', date_str='2026-08-06',
+                send=False, backend=MailBackend.OUTLOOK,
+            )
+
+        assert mock_outlook.CreateItem.call_count == 1
+        assert mail.Attachments.Add.call_count == 2
+        assert len(result.attachments) == 2
+        mail.Display.assert_called_once()
+
     def test_pdf_conversion_failure_reported_not_raised(self, xlsx, recipient):
         """PDF 변환이 깨져도 예외가 CLI로 튀지 않고 실패 결과로 돌아온다"""
-        with patch.object(mailer, 'export_pdf', side_effect=RuntimeError('Excel 없음')):
+        with patch.object(mailer, 'export_pdfs', side_effect=RuntimeError('Excel 없음')):
             result = create_ts_mail(
                 xlsx_path=xlsx, recipient=recipient,
                 doc_id='DN-2026-0001', send=False,
@@ -811,7 +892,7 @@ class TestCreateTsMail:
         mock_outlook = MagicMock()
         mock_outlook.CreateItem.side_effect = RuntimeError('COM 오류')
         with patch.object(mailer, '_get_outlook', return_value=mock_outlook), \
-             patch.object(mailer, 'export_pdf', side_effect=lambda p, o=None: Path(p).with_suffix('.pdf')):
+             patch.object(mailer, 'export_pdfs', side_effect=_fake_export_pdfs):
             result = create_ts_mail(
                 xlsx_path=xlsx, recipient=recipient,
                 doc_id='DN-2026-0001', send=False,

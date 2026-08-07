@@ -94,7 +94,11 @@ from po_generator.mailer import (
     render_template,
     wrap_body_html,
 )
-from po_generator.utils import normalize_biz_no, normalize_line_item
+from po_generator.utils import (
+    BIZ_NO_MIN_DIGITS,
+    normalize_biz_no,
+    normalize_line_item,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +118,8 @@ DATE_TBD_LABEL = '처리중'
 # 긴 거래처(피엠에스)가 있어서 "3개까지"로는 회신 표가 깨진다.
 SPLIT_ITEM_NOTE_MAX_CHARS = 60
 
-# 사업자등록번호 자릿수 — 조회어가 번호인지 이름인지 가르는 기준
-BIZ_NO_MIN_DIGITS = 8
+# 사업자등록번호 자릿수(`BIZ_NO_MIN_DIGITS`)는 po_generator/utils.py가 소유한다 —
+# 거래처를 조회어로 받는 CLI가 둘이라(`create_ts.py --customer`) 기준이 갈리면 안 된다.
 
 # 공장 출고일 컬럼명 — **'예정일'이라고 쓴다.**
 # `EXW NOAH`는 확정 약속이 아니라 계획이다. 고객에게 '출고일'로 나가면 그날 안 나갔을 때

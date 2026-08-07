@@ -166,13 +166,20 @@ echo ----------------------------------------
 echo.
 echo   [1] 단건 거래명세표 (DN 1건)
 echo   [2] 월합 거래명세표 (여러 DN을 한 장으로)
+echo   [3] 하루치 묶음 발송 (날짜로 골라 거래처별 메일 1통)
+echo   [4] 묶음 발송 (DN 목록 붙여넣기 - 거래처별 메일 1통)
 echo   [0] 메뉴로 돌아가기
+echo.
+echo   [2]는 '문서'를 한 장으로 합치고, [3][4]는 문서는 DN별 1장 그대로 두고
+echo   '메일'만 거래처별 한 통(첨부 여러 개)으로 묶습니다.
 echo.
 
 set /p TS_MODE="선택: "
 
 if "%TS_MODE%"=="1" goto ts_single
 if "%TS_MODE%"=="2" goto ts_merge
+if "%TS_MODE%"=="3" goto ts_batch
+if "%TS_MODE%"=="4" goto ts_one_mail
 if "%TS_MODE%"=="0" goto menu
 echo [오류] 올바른 번호를 입력하세요.
 pause
@@ -215,6 +222,69 @@ echo   (빈 줄 입력하면 생성 시작)
 echo.
 
 "%PYTHON_PATH%" "%~dp0create_ts.py" --interactive --merge
+
+echo.
+pause
+goto menu
+
+:ts_batch
+echo.
+echo ----------------------------------------
+echo   하루치 묶음 발송 (문서는 DN별 1장, 메일은 거래처별 1통)
+echo ----------------------------------------
+echo.
+echo   그날 출고분을 자동으로 찾아 거래처별로 묶어 보냅니다.
+echo   (예: 8/6 씨앤케이 8건 - 문서 8장, 메일 1통에 첨부 8개)
+echo.
+echo   거래처를 지정하면 발송 전 y/N을 한 번 묻고,
+echo   비워 두면 그날 전체를 거래처별로 나눠 확인 없이 메일 초안을 띄웁니다.
+echo   (초안까지만 열립니다 - 보내기는 메일 창에서 직접)
+echo.
+
+set "TS_DATE="
+set /p TS_DATE="출고일 (예: 2026-08-06 또는 8/6): "
+if not defined TS_DATE goto ts_batch_no_date
+
+REM 거래처명에 '(주)'가 흔하다 — if 괄호블록 안에서 전개되면 괄호 짝이 깨져 배치가 죽으므로
+REM 납기현황(:delivery_status)과 같은 방식으로 'if not defined' + 라벨 분기를 쓴다.
+set "TS_CUSTOMER="
+set /p TS_CUSTOMER="거래처 (Enter=그날 전체): "
+
+echo.
+echo 거래명세표 생성 중...
+echo.
+
+if not defined TS_CUSTOMER goto ts_batch_all
+
+"%PYTHON_PATH%" "%~dp0create_ts.py" --date "%TS_DATE%" --customer "%TS_CUSTOMER%"
+goto ts_batch_done
+
+:ts_batch_all
+REM 거래처를 안 고른 경우는 거래처마다 y/N을 묻게 되므로(그날 5곳이면 5번) 확인을 건너뛴다.
+REM --mail은 '초안 열기'까지다 — 자동 발송(--send)이 아니라 보내기는 사람이 누른다.
+"%PYTHON_PATH%" "%~dp0create_ts.py" --date "%TS_DATE%" --mail
+
+:ts_batch_done
+echo.
+pause
+goto menu
+
+:ts_batch_no_date
+echo [오류] 출고일을 입력하세요.
+pause
+goto ts_batch
+
+:ts_one_mail
+echo.
+echo ----------------------------------------
+echo   묶음 발송 (문서는 DN별 1장, 메일은 거래처별 1통)
+echo ----------------------------------------
+echo.
+echo   DN_ID 목록을 세로로 붙여넣기 하세요.
+echo   (빈 줄 입력하면 생성 시작)
+echo.
+
+"%PYTHON_PATH%" "%~dp0create_ts.py" --interactive --one-mail
 
 echo.
 pause

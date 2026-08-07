@@ -23,6 +23,9 @@ python create_ts.py DND-2026-0001           # 생성 후 "이메일 발송?" y/N
 python create_ts.py DND-2026-0001 --mail    # 확인 없이 바로 Outlook 창
 python create_ts.py DND-2026-0001 --send    # 확인 없이 즉시 발송 (Outlook COM 환경만)
 python create_ts.py DND-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
+python create_ts.py --date 2026-08-06 --customer 씨앤케이  # 그날 그 거래처 출고분 → 메일 1통(첨부 N개)
+python create_ts.py --date 2026-08-06                     # 그날 전체 → 거래처별 1통씩
+python create_ts.py DND-2026-0742 DND-2026-0743 --one-mail # 명시 ID를 묶어 1통
 python create_pi.py NO-0001              # Proforma invoice
 python create_fi.py DNO-2026-0001        # Final invoice (복수 RCK PO 시 발주번호별 자동 분리)
 python create_fi.py --po 26KPO00144     # 발주번호 기준 FI 생성 (복수 DN 통합)
@@ -136,12 +139,13 @@ Reconciliation layer:
 | `po_generator/validators.py` | Required field checks, ICO Unit > 0, delivery date validation |
 | `po_generator/services/document_service.py` | Orchestrator: find → validate → generate → save |
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
+| `create_po.bat` | **대화형 메뉴 런처 (이름과 달리 PO 전용이 아니다)** — 문서 7종 + DB Sync·마감·대사·대시보드·납기현황을 번호로 고르는 메뉴다. 거래명세표처럼 **하위 메뉴가 있는 항목도 있다**(단건/월합/하루치 묶음/목록 묶음). CLI에 옵션을 추가하면 여기와 `noah_gui.py`에도 넣어야 사용자 눈에 보인다 — `create_ts.py`만 고치고 "CLI에 반영했다"고 한 적이 있다 (2026-08-07, `tasks/lessons.md`) |
 | `noah_gui.py` | tkinter GUI — 문서 7종 + 납기현황. 기존 `create_*.py`·`delivery_status.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함. **DOC_TYPES에 항목을 추가하면 `build_portable_gui.APP_FILES`에도 넣어야 한다** — 안 그러면 배포판에서 그 버튼만 조용히 실패한다 (빌드 `verify()`와 `tests/test_noah_gui.py`가 대조) |
 | `build_common.py` | 배포판 빌드 공통부 — 런타임 내려받기·핀 3자 대조·트리밍·BUILD_INFO·zip. 문서생성기와 대시보드 두 빌더가 공유한다 (복사하면 갈라지고, 그 갈라짐은 "한쪽만 낡은 pandas로 나간다"로 늦게 드러난다 — `mail_cli.py`와 같은 이유). **최상위는 상수·함수 정의만** |
 | `cli_dist/build_portable_gui.py` | 문서생성기 배포판 — `build_common` 위에 이 배포판만의 것을 얹는다: `APP_FILES`(담을 것) · 런처/설치 스크립트 · `verify()`(`DOC_TYPES` 대조 + CLI 전수 `--help` 스모크). **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드하며, 예외는 `build_common`을 찾는 sys.path 한 줄뿐) |
 | `dashboard_dist/build_portable_dashboard.py` | 대시보드 배포판 — `dashboard.py`를 **무수정으로** 담고 `po_generator/`·`sql/`을 동봉한다. 예전 `build_dist.py`는 import를 문자열 치환해 standalone 파일을 만들었는데, import 한 줄이 바뀌자 패턴이 안 맞아 빌드가 죽었고 배포본이 4개월 낡았다 — 그래서 재작성을 아예 없앴다. `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다(import만으로는 트리밍 사고를 못 잡는다). pyarrow는 flight/parquet/dataset/substrait를 잘라내되 `arrow_compute`는 남긴다 (streamlit이 로드한다 — 실측) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
-| `po_generator/mailer.py` | 고객 메일 발송 — 고객 마스터에서 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **조인키가 국내/해외로 갈린다**: `find_recipient()`는 사업자번호로 `Customer_국내`, `find_recipient_overseas()`는 고객코드로 `Customer_해외` — 둘 다 `_build_recipient()` 하나를 공유한다. **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
+| `po_generator/mailer.py` | 고객 메일 발송 — 고객 마스터에서 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **첨부는 여러 장일 수 있다** — `as_paths()`가 단건/복수를 흡수하고 `export_pdfs()`가 Excel **1회 기동**으로 N장을 변환한다(8장 실측 24초; 장마다 띄우면 그 두 배). **조인키가 국내/해외로 갈린다**: `find_recipient()`는 사업자번호로 `Customer_국내`, `find_recipient_overseas()`는 고객코드로 `Customer_해외` — 둘 다 `_build_recipient()` 하나를 공유한다. **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
 | `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`add_mail_arguments`/`prepare_mail_options`/`confirm_recipient`(수신자 조회→표시→y/N 관문)/`collect_customer_po`/`format_mail_date`. `create_ts.py`·`delivery_status.py`·`create_oc.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다). 어느 마스터를 읽을지는 `MailOptions.loader`/`sheet_label` **짝**으로 주입 — 기본은 국내, OC만 해외. **`loader` 기본값에 함수를 박지 말 것**: 클래스 정의 시점에 굳어 모듈 속성 교체(테스트 monkeypatch)가 무시된다 |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
 | `docs/DATA_STRUCTURE_DESIGN.md` | Excel schema (8 sheets), Power Query setup |
@@ -180,6 +184,16 @@ Reconciliation layer:
   메일 실패는 문서 생성 성공을 뒤엎지 않는다
   - 거래명세표: `DN_국내.Business registration number`로 조인, 고정 참조는 `TS_MAIL_CC`, 첨부 기본 PDF.
     고객이 섞인 `--merge` 문서는 발송 차단
+  - **묶음 메일(`--date`/`--one-mail`)의 단위는 문서가 아니라 거래처다.** 하루에 한 거래처로
+    여러 PO가 나가면(2026-08-06 씨앤케이 8건 실측) 문서는 DN별 1장 그대로 두고 메일만 한 통에
+    첨부 N개로 묶는다. 묶는 키는 **정규화한 사업자번호** — 이름으로 묶으면 '(주)' 표기 차이로
+    같은 거래처가 갈라지고, 사업자번호가 빈 건은 서로 묶지 않는다(모르는 것끼리 합치면 남의
+    명세표가 붙는다). y/N 확인도 문서마다가 아니라 **메일마다** 한 번.
+    `--merge`(문서를 합침)와 `--one-mail`(메일만 합침)은 동시 지정 불가
+  - **한 문서에 두 거래처가 실리면 메일로 내보내지 않는다** (`create_ts.foreign_biz_numbers`).
+    DN 번호를 재사용하면 한 DN에 두 SO가 들어가는데(실측: `DND-2026-0748` 씨앤케이+오토밸브,
+    `DND-2026-0328` 코콘+한일전자) 그 문서엔 남의 품목·단가가 찍힌다. 묶음 실행에서는 그
+    문서만 첨부에서 빼고 나머지는 그대로 보낸다 — 시트 수정은 사람 몫이라 경고로 남긴다
   - 납기현황: 조회 기준인 사업자번호를 그대로 사용(항상 단일 거래처라 섞임 없음), 고정 참조는 `DS_MAIL_CC`,
     첨부 기본 **xlsx**(고객이 정렬·가공해 보는 표라 원본이 쓸모 있다). 본문에 납기 표를 HTML로 싣는다
 - **OC 메일은 해외 전용이고, 조인키가 사업자번호가 아니라 고객코드다.** `SO_해외`의

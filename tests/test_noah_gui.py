@@ -161,6 +161,14 @@ def test_ts_merge_and_mail():
         ['create_ts.py', 'DND-2026-0001', '--merge', '--mail']
 
 
+def test_ts_one_mail():
+    """문서는 DN별 1장, 메일만 거래처별 한 통 (--merge와 다른 옵션)"""
+    cmd = args_of('ts', ['DND-2026-0742', 'DND-2026-0743'],
+                  {'merge': False, 'one_mail': True, 'mail': True})
+    assert cmd == ['create_ts.py', 'DND-2026-0742', 'DND-2026-0743',
+                   '--one-mail', '--mail']
+
+
 def test_fi_po_mode():
     assert args_of('fi', ['26KPO00144'], {'fi_mode': 'po'}) == \
         ['create_fi.py', '--po', '26KPO00144']

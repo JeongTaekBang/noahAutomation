@@ -120,3 +120,20 @@ Patterns and mistakes to avoid, updated after each correction.
 좌표·두께·직전 `rg`/`g`(색)를 그대로 읽을 수 있다 — 이번 건은 이걸로 "모든 선이
 동일 0.96pt, 색만 검정 vs #BBBBBB"를 확정했다. Excel 테두리 → PDF 선폭 대응은
 빈 워크북 캘리브레이션으로 실측: **hairline=0.12 / thin=0.96 / medium=1.92pt**.
+
+## "CLI에 넣었다"는 진입점 전수 확인 뒤에 말한다 (2026-08-07)
+`create_ts.py`에 `--date`/`--one-mail`을 넣고 "CLI에서 쓸 수 있다"고 보고했는데,
+사용자가 실제로 쓰는 **대화형 메뉴(`create_po.bat`)에는 그 옵션이 없었다.**
+파일명이 `create_po`라 PO 전용이라고 지레짐작하고 넘긴 것이 원인 — 실제로는 문서 7종 +
+데이터/분석까지 묶은 **런처**이고, 거래명세표 하위 메뉴까지 따로 있다.
+
+새 CLI 옵션을 붙일 때 확인할 진입점은 셋이다:
+1. `create_*.py` / `*.py` 인자 (argparse)
+2. **`create_po.bat` 대화형 메뉴** — 하위 메뉴가 있는 문서(TS)는 그 안까지
+3. `noah_gui.py`(+ `cli_dist/build_portable_gui.py`의 `APP_FILES`)
+
+배치 메뉴 검증 함정: `set /p`가 있는 메뉴는 **파이프·리다이렉트로 몰아 넣어도 재현이 안 된다**
+(수정 전 파일에서도 `The syntax of the command is incorrect.`가 똑같이 난다 — 하네스 artifact).
+실제 파일에서 분기부를 떼어내 stub으로 argv를 찍어 보는 쪽이 확실하다.
+또 stub을 `.bat`으로 만들면 `call` 없이 부른 순간 제어가 안 돌아와 뒷부분이 조용히 안 돈다 —
+stub은 파이썬 스크립트로.

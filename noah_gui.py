@@ -71,7 +71,8 @@ DOC_TYPES: tuple[dict[str, object], ...] = (
     {
         'key': 'ts', 'label': '거래명세표 (TS)', 'script': 'create_ts.py',
         'id_label': 'DN_ID / 선수금_ID', 'hint': '예: DND-2026-0001, ADV_2026-0001',
-        'out_attr': 'TS_OUTPUT_DIR', 'options': ('merge', 'mail'), 'multi': True,
+        'out_attr': 'TS_OUTPUT_DIR', 'options': ('merge', 'one_mail', 'mail'),
+        'multi': True,
     },
     {
         'key': 'pi', 'label': 'Proforma Invoice (PI)', 'script': 'create_pi.py',
@@ -114,6 +115,8 @@ DOC_BY_KEY: dict[str, dict[str, object]] = {d['key']: d for d in DOC_TYPES}  # t
 CHECKBOX_OPTIONS: dict[str, str] = {
     'force': "검증 오류 무시하고 생성 (--force)",
     'merge': "월합 — 여러 DN을 한 장으로 (--merge)",
+    # merge는 '문서'를 합치고, one_mail은 문서는 그대로 두고 '메일'만 합친다 (CLI가 동시 지정을 막는다)
+    'one_mail': "메일만 거래처별 한 통으로 묶기 (--one-mail)",
     'mail': "메일 초안 만들기 (--mail)",
     'ds_all': "출고완료 건까지 포함 (--all)",
 }
@@ -357,6 +360,9 @@ def build_command(doc_key: str, ids: list[str], options: dict[str, object]) -> l
 
     if doc_key == 'ts' and options.get('merge'):
         cmd.append('--merge')
+
+    if doc_key == 'ts' and options.get('one_mail'):
+        cmd.append('--one-mail')
 
     if doc_key == 'ds' and options.get('ds_all'):
         cmd.append('--all')

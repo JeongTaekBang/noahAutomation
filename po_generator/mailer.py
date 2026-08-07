@@ -60,6 +60,9 @@ logger = logging.getLogger(__name__)
 # Outlook MailItem 상수 (olMailItem)
 OL_MAIL_ITEM = 0
 
+# 경로 인자는 문자열로도 들어온다 (CLI·테스트에서 그대로 넘긴다)
+PathLike = str | Path
+
 # 값이 없을 때 본문에 표기할 문자열 (빈칸으로 두면 누락인지 없음인지 구분이 안 됨)
 NO_VALUE = 'N/A'
 
@@ -376,11 +379,90 @@ def find_recipient_overseas_for_order(
 
 # === PDF 변환 ===
 
-def export_pdf(xlsx_path: Path, pdf_path: Path | None = None) -> Path:
-    """거래명세표 xlsx를 PDF로 변환
+def as_paths(value: PathLike | Sequence[PathLike]) -> tuple[Path, ...]:
+    """경로 하나 또는 여러 개를 튜플로 정규화
+
+    "문서 한 장 = 메일 한 통"이 아닌 경우가 있다 — 같은 날 같은 거래처로 나간 DN 여러 건은
+    문서는 DN별 1장이되 메일은 1통이다. 그 경계를 여기 한 곳에서 흡수해, 호출부마다
+    단건/복수 분기를 만들지 않는다.
+    """
+    if isinstance(value, (str, Path)):
+        return (Path(value),)
+    return tuple(Path(p) for p in value)
+
+
+def export_pdfs(
+    xlsx_paths: Sequence[PathLike],
+    pdf_paths: Sequence[PathLike] | None = None,
+) -> tuple[Path, ...]:
+    """xlsx 여러 개를 PDF로 변환 (Excel **1회 기동**)
 
     xlwings COM은 한글 경로에서 실패할 수 있으므로 임시 폴더에서 변환한 뒤
     최종 경로로 옮깁니다 (ts_generator와 동일한 패턴).
+
+    한 통에 8장을 붙이는 날이 있어서 파일마다 Excel을 새로 띄우지 않는다 —
+    COM 왕복은 배치가 원칙(`excel_helpers` 주석과 같은 취지).
+
+    Args:
+        xlsx_paths: 원본 xlsx 경로들
+        pdf_paths: 출력 PDF 경로들 (기본: 각 xlsx와 같은 위치, 확장자만 .pdf)
+
+    Returns:
+        생성된 PDF 경로 튜플 (입력 순서 유지)
+
+    Raises:
+        FileNotFoundError: 원본 파일이 없는 경우
+        ValueError: pdf_paths 개수가 xlsx_paths와 다른 경우
+    """
+    sources = as_paths(xlsx_paths)
+    if not sources:
+        return ()
+
+    for source in sources:
+        if not source.exists():
+            raise FileNotFoundError(f"변환할 파일이 없습니다: {source}")
+
+    if pdf_paths is None:
+        targets = tuple(p.with_suffix('.pdf') for p in sources)
+    else:
+        targets = as_paths(pdf_paths)
+        if len(targets) != len(sources):
+            raise ValueError(
+                f"PDF 출력 경로 개수가 원본과 다릅니다: {len(targets)} != {len(sources)}"
+            )
+
+    temp_dir = Path(tempfile.gettempdir())
+    results: list[Path] = []
+
+    with xlwings_app_context() as app:
+        for source, target in zip(sources, targets):
+            stamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
+            temp_xlsx = temp_dir / f"ts_pdf_{stamp}.xlsx"
+            temp_pdf = temp_dir / f"ts_pdf_{stamp}.pdf"
+
+            shutil.copy2(source, temp_xlsx)
+            try:
+                wb = app.books.open(str(temp_xlsx))
+                try:
+                    wb.to_pdf(str(temp_pdf))
+                finally:
+                    wb.close()
+            finally:
+                cleanup_temp_file(temp_xlsx)
+
+            if not temp_pdf.exists():
+                raise RuntimeError(f"PDF 변환 실패: {source.name}")
+
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(temp_pdf), str(target))
+            logger.info(f"PDF 변환 완료: {target}")
+            results.append(target)
+
+    return tuple(results)
+
+
+def export_pdf(xlsx_path: PathLike, pdf_path: PathLike | None = None) -> Path:
+    """xlsx 한 장을 PDF로 변환 (`export_pdfs`의 단건 래퍼)
 
     Args:
         xlsx_path: 원본 xlsx 경로
@@ -388,64 +470,34 @@ def export_pdf(xlsx_path: Path, pdf_path: Path | None = None) -> Path:
 
     Returns:
         생성된 PDF 경로
-
-    Raises:
-        FileNotFoundError: 원본 파일이 없는 경우
     """
-    xlsx_path = Path(xlsx_path)
-    if not xlsx_path.exists():
-        raise FileNotFoundError(f"변환할 파일이 없습니다: {xlsx_path}")
-
-    if pdf_path is None:
-        pdf_path = xlsx_path.with_suffix('.pdf')
-    pdf_path = Path(pdf_path)
-
-    stamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
-    temp_dir = Path(tempfile.gettempdir())
-    temp_xlsx = temp_dir / f"ts_pdf_{stamp}.xlsx"
-    temp_pdf = temp_dir / f"ts_pdf_{stamp}.pdf"
-
-    shutil.copy2(xlsx_path, temp_xlsx)
-    try:
-        with xlwings_app_context() as app:
-            wb = app.books.open(str(temp_xlsx))
-            try:
-                wb.to_pdf(str(temp_pdf))
-            finally:
-                wb.close()
-    finally:
-        cleanup_temp_file(temp_xlsx)
-
-    if not temp_pdf.exists():
-        raise RuntimeError(f"PDF 변환 실패: {xlsx_path.name}")
-
-    pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(temp_pdf), str(pdf_path))
-    logger.info(f"PDF 변환 완료: {pdf_path}")
-    return pdf_path
+    return export_pdfs(
+        [xlsx_path], None if pdf_path is None else [pdf_path]
+    )[0]
 
 
 def build_attachments(
-    xlsx_path: Path,
+    xlsx_path: PathLike | Sequence[PathLike],
     attach_format: str = TS_MAIL_ATTACH_FORMAT,
 ) -> tuple[Path, ...]:
     """첨부 파일 목록 준비 (필요 시 PDF 변환)
 
     Args:
-        xlsx_path: 생성된 거래명세표 xlsx 경로
+        xlsx_path: 생성된 문서 경로 (여러 개면 순서대로 모두 첨부)
         attach_format: 'pdf' | 'xlsx' | 'both'
 
     Returns:
-        첨부할 파일 경로 튜플
+        첨부할 파일 경로 튜플 ('both'는 PDF 전부 → xlsx 전부 순서)
     """
     fmt = (attach_format or 'pdf').strip().lower()
-    xlsx_path = Path(xlsx_path)
+    sources = as_paths(xlsx_path)
 
     if fmt == 'xlsx':
-        return (xlsx_path,)
+        return sources
+    pdfs = export_pdfs(sources)
     if fmt == 'both':
-        return (export_pdf(xlsx_path), xlsx_path)
-    return (export_pdf(xlsx_path),)
+        return pdfs + sources
+    return pdfs
 
 
 # === Outlook 메일 생성 ===
@@ -689,7 +741,7 @@ def render_template(
 
 
 def create_document_mail(
-    xlsx_path: Path,
+    xlsx_path: PathLike | Sequence[PathLike],
     recipient: Recipient,
     doc_id: str,
     subject_template: str,
@@ -709,7 +761,7 @@ def create_document_mail(
     문서 종류에 무관한 일반형입니다. 제목/본문 템플릿과 첨부 형식을 인자로 받습니다.
 
     Args:
-        xlsx_path: 생성된 문서 경로
+        xlsx_path: 생성된 문서 경로 (여러 개를 주면 **첨부 여러 개짜리 한 통**)
         recipient: 수신자 정보
         doc_id: DN_ID·사업자번호 등 문서 식별자 (로그·템플릿용)
         subject_template: 제목 템플릿
@@ -756,7 +808,7 @@ def create_document_mail(
 
 
 def create_ts_mail(
-    xlsx_path: Path,
+    xlsx_path: PathLike | Sequence[PathLike],
     recipient: Recipient,
     doc_id: str,
     date_str: str | None = None,
@@ -770,7 +822,7 @@ def create_ts_mail(
     `create_document_mail()`에 거래명세표 설정을 넘기는 얇은 래퍼입니다.
 
     Args:
-        xlsx_path: 생성된 거래명세표 경로
+        xlsx_path: 생성된 거래명세표 경로 (여러 건을 묶어 보낼 땐 경로 목록)
         recipient: 수신자 정보
         doc_id: DN_ID 등 문서 ID
         date_str: 제목/본문에 쓸 날짜 (기본: 오늘)

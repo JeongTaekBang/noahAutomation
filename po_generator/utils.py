@@ -660,6 +660,12 @@ def find_so_export_data(
 
 # === Customer_국내 데이터 로드 (거래명세표 메일 발송용) ===
 
+# 사업자등록번호 자릿수 — 조회어가 번호인지 이름인지 가르는 기준.
+# 거래처를 사람이 손으로 지정하는 CLI가 여럿(`delivery_status.py`, `create_ts.py`)이라
+# 판정 기준이 갈리면 같은 조회어가 CLI마다 다르게 풀린다.
+BIZ_NO_MIN_DIGITS: int = 8
+
+
 def normalize_biz_no(value: Any) -> str:
     """사업자번호를 숫자만 남긴 형태로 정규화
 
