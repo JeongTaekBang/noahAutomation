@@ -107,6 +107,7 @@ APP_FILES = (
     "create_ci.py",
     "create_pl.py",
     "delivery_status.py",
+    "create_dn.py",
 )
 APP_DIRS = ("po_generator", "templates")
 

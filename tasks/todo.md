@@ -1,99 +1,82 @@
-# 거래명세표 묶음 발송 — 하루치를 거래처별 메일 한 통으로 (2026-08-07) — 완료
+# DN_국내 출고기록 자동화 — `create_dn.py` (2026-08-07) — 완료
 
-사용자 요청: 8/6처럼 한 거래처에 여러 PO가 나간 날, PDF는 PO(=DN)별로 만들되
-메일은 한 통에 첨부 여러 개로. 예시가 `DN_국내` 8/6 출고분 씨앤케이엔지니어링(DN 8건).
+사용자 요청: 매달 공장 출고리스트(`po_reconciliation/{year}/{period}/2026리스트_RCK_Pxx.xlsx`)를
+보고 손으로 옮겨 적던 `DN_국내` 입력을 CLI에서 연월만 넣으면 되게. 나머지 열은 수식이 계산한다.
 
-- [x] `mailer`: `as_paths` / `export_pdfs`(Excel 1회 기동) / `build_attachments`·
-      `create_document_mail`·`create_ts_mail`이 경로 목록 허용 (OC·납기현황 호출부 무수정)
-- [x] `create_ts`: `_build_ts_from_dn`·`_build_ts_from_adv` 추출(단건·묶음 같은 경로),
-      `--date`/`--customer`/`--one-mail`, `group_by_customer`(정규화 사업자번호),
-      `validate_selection_args`(--merge와 동시 지정 차단)
-- [x] 거래처 섞임 관문 `foreign_biz_numbers` — 실데이터에 DN 번호 재사용 2건 발견
-      (`DND-2026-0748` 씨앤케이+오토밸브 / `DND-2026-0328` 코콘+한일전자).
-      묶음은 그 문서만 첨부에서 제외, 단건도 같은 관문
-- [x] `utils.BIZ_NO_MIN_DIGITS` 이동 (delivery_status와 조회어 판정 공유)
-- [x] `create_po.bat`(대화형 메뉴): 거래명세표 하위 메뉴에 `[3] 하루치 묶음 발송`,
-      `[4] 묶음 발송(목록 붙여넣기)` 추가 — **CLI만 고치면 메뉴에서는 안 보인다**
-- [x] `noah_gui`: TS 옵션 체크박스 + `--one-mail` 배선
-- [x] 테스트: `tests/test_create_ts_batch.py` 신규 56건, `test_mailer` 첨부 복수 7건,
-      `test_noah_gui` 1건. 기존 `export_pdf` patch 지점을 `export_pdfs`로 이동
-- [x] 검증: pytest 전체 통과 / 실데이터 8장 생성 + PDF 일괄변환 24.2초 + .eml 첨부 8개 확인
+라인/수량 결정 방식은 **사용자가 제안한 `PO_국내` Status 기준**으로 갔다 —
+처음 잡았던 "SO 잔량" 방식보다 정확했다(자동입력 정확도 517/529 → 548/549).
 
-**DN 번호 중복 2건 처리 (2026-08-07 결정):**
-- `DND-2026-0328`(한일전자 `SOD-2026-0383` 행) — **그대로 두기로 함.** 4월 건이고 회계는
-  SO_ID 단위로 이미 맞다. 관문이 메일 발송만 막으므로 실질 피해는 "그 DN으로 거래명세표를
-  못 뽑는다" 하나뿐
-- `DND-2026-0748`(오토밸브 `SOD-2026-0743` 행) — 미정. 그대로 두면 8/6 씨앤케이 묶음 메일에
-  **7장만 붙고 `26071408R0` 명세표가 빠진다**
+- [x] `po_generator/dn_recorder.py` — 업무 로직 (COM 없음)
+      - 출고 이벤트 = 출고리스트 `SO_ID` 있는 행, 출고일 = `납품완료`
+      - 라인/수량 = PO에 남은 게 없으면 **SO 전 라인의 잔량**, 남았으면 **PO `Invoiced Pxx` 라인**
+        (PO는 부속을 1라인에 합쳐 적어서 PO만 보면 부속이 빠진다 — 실측 6건)
+      - `Cancelled` PO 라인 제외 (안 빼면 취소분이 출고로 잡힌다 — 실측 2건)
+      - 자기검증: 단일 날짜는 ICO 합 = 계산서금액.
+        **다중 출고일은 PO 행의 ICO를 날짜별 계산서금액에 배정**(`split_by_amount`) —
+        PO가 분할출고마다 행을 따로 둬서 12건 중 10건이 유일하게 풀린다(모호 0)
+      - 안 나뉘는 이유 구분(`_solve_split`): '방법이 없음'+합계 일치 → **단가 정정 행**
+        (첫 날 한 건으로 기록, 뒤 행 skip). '결과가 갈림'·음수(반품)는 사람 몫
+      - **DN 라인은 SO에 살아 있는 것만** — SO에 없는 PO 라인(외주 가공비 등 매입만 발생)과
+        SO Status가 `Cancelled`/`Hold`인 라인을 뺀다. 금액 대조에는 살려 두고 DN에 쓸 때만 뺀다.
+        `EXCLUDED_SO_STATUSES`는 `config.py`로 올려 `delivery_status.py`와 공유
+      - 멱등: `(SO_ID, 출고일)` 중복 + **라인·수량이 정확히 같은 출고가 다른 날짜에 있으면** skip
+      - 월합 거래처(기존 DN Remarks에서 유도) → 세금계산서 발행일 공란 + Remarks 상속
+- [x] `po_generator/dn_writer.py` — xlwings 쓰기. **openpyxl 금지**(피벗 6·쿼리테이블 14 소실).
+      마지막 행 타일 복사 → `ListObject.Resize` → 값 열만 배치 덮어쓰기(열당 COM 1회).
+      쓰기 전 `generated_dn/backup/`에 사본(최근 10개). 열려 있는 워크북에 붙되
+      저장 안 된 변경이 있으면 거부
+- [x] `create_dn.py` — CLI (`--dry-run` / `--yes` / `--no-tax-date`), 미리보기 xlsx 2시트
+- [x] `config.py` — `DN_OUTPUT_DIR` / `DN_BACKUP_DIR`
+- [x] 진입점 3곳 전부 (`tasks/lessons.md` 2026-08-07 교훈):
+      `create_po.bat` `[N]` + 하위 메뉴 2개 / `noah_gui.py` DOC_TYPES+옵션 /
+      `build_portable_gui.py` APP_FILES
+- [x] `tests/test_dn_recorder.py` 30건
 
-번호를 새로 줄 때 **뒤 번호를 밀 필요는 없다** — 빈 번호가 21개 있고(`350~361` 12개 연속은
-`_sync_log` 35,351행·생성 문서 어디에도 흔적 없음), 번호↔출고일 역전도 이미 22건이라
-DN 번호는 시간순 일련번호가 아니다. 파생 시트 5종(`DN_원가포함`·`SO_통합`·`AX_매출대사`·
-`PO_출고`·`INV_transaction`)은 파워쿼리라 새로고침으로 따라온다.
+## 검증 결과
 
----
+**골든 대조** — 실데이터에서 그 기간 입력분만 빼고 재생성해 수기 입력분과 열 단위 비교:
 
-# OC "한 페이지 빈 행 채우기" 제거 (2026-08-05 오후) — 완료
+키는 `(SO_ID, Line item, 출고일)`.
 
-사용자 보고: 1아이템 OC가 빈 격자 예닐곱 줄을 달고 나감 → 표는 마지막 아이템
-바로 다음 Total로 끝나도록 채움 기능 자체를 제거 (8/3 도입분 되돌림).
+| 기간 | 라인 매칭 | Qty | Currency | 생성만 | 정답만 | 확인필요 |
+|---|---|---|---|---|---|---|
+| **P03** | **224** | **0** | **0** | **0** | 3* | 3* |
+| **P04** | **220** | **0** | **0** | **0** | **0** | **0** |
+| **P05** | **176** | **0** | **0** | 1 | **0** | **0** |
+| P06 | 235 | 0 | 0 | 3 | **0** | **0** |
+| **P07** | **208** | **0** | **0** | **0** | **0** | **0** |
+| **P08** | **61** | **0** | **0** | **0** | **0** | **0** |
 
-- [x] oc_generator: `_page_blank_capacity` 제거, `_fill_items`를
-      "부족분 삽입 → 값·행높이 → 남는 행 삭제"로 단순화
-- [x] excel_helpers: 채움 전용 스택 제거 (`fit_blank_rows`/`printable_height`/
-      `sum_row_heights`/`print_area_last_row`/`A4_HEIGHT_PT`)
-- [x] tests/test_page_fit.py → test_doc_layout.py 개명(git mv), 채움 테스트 13개 삭제
-- [x] CLAUDE.md 참조 2곳·CHANGELOG 갱신
-- [x] 검증: pytest 638 passed · 1아이템(SOO-2026-0239) 재생성 = 아이템+Total만 ·
-      27아이템(SOO-2026-0235) 재생성 = 행 18-44 + Total 45 (기존과 동일 구조)
+\* P03의 정답만 3라인 = 확인필요 3건과 같은 건(반품)
 
----
+**모든 기간 Qty·Currency 불일치 0** (매칭 1124라인). 확인 필요는 6개월 통틀어 **3건**,
+반품이 낀 `SOD-2026-0280` 하나뿐이고 헛경보 0.
 
-# OC PDF 레이아웃 결함 2건 (2026-08-05) — 완료
+남는 차이 4라인은 전부 **출고리스트 날짜와 사람이 적은 날짜가 다른 건**이다 —
+P06 3라인은 6/30 출고를 7/1·7/20로 적은 건(`SOD-2026-0301`),
+P05 1라인은 5/7 두 줄 중 하나를 5/15로 적은 건(`SOD-2026-0467`).
 
-사용자 보고: OC PDF에서 (1) Customer Address 왼쪽 가운데 줄과 오른쪽 Delivery Address가
-잘림, (2) 본문 아이템 가로줄이 두꺼워 보임.
+**쓰기 E2E** — 워크북 사본에서 P08 61행을 지우고 실제로 다시 써 넣어 원본과 대조:
+- 수식 열 전부 정상 계산 (PO_ID·Order type·사업자번호·Customer name·Customer PO·
+  Item·Unit Price·Total Sales·AX Project no)
+- 17열 × 61행 값 일치 (DN_ID만 1건 차이 — 사람이 오토밸브 2건을 한 DN으로 묶었다)
+- 표 범위 `A1:T1432` 정상 확장, `Seq` 연속
+- **피벗 6개 / 쿼리테이블 14개 / connections.xml 원본과 동일** (보존 확인)
 
-## 원인 (실측 완료)
+**멱등성** — 실데이터로 `create_dn.py P08` → 추가 0건, 건너뜀 30건
 
-1. **주소 잘림** — 주소 칸이 병합 셀(왼쪽 A13:E13~A15:E15, 오른쪽 G13:I15)인데
-   wrap 없이 한 줄로 들어가서 **병합 경계에서 클립**된다. SECTORIEL 실측:
-   bill_to_2 74자 > A:E 폭(~54자), 납품주소 81자 > G:I 폭(~42자).
-   병합 셀은 넘친 텍스트를 옆 칸으로 흘리지 않는다.
-2. **굵은 선** — 아이템 그리드는 **검정 thin**(PDF 실측 0.96pt)인데, 문서 상단
-   규칙선은 **회색 #BBBBBB thin**(0.733 gray)이라 그리드만 무겁게 보인다.
-   캘리브레이션 실측: hairline=0.12 / thin=0.96 / medium=1.92pt — 회귀 아님,
-   템플릿이 원래 검정 thin (FI·PI 동일, CI·PL은 내부선 없음).
+**전체 스위트** — 734 passed, 2 skipped
 
-## 계획
+## 알려진 한계
 
-- [x] excel_helpers: 프로브 측정부를 `_measure_wrapped_heights`로 추출
-      (`autofit_merged_rows` 동작 불변)
-- [x] excel_helpers: 순수 함수 `address_row_heights` (좌측 행별 필요 높이 +
-      우측 3행 병합 부족분 균등 분배)
-- [x] excel_helpers: `layout_address_rows` — wrap 켜기 + 측정 + 높이 쓰기 (OC·FI 공용)
-- [x] excel_helpers: `ITEM_GRID_INNER_COLOR = 0xBBBBBB` 상수
-- [x] oc_generator: `_fill_header`에서 주소 쓰기 후 `layout_address_rows(ws, 13, ...)`
-- [x] oc_generator: `_restore_item_borders`에서 내부 가로선만 #BBBBBB로
-      (프레임 = 헤더밴드 하단·마지막 행 하단은 검정 유지)
-- [x] fi_generator: 주소만 동일 적용 (`layout_address_rows(ws, 12, ...)`) —
-      그리드 색은 보고된 OC만 변경
-- [x] tests/test_page_fit.py: `address_row_heights` 순수 테스트 + OC·FI가
-      `layout_address_rows`를 부르는지 소스 검사
-- [x] 검증: pytest tests/ + OC SOO-2026-0235 재생성 → PDF에서 주소 줄바꿈·회색
-      내부선·검정 프레임 실측 + FI 재생성 무회귀 확인
-
-## 리뷰 (2026-08-05)
-
-- **pytest 651 passed, 2 skipped** (기존 641 + 신규 10).
-- **OC 재생성** (`OC_SOO-2026-0235_SECTORIEL_260805_1.xlsx/.pdf`): 주소 양쪽 2줄
-  완전 렌더(A14 높이 15.95→24.6), PDF 스트림 실측으로 내부선 gray 0.733 /
-  프레임(표 상단·Total 위아래) gray 0 확인, 보조 열 Z 잔여물 없음.
-- **FI 재생성** (`FI_DNO-2026-0152_...260805.xlsx/.pdf`): 105자 납품 주소가
-  G12:I14 안에서 3줄 완전 렌더(행 높이는 47.85pt 안에 들어 불변), 아이템
-  그리드는 검정 그대로 — FI·PI 외관은 바꾸지 않음(보고된 OC만).
-- 설계 노트: `layout_address_rows`는 값을 쓰지 않고 생성기가 쓴 텍스트를 측정만
-  한다. 짧은 주소면 행 높이 불변이라 기존 문서와 픽셀 동일. 페이지 채움 계산은
-  헤더 높이를 라이브로 읽으므로(`_page_blank_capacity`) 주소가 자라도 정합.
-- 남은 관찰(범위 밖, 기존 동작): 27아이템 OC에서 은행정보·약관 블록이 3페이지로
-  넘어가 3페이지에 빈 격자 헤더만 남는 페이지네이션은 이번 수정 전부터 동일.
+- 반품(계산서금액 음수)이 낀 건은 확인 필요로 뺀다 — 출고/반품/재출고를 어떻게 적을지는
+  사람이 정한다 (6개월 1건: `SOD-2026-0280`)
+- 세금계산서 발행일 기본값(=출고일)은 P08 기준 95% 맞지만 3월 기준으론 44%다.
+  월합 거래처 12곳(사업자번호 기준)은 발행일을 비우고 Remarks를 물려주는데, 그 표기가
+  기존 DN에 29~100%로 들쭉날쭉해 과거 입력분과는 어긋난다. `--no-tax-date`로 전부 비울 수 있다
+- DN_ID는 출고리스트 1행당 1개. 사람이 같은 거래처 여러 건을 한 DN으로 묶은 경우와는
+  번호가 갈린다 (P08 `DND-2026-0749` 오토밸브 2건)
+- 출고리스트 날짜와 사람이 적은 날짜가 다르면 우리는 출고리스트를 따른다.
+  라인·수량이 정확히 같으면 건너뛰지만, 다르게 쪼개 적은 건(`SOD-2026-0301` 6/30 → 7/1·7/20)은
+  중복으로 생성될 수 있다 — 지난 기간을 뒤늦게 돌릴 때만 생기는 문제라 미리보기로 확인할 것
+- 쓴 뒤 파워쿼리 새로고침은 사람 몫 (`SO_통합`·`Order_book` 반영)

@@ -51,6 +51,7 @@ generated_ci/
 generated_pl/
 generated_oc/
 generated_ds/
+generated_dn/
 
 # Temp/analysis files
 *.bak

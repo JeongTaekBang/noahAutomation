@@ -35,6 +35,7 @@ echo.
 echo   [데이터]
 echo   [8] DB Sync (Excel → SQLite)
 echo   [9] Order Book Close (월 마감)
+echo   [N] DN 출고기록 자동 입력 (출고리스트 → DN_국내)
 echo.
 echo   [분석]
 echo   [D] 대시보드
@@ -61,6 +62,7 @@ if "%CHOICE%"=="6" goto create_ci
 if "%CHOICE%"=="7" goto create_pl
 if "%CHOICE%"=="8" goto sync_db
 if "%CHOICE%"=="9" goto close_period
+if /i "%CHOICE%"=="N" goto create_dn
 if /i "%CHOICE%"=="D" goto dashboard
 if /i "%CHOICE%"=="R" goto reconcile
 if /i "%CHOICE%"=="S" goto reconcile_so
@@ -564,6 +566,64 @@ goto menu
 :cp_status
 echo.
 "%PYTHON_PATH%" "%~dp0close_period.py" --status
+
+echo.
+pause
+goto menu
+
+:create_dn
+echo.
+echo ----------------------------------------
+echo   DN 출고기록 자동 입력
+echo ----------------------------------------
+echo.
+echo   공장 출고리스트(2026리스트_RCK_Pxx.xlsx)를 읽어
+echo   NOAH_SO_PO_DN.xlsx의 DN_국내에 출고 내역을 추가합니다.
+echo.
+echo   [1] 미리보기만 (워크북은 건드리지 않음)
+echo   [2] 미리보기 후 확인하고 추가
+echo   [0] 메뉴로 돌아가기
+echo.
+
+set /p DN_MODE="선택: "
+
+if "%DN_MODE%"=="1" goto dn_dry
+if "%DN_MODE%"=="2" goto dn_write
+if "%DN_MODE%"=="0" goto menu
+echo [오류] 올바른 번호를 입력하세요.
+pause
+goto create_dn
+
+:dn_dry
+echo.
+:dn_dry_input
+set /p DN_PERIOD="기간 코드 입력 (예: P08): "
+if "%DN_PERIOD%"=="" (
+    echo [오류] 기간 코드를 입력하세요.
+    goto dn_dry_input
+)
+
+echo.
+"%PYTHON_PATH%" "%~dp0create_dn.py" %DN_PERIOD% --dry-run
+
+echo.
+pause
+goto menu
+
+:dn_write
+echo.
+echo   추가할 행을 먼저 보여주고, 진행 여부를 다시 묻습니다.
+echo   쓰기 전 워크북 사본이 generated_dn\backup 에 저장됩니다.
+echo.
+:dn_write_input
+set /p DN_PERIOD="기간 코드 입력 (예: P08): "
+if "%DN_PERIOD%"=="" (
+    echo [오류] 기간 코드를 입력하세요.
+    goto dn_write_input
+)
+
+echo.
+"%PYTHON_PATH%" "%~dp0create_dn.py" %DN_PERIOD%
 
 echo.
 pause

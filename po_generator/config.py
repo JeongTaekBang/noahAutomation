@@ -126,6 +126,11 @@ OC_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_oc"
 # === 거래처 납기현황 회신 설정 (템플릿 없음 — 조회 결과를 새 통합문서로 출력) ===
 DS_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_ds"
 
+# === DN 출고기록 자동 입력 설정 (create_dn.py) ===
+# 미리보기 파일이 나가는 곳. 워크북에 쓰기 전 사본은 그 아래 backup/에 쌓인다.
+DN_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_dn"
+DN_BACKUP_DIR: Final[Path] = DN_OUTPUT_DIR / "backup"
+
 
 # === 시트 설정 (NOAH_SO_PO_DN.xlsx) ===
 # 국내 시트
@@ -161,6 +166,13 @@ TS_HEADER_ROW: Final[int] = 12  # 헤더 행
 
 # === 비즈니스 규칙 상수 ===
 VAT_RATE_DOMESTIC: Final[float] = _load_user_setting('VAT_RATE_DOMESTIC', 0.1)
+
+# 주문 라인을 통째로 빼야 하는 SO Status.
+# `SO_국내.Status`는 파워쿼리 캐시라 출고 여부 판정에는 쓰면 안 되지만(그건 DN 수량으로
+# 계산한다), **취소/보류만은 이 컬럼으로만 알 수 있다** — 취소 건은 DN이 영영 안 생겨
+# 수량으로 구분할 방법이 없기 때문이다.
+# `delivery_status.py`(회신 제외)와 `dn_recorder.py`(DN 기록 제외)가 공유한다.
+EXCLUDED_SO_STATUSES: Final[frozenset[str]] = frozenset({'Cancelled', 'Hold'})
 
 # === 안전 장치 상수 ===
 # MAX_HEADER_SEARCH_ROWS 제거됨 - 미사용

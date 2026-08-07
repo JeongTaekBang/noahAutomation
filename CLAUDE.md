@@ -34,6 +34,12 @@ python create_oc.py SOO-2026-0001        # Order confirmation (생성 후 "이�
 python create_oc.py SOO-2026-0001 --mail    # 확인 없이 메일 초안
 python create_oc.py SOO-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
 
+# DN 출고기록 자동 입력 (출고리스트 → DN_국내)
+python create_dn.py P08                   # 미리보기 → y/N → 워크북에 추가
+python create_dn.py P08 --dry-run         # 미리보기 파일만 (워크북 안 건드림)
+python create_dn.py P08 --yes             # 확인 없이 추가 (배치용)
+python create_dn.py P08 --no-tax-date     # 세금계산서 발행일 전부 공란
+
 # DB sync & snapshot
 python sync_db.py                         # Excel → SQLite sync
 python close_period.py 2026-01            # Monthly close (snapshot)
@@ -87,6 +93,9 @@ Service layer (po_generator/services/document_service.py, finder_service.py)
 Generators (excel_generator.py=openpyxl, ts/pi/fi/oc_generator.py=xlwings)
     ↓
 Shared: config.py (paths, constants, aliases), utils.py (data loading), validators.py
+
+Data entry layer (문서 생성이 아니라 데이터 파일에 써 넣는 유일한 경로):
+  create_dn.py → dn_recorder.py (계산, COM 없음) → dn_writer.py (xlwings 쓰기)
 
 DB layer:
   sync_db.py → db_sync.py (Excel→SQLite, upsert+prune, FX 시트 언피벗) → db_schema.py (DDL + v_dn_revenue 뷰)
@@ -164,6 +173,7 @@ Reconciliation layer:
 | `dashboard.py` | Streamlit 대시보드 (9페이지: 오늘의현황/수주출고/제품/섹터/고객/발주커버리지/수익성/Order Book/동기화로그, PO미등록감지, PO확정지연, EXW미출고, 납기현황(DN qty매칭+PO EXW보충), 납기캘린더(선적예정 포함), 해외선적(Incoterms/운송방식별), 세금계산서미발행, Order Book 3탭, `_sync_log` 변경이력 조회) |
 | `reconcile_po.py` | PO 매입대사 — 공장 출고(Delivery) vs 회계 GRN 금액 비교. 출력: `대사결과_{period}.xlsx` (6시트), `AX_PO_매핑_{period}.xlsx` (Delivery+AX PO) |
 | `reconcile_so.py` | SO 매출대사 — AX ERP 매출 vs NOAH DN 매출 비교 (국내=출고일, 해외=선적일 기준 월 필터 + FX 환율차이 자동 판별). 출력: `대사결과_SO_{period}.xlsx` (3시트: 대사/상세/범례) |
+| `create_dn.py` + `po_generator/dn_recorder.py` / `dn_writer.py` | DN 출고기록 자동 입력 — 공장 출고리스트를 읽어 `DN_국내`에 추가. **문서를 만드는 게 아니라 마스터 워크북에 써 넣는 유일한 기능**이라 미리보기 → y/N → 백업 → 쓰기 순서다. 계산(`dn_recorder`)과 쓰기(`dn_writer`)를 나눈 건 계산을 COM 없이 테스트하기 위함. 아래 Business Rules 참조 |
 | `delivery_status.py` | 거래처 납기현황 회신 — 사업자번호로 `SO_국내` 미출고 조회 → `generated_ds/납기현황_*.xlsx` (납기현황/상세 2시트) → 메일 발송. **출고 여부는 시트 `Status`가 아니라 `DN_국내` 출고수량으로 직접 계산** (아래 Business Rules 참조) |
 | `reconcile_ind.py` | Industry Code 대사 — (1) Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 → `ind_code_결과_{period}.xlsx`, (2) SO Sector vs 마스터 Category 교차 검증 → `sector_검증.xlsx`. `--sector-only`로 검증만 실행 가능 |
 
@@ -216,6 +226,67 @@ Reconciliation layer:
   **Backlog는 "미출고"가 아니라 "미인식" 물량** — 물류상 미출고는 대시보드 `납기현황`/`EXW미출고`.
   N/A·선수금 폴백 사다리, 환율 결측 폴백 등 정확한 산식은 `v_dn_revenue`/`v_dn_by_month` 뷰
   (db_schema.py)와 `docs/POWER_QUERY.md`(Order_Book)가 소유한다 — 산문 사본을 늘리지 말 것
+- **DN 출고기록 자동 입력의 라인/수량은 `PO_국내.Status`가 정한다** (`create_dn.py`).
+  출고리스트는 "어느 주문이 언제 나갔는지"만 알려주고 **어느 라인이 몇 개인지는 없다**.
+  `Status = Invoiced P{XX}`가 공장이 그 달에 계산서를 끊은 라인 = 출고된 라인이다.
+      pending = 이 SO의 PO 라인 중 Status ∉ {Invoiced P01..P{XX}, Cancelled}
+      pending 없음 → `SO_국내` 전 라인의 잔량 (= Item qty − 그 출고일 **이전** DN 누계)
+      pending 있음 → `PO_국내` Invoiced P{XX} 라인의 Item qty 그대로
+  **PO만 보면 안 된다** — PO는 부속을 1라인에 합쳐 적는다(`SA09X-MA + ADAPTER`,
+  `NA015 (...) / 부싱가공`). SO 2라인이 PO 1라인이라 PO 기준으로만 뽑으면 부속이 통째로
+  빠진다(2026-03~08 실측 6건, 최대 360,000원). 반대로 `Cancelled`를 안 빼면 취소분이
+  출고로 잡힌다(같은 기간 2건). 출고일은 출고리스트 `납품완료`, DN_ID는 출고리스트 1행당 1개.
+- **DN 라인은 `SO_국내`에 살아 있는 라인만이다** — PO를 그대로 옮기면 안 된다.
+  **DN은 매출 장부**라서 담을 수 있는 건 실제로 판 것뿐인데, PO에는 그렇지 않은 것이 섞인다:
+  - **SO에 없는 PO 라인** = 매입만 발생 (`dn_recorder.sales_only`).
+    외주 가공비 같은 것 — 2026-05 `SOD-2026-0188` L4 'De-cluch Gear Box Bushing 하부 가공'
+    450,000원 (PO 4라인 / SO 3라인)
+  - **SO Status가 `Cancelled`/`Hold`인 라인** (`config.EXCLUDED_SO_STATUSES`).
+    판매가 취소돼도 공장은 이미 만든 것을 계산서로 넘기기도 한다 — 2026-07
+    `SOD-2026-0364` L5는 SO가 `Cancelled`인데 PO L5 'IP66 TEST 시료 값'은
+    `Invoiced P07` 1,000,000원. `SO_국내.Status`는 파워쿼리 캐시라 출고 여부 판정에는
+    쓰면 안 되지만 **취소/보류만은 이 컬럼으로만 알 수 있다**(취소 건은 DN이 영영 안 생겨
+    수량으로 구분 불가). 같은 상수를 `delivery_status.py`도 쓴다
+
+  둘 다 실데이터 불변식이다: DN 1,431행 중 SO에 없는 라인 **0건**,
+  SO Cancelled 44라인 중 DN에 있는 것 **0건**.
+  단, **금액 대조에서는 두 라인 다 살려 둔다** — 공장은 그것까지 계산서를 끊으므로
+  출고리스트 `계산서금액`에 포함돼 있다(0188 건: 14,610,800원에 450,000원이 들어 있다).
+  빼는 건 DN에 쓸 라인을 고를 때뿐. 이걸 안 빼면 `Unit Price` XLOOKUP이 SO에서 못 찾아
+  단가 0원짜리 행이 DN에 남는다
+  자동 입력은 **자기검증 통과분만** — 단일 날짜는 `Σ PO Total ICO == 계산서금액`.
+  **같은 SO가 여러 날 나갔으면 PO 행의 ICO를 날짜별 계산서금액에 배정한다**
+  (`split_by_amount`) — `PO_국내`는 분할출고마다 행을 따로 두므로 대개 정확히 나뉜다
+  (2026-03~07 실측 12건 중 10건 유일 배정, 모호 0건).
+  **안 나뉘는 이유를 구분해야 한다** (`_solve_split`의 사유):
+  - `no_split`(나눌 방법이 아예 없음) + 합계가 PO ICO와 일치 → **출고는 한 번이고
+    나머지는 단가 정정 행**이다. 첫 날 한 건으로 기록하고 뒤 행은 건너뛴다.
+    2026-05 `SOD-2026-0306`: 5/11 계산서 9,956,592 → 5/13에 `L260441-1R`로 103,616인데,
+    그 행은 `AMOUNT`가 10,060,208로 바뀐 **차액**이다 (출고는 5/11 8개 한 번뿐)
+  - `ambiguous`(결과가 갈림) → 출고는 여러 번인데 어느 쪽인지 모른다. 한 건으로 뭉치면
+    안 되고 '확인 필요'로 뺀다
+  - 계산서금액이 **음수**인 행이 섞이면(반품) 무조건 '확인 필요' — 출고/반품/재출고를
+    어떻게 적을지는 사람이 정한다 (2026-03 `SOD-2026-0280`)
+
+  `JOB NO`의 `-1R` 접미사로는 못 가른다 — JOB NO는 주문 단위라 정상 분할출고에도 붙는다.
+  세금계산서 발행일은 출고일과 동일하되 **월합 거래처**(기존 DN Remarks에서 유도)는 공란 +
+  Remarks 상속 — 그 거래처는 출고 시점에 계산서를 끊지 않는다.
+  멱등 판정은 `(SO_ID, 출고일)` **와** "라인·수량 조합이 **정확히 같은** 출고가 다른 날짜로
+  이미 기록됨" 둘 다 본다 (사람이 실제 출고일을 알고 하루 이틀 다른 날로 적는 경우가 있다 —
+  2026-03 `SOD-2026-0156`). 뒤쪽을 '라인별 누계 ≥ 필요수량'으로 보면 안 된다 — 분할출고에서
+  **뒤 회차가 앞 회차 수량에 가려 통째로 사라진다** (2026-07 `SOD-2026-0713`: 7/23 L1 1개를
+  8/6의 L1 2개가 덮었다).
+  뒤쪽 판정은 **실행 전 시트 상태만** 봐야 한다 — 실행 중 추가분까지 보면 한 SO가 여러 날
+  나갈 때 앞 출고 때문에 뒤 출고가 통째로 사라진다 (2026-05 `SOD-2026-0188`에서 실제로 났다).
+  출고리스트는 같은 주문·같은 날을 두 줄로 적기도 해서(`SOD-2026-0467`) 이벤트를
+  `(SO_ID, 출고일)`로 합친 뒤 순회한다
+- **`NOAH_SO_PO_DN.xlsx`는 openpyxl로 저장하면 안 된다** (`dn_writer.py`).
+  피벗 3개·파워쿼리 연결 14개·쿼리테이블이 들어 있고 openpyxl은 그것들을 읽지도 쓰지도
+  못해서 한 번 저장하면 통째로 사라진다. `reconcile_*.py`가 openpyxl을 쓰는 건 전부
+  **새 결과 파일**을 만들 때뿐이다. 표에 행을 더할 때는 **마지막 데이터 행을 타일 복사**한다 —
+  `DN_국내`에서 Excel이 자동으로 채우는 계산 열은 6개뿐이고 `Item`(XLOOKUP)·`Unit Price`·
+  `AX Project no`(배열 수식)는 수식이 있어도 `calculatedColumnFormula`가 없어 행을 늘려도
+  비어 있다. 복사하면 상대참조(`B1432` → `B1433`)가 따라오므로 그 위에 값 열만 덮어쓴다
 - 납기현황 요약 행은 **주문 × 요청납기 × 공장출고일** 단위다. 한 주문 안에서 두 날짜 중 하나라도
   다르면 행을 나눈다 — 대표값 하나로 접으면 나머지 납기 약속이 회신에서 사라진다.
   나뉜 행이 비고만으로 구분되지 않을 때만 `(품목: ...)`를 덧붙인다

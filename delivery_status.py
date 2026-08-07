@@ -75,6 +75,7 @@ from po_generator.config import (
     DS_MAIL_SUBJECT,
     DS_OUTPUT_DIR,
     DN_DOMESTIC_SHEET,
+    EXCLUDED_SO_STATUSES,
     NOAH_SO_PO_DN_FILE,
     SO_DOMESTIC_SHEET,
 )
@@ -106,9 +107,9 @@ logger = logging.getLogger(__name__)
 # 회신 대상 출고상태 — '출고 완료'만 빠진다
 PENDING_STATUSES: tuple[str, ...] = ('미출고', '부분 출고', '공장 출고')
 
-# 회신에서 통째로 빼는 주문 (캐시 여부와 무관하게 시트 Status로만 판단)
+# 회신에서 통째로 빼는 주문 (캐시 여부와 무관하게 시트 Status로만 판단).
 # 취소/보류는 DN이 영영 안 생기므로 수량으로는 구분할 수 없다.
-EXCLUDED_SO_STATUSES: frozenset[str] = frozenset({'Cancelled', 'Hold'})
+# 정의는 config에 있다 — `dn_recorder.py`도 같은 기준으로 DN 기록에서 뺀다.
 
 # EXW NOAH가 비어 있을 때 고객 회신에 찍을 문구
 DATE_TBD_LABEL = '처리중'
