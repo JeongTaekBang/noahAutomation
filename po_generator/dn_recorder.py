@@ -128,6 +128,20 @@ def find_delivery_file(recon_dir: Path, period: str) -> Path | None:
     return None
 
 
+def load_source_frames(workbook: Path,
+                       sheets: tuple[str, ...]) -> tuple[pd.DataFrame, ...]:
+    """워크북에서 시트들을 읽고 **파일 핸들을 반드시 닫는다**
+
+    `pd.ExcelFile`은 닫을 때까지 파일을 붙잡고 있다. 그대로 두면 뒤이어 Excel에게
+    같은 파일을 쓰기로 열라고 할 때 **우리 프로세스가 우리를 막는다** —
+    Excel은 읽기 전용으로 열거나(저장이 조용히 무시된다) 아예 열기에 실패한다.
+    2026-08-07 실사용에서 이 순서로 두 번 다 터졌다. 읽고 쓰는 CLI에서는
+    읽기 핸들을 넘기지 않는 것이 규약이다.
+    """
+    with pd.ExcelFile(workbook) as xf:
+        return tuple(pd.read_excel(xf, sheet) for sheet in sheets)
+
+
 def load_delivery(delivery_file: Path) -> pd.DataFrame:
     """출고리스트 Delivery 시트에서 SO_ID가 있는 행만 (N/A = 서비스 출고라 DN 대상 아님)"""
     df = pd.read_excel(delivery_file, sheet_name=DELIVERY_SHEET)

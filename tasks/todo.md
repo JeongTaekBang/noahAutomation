@@ -21,11 +21,14 @@
         `EXCLUDED_SO_STATUSES`는 `config.py`로 올려 `delivery_status.py`와 공유
       - 멱등: `(SO_ID, 출고일)` 중복 + **라인·수량이 정확히 같은 출고가 다른 날짜에 있으면** skip
       - 월합 거래처(기존 DN Remarks에서 유도) → 세금계산서 발행일 공란 + Remarks 상속
-- [x] **쓰기 실패를 성공이라고 보고하던 것 수정** (2026-08-07 실사용에서 발견):
-      워크북이 열려 있으면 두 번째 인스턴스가 `ReadOnly`로 열리는데, 메모리 쓰기는
-      멀쩡히 되고 표 범위도 늘어나 "4행 추가 완료"로 보고됐다. `Save()`는 조용히 무시.
-      → 열자마자 `ReadOnly` 확인해 **쓰기 전에** 중단 + 저장 후 파일 mtime·size 검증.
-      백업도 확인 뒤로 옮김. `tests/test_dn_writer.py` 8건
+- [x] **기록이 안 되던 것 수정** (2026-08-07 실사용에서 발견):
+      `create_dn.py`가 읽기용 `pd.ExcelFile` 핸들을 닫지 않아 **파이썬이 자기 파일을
+      막고** 있었다. Excel이 `ReadOnly`로 열리면 메모리 쓰기는 멀쩡히 되고 표 범위도
+      늘어나 "4행 추가 완료"로 보고되는데 `Save()`는 조용히 무시된다.
+      → (1) `load_source_frames()`로 읽기 핸들 반드시 닫기,
+      (2) 순서 교정 `닫힘 확인 → 백업 → Excel 열기` (Excel이 열면 읽기도 막혀 백업 불가),
+      (3) `open(path,'r+b')` 사전 판정 + `ReadOnly` 확인 + 저장 후 mtime·size 검증.
+      `tests/test_dn_writer.py` 10건 + 핸들 누수 감시 1건
 - [x] `po_generator/dn_writer.py` — xlwings 쓰기. **openpyxl 금지**(피벗 6·쿼리테이블 14 소실).
       마지막 행 타일 복사 → `ListObject.Resize` → 값 열만 배치 덮어쓰기(열당 COM 1회).
       쓰기 전 `generated_dn/backup/`에 사본(최근 10개). 열려 있는 워크북에 붙되

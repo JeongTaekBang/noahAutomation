@@ -68,6 +68,26 @@ def backup_workbook(source: Path, backup_dir: Path, keep: int = BACKUP_KEEP) -> 
     return target
 
 
+def _assert_closed_and_writable(workbook: Path) -> None:
+    """워크북이 닫혀 있고 쓸 수 있는지 — Excel을 띄우기 **전에** 확인
+
+    `open(path, 'r+b')`가 이 판정을 정확히 한다: Excel이(내 PC든 남의 PC든) 파일을
+    열고 있으면 PermissionError가 난다. COM을 띄우기 전에 알아야 하는 이유는 두 가지다 —
+    (1) Excel이 열면 읽기조차 막혀 백업 사본을 못 뜬다, (2) 그 뒤 `Save()`는 조용히
+    실패해 "완료"라고 보고하게 된다.
+    """
+    open_book = _find_open_book(workbook)
+    if open_book is not None:
+        raise RuntimeError(
+            f"'{workbook.name}'이 Excel에 열려 있습니다 — 닫고 다시 실행하세요.\n"
+            "       (열려 있으면 되돌릴 백업 사본을 뜰 수 없습니다)")
+    try:
+        with open(workbook, 'r+b'):
+            pass
+    except OSError as e:
+        raise RuntimeError(_busy_message(workbook, '쓰기로 열지', e)) from e
+
+
 def _busy_message(workbook: Path, verb: str, error: Exception) -> str:
     """COM 원문 대신 사람이 읽고 행동할 수 있는 문장으로
 
@@ -159,23 +179,25 @@ def append_lines(
     if not lines:
         raise ValueError("추가할 행이 없습니다")
 
-    book = _find_open_book(workbook)
-    opened_here = book is None
+    # 파일이 닫혀 있어야 한다. Excel이 워크북을 열면 **읽기조차 막혀서**(실측)
+    # 백업 사본을 뜰 수 없다 — 되돌릴 곳 없이 마스터 파일을 건드리게 된다.
+    # 그래서 '열려 있으면 붙어서 쓴다'가 아니라 '닫고 오라'가 규약이다.
+    _assert_closed_and_writable(workbook)
+
+    backup = (backup_workbook(workbook, backup_dir)
+              if backup_dir is not None else None)
+    before = workbook.stat()
+
+    book = None
     app = None
-    backup = None
     try:
-        if book is None:
-            app = xw.App(visible=False)
-            app.display_alerts = False
-            app.screen_updating = False
-            try:
-                book = app.books.open(str(workbook))
-            except Exception as e:
-                raise RuntimeError(_busy_message(workbook, '열지', e)) from e
-        elif not book.api.Saved:
-            raise RuntimeError(
-                f"'{workbook.name}'에 저장하지 않은 변경이 있습니다. "
-                "Excel에서 저장한 뒤 다시 실행하세요.")
+        app = xw.App(visible=False)
+        app.display_alerts = False
+        app.screen_updating = False
+        try:
+            book = app.books.open(str(workbook))
+        except Exception as e:
+            raise RuntimeError(_busy_message(workbook, '열지', e)) from e
 
         # 읽기 전용이면 **여기서 멈춰야 한다.** 쓰기 자체는 메모리에서 멀쩡히 되고
         # 표 범위도 늘어나지만, `Save()`는 예외도 없이 조용히 무시된다
@@ -184,12 +206,8 @@ def append_lines(
         if book.api.ReadOnly:
             raise RuntimeError(
                 f"'{workbook.name}'이 읽기 전용으로 열렸습니다 — 저장이 무시됩니다.\n"
-                "       Excel에서 이 파일을 열어 두었다면 닫고 다시 실행하세요.\n"
+                "       Excel에서 이 파일을 닫고 다시 실행하세요.\n"
                 "       (공유 폴더라 다른 PC에서 열고 있어도 읽기 전용이 됩니다)")
-
-        backup = (backup_workbook(workbook, backup_dir)
-                  if backup_dir is not None else None)
-        before = workbook.stat()
 
         sheet = book.sheets[sheet_name]
         result = _append_to_table(sheet, lines)
@@ -207,7 +225,7 @@ def append_lines(
                 "(파일이 그대로입니다). Excel에서 이 파일을 닫고 다시 실행하세요.")
         logger.debug("저장 완료: %s", workbook.name)
     finally:
-        if opened_here and app is not None:
+        if app is not None:
             try:
                 for wb in app.books:
                     wb.close()

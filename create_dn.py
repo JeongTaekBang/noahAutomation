@@ -65,6 +65,7 @@ from po_generator.dn_recorder import (
     build_plan,
     find_delivery_file,
     load_delivery,
+    load_source_frames,
 )
 from po_generator.logging_config import setup_logging
 from po_generator.mail_cli import confirm
@@ -245,10 +246,11 @@ def main() -> int:
 
     try:
         delivery = load_delivery(delivery_file)
-        xf = pd.ExcelFile(NOAH_SO_PO_DN_FILE)
-        so_df = pd.read_excel(xf, SO_DOMESTIC_SHEET)
-        po_df = pd.read_excel(xf, PO_DOMESTIC_SHEET)
-        dn_df = pd.read_excel(xf, DN_DOMESTIC_SHEET)
+        # 반드시 핸들을 닫고 넘어간다 — 열어 두면 뒤에서 Excel이 같은 파일을
+        # 쓰기로 못 연다 (우리 프로세스가 우리를 막는다)
+        so_df, po_df, dn_df = load_source_frames(
+            NOAH_SO_PO_DN_FILE,
+            (SO_DOMESTIC_SHEET, PO_DOMESTIC_SHEET, DN_DOMESTIC_SHEET))
     except Exception as e:
         print(f"{MSG_ERROR} 데이터 로드 실패: {e}")
         return 1

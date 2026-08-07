@@ -645,6 +645,23 @@ def test_no_tax_date는_전부_비운다():
     assert plan.lines[0].tax_date is None
 
 
+# === 파일 핸들 =============================================================
+
+def test_시트를_읽고_나면_파일을_붙잡고_있지_않는다(tmp_path):
+    """`pd.ExcelFile`을 닫지 않으면 뒤이어 Excel이 같은 파일을 쓰기로 못 연다 —
+    우리 프로세스가 우리를 막는다 (2026-08-07 실사용에서 두 번 터졌다).
+    Windows는 열린 핸들이 있으면 rename을 막으므로 그걸로 확인한다."""
+    book = tmp_path / "wb.xlsx"
+    with pd.ExcelWriter(book) as writer:
+        for sheet in ('SO_국내', 'PO_국내', 'DN_국내'):
+            pd.DataFrame({'A': [1]}).to_excel(writer, sheet_name=sheet, index=False)
+
+    frames = R.load_source_frames(book, ('SO_국내', 'PO_국내', 'DN_국내'))
+
+    assert len(frames) == 3
+    book.rename(tmp_path / "moved.xlsx")     # 핸들이 남아 있으면 PermissionError
+
+
 # === 기간 코드 ==============================================================
 
 @pytest.mark.parametrize('period,month', [('P01', 1), ('P8', 8), ('p12', 12)])
