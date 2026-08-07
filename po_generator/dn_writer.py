@@ -68,6 +68,21 @@ def backup_workbook(source: Path, backup_dir: Path, keep: int = BACKUP_KEEP) -> 
     return target
 
 
+def _busy_message(workbook: Path, verb: str, error: Exception) -> str:
+    """COM 원문 대신 사람이 읽고 행동할 수 있는 문장으로
+
+    Excel은 열기·저장 실패를 전부 같은 문구('cannot access the file' + 가능성 3가지)로
+    돌려준다 — 그대로 보여 주면 무엇을 해야 하는지 알 수 없다. 실제 원인은 거의 항상
+    "누가 잡고 있다"(Excel 창, 다른 PC, OneDrive 동기화)이므로 그걸 앞에 세운다.
+    """
+    return (
+        f"'{workbook.name}'을 {verb} 못했습니다 — 다른 곳에서 잡고 있는 것 같습니다.\n"
+        "       1) Excel에서 이 파일을 열어 두었다면 닫고 다시 실행하세요\n"
+        "       2) 공유 폴더라 다른 PC에서 열고 있어도 막힙니다\n"
+        "       3) OneDrive 동기화 중이면 끝난 뒤 다시 실행하세요\n"
+        f"       (원문: {error})")
+
+
 def _find_open_book(path: Path):
     """이미 Excel에 열려 있으면 그 워크북 반환 (없으면 None)
 
@@ -153,7 +168,10 @@ def append_lines(
             app = xw.App(visible=False)
             app.display_alerts = False
             app.screen_updating = False
-            book = app.books.open(str(workbook))
+            try:
+                book = app.books.open(str(workbook))
+            except Exception as e:
+                raise RuntimeError(_busy_message(workbook, '열지', e)) from e
         elif not book.api.Saved:
             raise RuntimeError(
                 f"'{workbook.name}'에 저장하지 않은 변경이 있습니다. "
@@ -176,7 +194,10 @@ def append_lines(
         sheet = book.sheets[sheet_name]
         result = _append_to_table(sheet, lines)
         book.app.calculate()
-        book.save()
+        try:
+            book.save()
+        except Exception as e:
+            raise RuntimeError(_busy_message(workbook, '저장하지', e)) from e
 
         # 저장이 진짜 파일에 닿았는지 확인 — COM은 실패를 조용히 삼킬 수 있다
         after = workbook.stat()

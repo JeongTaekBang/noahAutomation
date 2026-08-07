@@ -13,8 +13,9 @@ dn_writer.py 테스트
 
 from __future__ import annotations
 
-import datetime as dt
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -135,6 +136,48 @@ def test_저장_안_된_변경이_있으면_막는다(workbook, appended, monkey
         append_lines(workbook, SHEET, LINES)
 
     assert not appended
+
+
+def test_열기_실패는_행동할_수_있는_문장으로_바꾼다(workbook, appended, monkeypatch):
+    """Excel은 열기·저장 실패를 전부 같은 COM 문구로 돌려준다 — 그대로 보여 주면
+    무엇을 해야 하는지 알 수 없다"""
+    class Books:
+        def open(self, path):
+            raise Exception("Microsoft Excel cannot access the file ...")
+
+    class FakeExcelApp:
+        display_alerts = True
+        screen_updating = True
+
+        def __init__(self):
+            self.books = Books()
+            self.quit_called = False
+
+        def quit(self):
+            self.quit_called = True
+
+    app = FakeExcelApp()
+    use_book(monkeypatch, None)                    # 열려 있는 워크북 없음 → 새로 연다
+    # `append_lines`가 함수 안에서 `import xlwings as xw` 하므로 모듈을 갈아끼운다
+    monkeypatch.setitem(sys.modules, 'xlwings',
+                        SimpleNamespace(App=lambda **kw: app))
+
+    with pytest.raises(RuntimeError, match='닫고 다시 실행'):
+        append_lines(workbook, SHEET, LINES)
+
+    assert not appended
+    assert app.quit_called                         # 띄운 Excel은 반드시 정리한다
+
+
+def test_저장_실패도_같은_안내로_바꾼다(workbook, appended, monkeypatch):
+    class BoomBook(FakeBook):
+        def save(self):
+            raise Exception("Microsoft Excel cannot access the file ...")
+
+    use_book(monkeypatch, BoomBook(workbook))
+
+    with pytest.raises(RuntimeError, match='닫고 다시 실행'):
+        append_lines(workbook, SHEET, LINES)
 
 
 def test_추가할_행이_없으면_거부한다(workbook, monkeypatch):
