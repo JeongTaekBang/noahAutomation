@@ -144,12 +144,10 @@ def append_lines(
     if not lines:
         raise ValueError("추가할 행이 없습니다")
 
-    backup = (backup_workbook(workbook, backup_dir)
-              if backup_dir is not None else None)
-
     book = _find_open_book(workbook)
     opened_here = book is None
     app = None
+    backup = None
     try:
         if book is None:
             app = xw.App(visible=False)
@@ -161,10 +159,31 @@ def append_lines(
                 f"'{workbook.name}'에 저장하지 않은 변경이 있습니다. "
                 "Excel에서 저장한 뒤 다시 실행하세요.")
 
+        # 읽기 전용이면 **여기서 멈춰야 한다.** 쓰기 자체는 메모리에서 멀쩡히 되고
+        # 표 범위도 늘어나지만, `Save()`는 예외도 없이 조용히 무시된다
+        # (DisplayAlerts=False면 '다른 이름으로 저장' 대화상자도 안 뜬다).
+        # 그대로 두면 "완료 4행 추가"라고 보고하고 파일은 그대로다 — 2026-08-07 실측.
+        if book.api.ReadOnly:
+            raise RuntimeError(
+                f"'{workbook.name}'이 읽기 전용으로 열렸습니다 — 저장이 무시됩니다.\n"
+                "       Excel에서 이 파일을 열어 두었다면 닫고 다시 실행하세요.\n"
+                "       (공유 폴더라 다른 PC에서 열고 있어도 읽기 전용이 됩니다)")
+
+        backup = (backup_workbook(workbook, backup_dir)
+                  if backup_dir is not None else None)
+        before = workbook.stat()
+
         sheet = book.sheets[sheet_name]
         result = _append_to_table(sheet, lines)
         book.app.calculate()
         book.save()
+
+        # 저장이 진짜 파일에 닿았는지 확인 — COM은 실패를 조용히 삼킬 수 있다
+        after = workbook.stat()
+        if (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size):
+            raise RuntimeError(
+                f"'{workbook.name}' 저장이 파일에 반영되지 않았습니다 "
+                "(파일이 그대로입니다). Excel에서 이 파일을 닫고 다시 실행하세요.")
         logger.debug("저장 완료: %s", workbook.name)
     finally:
         if opened_here and app is not None:
