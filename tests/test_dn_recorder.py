@@ -611,15 +611,18 @@ def test_다른_연도_DN_ID는_채번에_끼어들지_않는다():
 
 # === 세금계산서 발행일 / Remarks ==============================================
 
-def test_기본은_세금계산서_발행일을_출고일과_같게_채운다():
+def test_세금계산서_발행일은_채우지_않는다():
+    """사람이 직접 입력하는 칸이다 (2026-08-07 사용자 지시).
+    발행 시점은 출고와 별개고, 이 날짜의 '월'이 Order Book 매출 인식월을 정한다 —
+    공란이면 미인식(Backlog 잔류)이라 잘못된 월에 매출이 잡히지 않는다."""
     plan = run(make_delivery([{}]), make_so([{}]), make_po([{}]), make_dn([]))
 
-    assert plan.lines[0].tax_date == pd.Timestamp(SHIP)
+    assert plan.lines[0].tax_date is None
     assert plan.lines[0].remarks is None
 
 
-def test_월합_거래처는_발행일을_비우고_Remarks를_물려받는다():
-    """월합 거래처는 출고 시점에 계산서를 끊지 않는다 (P08 엔이에스 실측)"""
+def test_월합_거래처는_Remarks를_물려받는다():
+    """나중에 발행일을 채울 때 어느 날짜를 쓸지 알 수 있어야 한다"""
     dn = make_dn([{'Business registration number': BIZ_A,
                    'Remarks': '25일 마감, 월합세금계산서'}])
 
@@ -636,13 +639,6 @@ def test_하이픈_표기가_달라도_같은_거래처로_본다():
     plan = run(make_delivery([{}]), make_so([{}]), make_po([{}]), dn)
 
     assert plan.lines[0].remarks == '월합 세금계산서'
-
-
-def test_no_tax_date는_전부_비운다():
-    plan = run(make_delivery([{}]), make_so([{}]), make_po([{}]), make_dn([]),
-               fill_tax_date=False)
-
-    assert plan.lines[0].tax_date is None
 
 
 # === 파일 핸들 =============================================================

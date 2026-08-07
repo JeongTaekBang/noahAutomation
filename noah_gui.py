@@ -111,7 +111,7 @@ DOC_TYPES: tuple[dict[str, object], ...] = (
     {
         'key': 'dn', 'label': 'DN 출고기록 (자동 입력)', 'script': 'create_dn.py',
         'id_label': '기간 코드', 'hint': '예: P08',
-        'out_attr': 'DN_OUTPUT_DIR', 'options': ('dn_write', 'dn_no_tax'),
+        'out_attr': 'DN_OUTPUT_DIR', 'options': ('dn_write',),
         'multi': False,
     },
 )
@@ -129,7 +129,6 @@ CHECKBOX_OPTIONS: dict[str, str] = {
     'ds_all': "출고완료 건까지 포함 (--all)",
     # 꺼져 있으면 --dry-run(미리보기만) — 마스터 워크북을 건드리는 유일한 기능이라 기본이 OFF다
     'dn_write': "워크북에 실제로 추가 (끄면 미리보기만)",
-    'dn_no_tax': "세금계산서 발행일 비우기 (--no-tax-date)",
 }
 
 
@@ -382,8 +381,6 @@ def build_command(doc_key: str, ids: list[str], options: dict[str, object]) -> l
         # 자식은 비대화형이라 y/N을 물을 수 없다 — 의도를 인자로 못 박는다.
         # 체크를 안 켰으면 미리보기까지만(--dry-run) 하고 워크북은 건드리지 않는다.
         cmd.append('--yes' if options.get('dn_write') else '--dry-run')
-        if options.get('dn_no_tax'):
-            cmd.append('--no-tax-date')
 
     # 메일을 지원하는 문서 — 자식은 비대화형이라 프롬프트가 자동으로 꺼지지만,
     # 의도를 명령에 남긴다 (로그에 그대로 찍혀 무엇을 눌렀는지 남는다)

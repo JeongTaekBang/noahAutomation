@@ -23,8 +23,11 @@ DN 출고기록 자동 입력 (Delivery Note Recorder)
 걸린 건은 워크북에 쓰지 않고 '확인 필요' 목록으로만 냅니다.
 2026-03~08 561건 리플레이 기준 자동 입력 549건 중 548건 정확(99.8%), 헛경보 0건.
 
-세금계산서 발행일은 출고일과 같게 채우되, 기존 DN에서 유도한 **월합 세금계산서 거래처**는
-비우고 Remarks를 물려줍니다 (그 거래처는 출고 시점에 계산서를 끊지 않는다).
+**세금계산서 발행일은 채우지 않습니다** — 사람이 직접 입력하는 칸입니다.
+발행 시점은 출고와 별개고(월합 거래처는 월말에 끊습니다) 이 날짜의 '월'이 Order Book
+매출 인식월을 정합니다. 공란이면 미인식(Backlog 잔류)이라 잘못된 월에 매출이 잡히지 않습니다.
+다만 **월합 거래처**(기존 DN Remarks에서 유도)는 Remarks를 물려줘, 나중에 발행일을
+채울 때 어느 날짜를 쓸지 알 수 있게 합니다.
 
 같은 기간을 여러 번 돌려도 안전합니다 — 이미 기록된 `(SO_ID, 출고일)`은 건너뜁니다.
 
@@ -32,7 +35,6 @@ DN 출고기록 자동 입력 (Delivery Note Recorder)
     python create_dn.py P08                # 미리보기 → y/N → 워크북에 추가
     python create_dn.py P08 --dry-run      # 미리보기 파일만 (워크북 안 건드림)
     python create_dn.py P08 --yes          # 확인 없이 추가 (배치용)
-    python create_dn.py P08 --no-tax-date  # 세금계산서 발행일 전부 공란
     python create_dn.py P08 -v             # 상세 로그
 """
 
@@ -221,9 +223,6 @@ def create_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         '--yes', '-y', action='store_true',
         help='확인 없이 워크북에 추가 (배치용)')
-    parser.add_argument(
-        '--no-tax-date', action='store_true',
-        help='세금계산서 발행일을 채우지 않음 (기본: 출고일과 동일)')
     parser.add_argument('-v', '--verbose', action='store_true', help='상세 로그')
     return parser
 
@@ -259,7 +258,6 @@ def main() -> int:
         plan = build_plan(
             period, delivery, so_df, po_df, dn_df,
             delivery_file=delivery_file,
-            fill_tax_date=not args.no_tax_date,
         )
     except ValueError as e:
         print(f"{MSG_ERROR} {e}")

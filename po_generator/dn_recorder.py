@@ -198,8 +198,8 @@ def settled_statuses(month: int) -> set[str]:
 def monthly_close_customers(dn_df: pd.DataFrame) -> dict[str, str]:
     """사업자번호 → 월합 Remarks (기존 DN에서 유도)
 
-    월합 거래처는 출고 시점에 세금계산서를 끊지 않으므로 발행일을 비우고 Remarks를 물려준다.
-    2026-08-06 실측: 이 규칙이 P08 수기 입력분(엔이에스 615-81-88675만 공란)을 그대로 재현한다.
+    월합 거래처는 출고 시점이 아니라 월말에 세금계산서를 끊는다. 그 사실을 Remarks로
+    물려주면 나중에 발행일을 채울 때 어느 날짜를 쓸지 알 수 있다.
     """
     if 'Remarks' not in dn_df.columns or 'Business registration number' not in dn_df.columns:
         return {}
@@ -233,16 +233,18 @@ def build_plan(
     dn_df: pd.DataFrame,
     *,
     delivery_file: Path | None = None,
-    fill_tax_date: bool = True,
 ) -> Plan:
     """출고리스트 → DN_국내 추가 행 계산
+
+    `세금계산서 발행일`은 **채우지 않는다** — 사람이 직접 입력하는 칸이다.
+    발행 시점은 출고와 별개고(월합 거래처는 월말에 끊는다) 이 날짜의 '월'이
+    Order Book 매출 인식월을 정한다. 공란이면 미인식(Backlog 잔류)이라
+    잘못된 월에 매출이 잡히는 일이 없다.
 
     Args:
         period: 기간 코드 (예: 'P08')
         delivery: `load_delivery()` 결과
         so_df/po_df/dn_df: `SO_국내` / `PO_국내` / `DN_국내`
-        fill_tax_date: 세금계산서 발행일을 출고일과 같게 채울지
-                       (월합 거래처는 이 값과 무관하게 항상 공란)
     """
     period = period.upper()
     month = period_month(period)
@@ -398,7 +400,6 @@ def build_plan(
         meta = so_meta.get(so_id, {})
         biz_no = normalize_biz_no(meta.get('biz_no'))
         remarks = monthly.get(biz_no)
-        tax_date = None if (remarks or not fill_tax_date) else ship_date
 
         dn_id = format_dn_id(year_hint, dn_seq)
         dn_seq += 1
@@ -410,7 +411,7 @@ def build_plan(
                 qty=int(qty_by_line[line_item]),
                 currency=str(meta.get('currency') or 'KRW'),
                 ship_date=ship_date,
-                tax_date=tax_date,
+                tax_date=None,      # 사람이 직접 입력하는 칸이다 (아래 주석 참고)
                 remarks=remarks,
                 seq=row_seq,
                 item_name=str(so_lines[so_id].get(line_item, ('', 0))[0]),
