@@ -77,6 +77,18 @@ class OrderData:
         """다중 아이템 여부"""
         return self.item_count > 1
 
+    @property
+    def all_items(self) -> pd.DataFrame:
+        """단일/다중을 가리지 않는 전체 아이템 (단일이면 1행짜리 DataFrame)
+
+        `items_df`는 **단일 아이템이면 None**이다. 그래서 이것을 그대로 들고 다니면
+        "여러 건을 모아서 처리하는" 코드가 단일 아이템만 모였을 때 조용히 비거나
+        터진다 — 2026-08-11 실측: 하루치 묶음 메일이 단일 아이템 DN만 모인 거래처에서
+        `pd.concat(... All objects passed were None)`으로 죽었다.
+        생성기들이 이미 `pd.DataFrame([order_data])`로 흡수하던 관용구를 여기 하나로 모은다.
+        """
+        return self.items_df if self.items_df is not None else pd.DataFrame([self.first_item])
+
 
 class FinderService:
     """데이터 조회 서비스

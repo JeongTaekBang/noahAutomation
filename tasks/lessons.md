@@ -259,3 +259,27 @@ DN에 있는 것 0건). **그리고 이 규칙은 이미 CLAUDE.md에 적혀 있
 "시트 `Status`는 `Cancelled`/`Hold` 제외에만 쓴다". 새 기능을 만들 때 **같은 시트를 읽는
 기존 코드가 무슨 필터를 걸고 있는지** 먼저 볼 것 (`delivery_status.py`에
 `EXCLUDED_SO_STATUSES`가 이미 있었고, 지금은 `config.py`로 올려 공유한다).
+
+## fixture가 실데이터의 모양을 흉내내지 않으면 그 경로는 검증된 적이 없다 (2026-08-11)
+하루치 묶음 메일(`--date 2026-08-10`)이 문서 6장을 다 만든 뒤 메일 단계에서 죽었다 —
+`pd.concat(...) ValueError: All objects passed were None`.
+원인은 `OrderData.items_df`가 **단일 아이템이면 `None`**이라는 것. 그걸 그대로
+`BuiltTS.items_df`에 담아 놓고 묶음에서 concat했다. 8/10 출고 6건이 전부 단일 아이템이라
+거래처 4곳 중 첫 통부터 터졌다.
+
+테스트 60개가 이 경로를 지나가는데도 못 잡았다. 이유는 하나다 — fixture(`make_built`)가
+`items_df=pd.DataFrame([order])`로 **항상 DataFrame**을 넘겼다. 실데이터에서는 그 자리에
+`None`이 오는데, 테스트는 한 번도 그 모양을 만들어 본 적이 없다. 다중 아이템으로만
+설계를 검증하고 단일 아이템은 "더 쉬운 경우"라고 넘긴 셈인데, 실제로는 **타입이 다른
+경우**였다.
+
+교훈:
+- **`X | None`을 반환하는 것을 필드에 담을 때는 담는 쪽에서 정규화한다.** 흘려보내면
+  나중에 모으는 코드(concat/sum/join)가 대신 터지고, 그때는 원인이 세 단계 떨어져 있다.
+  `OrderData.all_items`(단일이면 1행 DataFrame)를 만들어 네 곳에 흩어져 있던
+  `items_df if ... is not None else pd.DataFrame([first_item])` 관용구를 모았다.
+- **더 조용한 실패도 있었다.** 다중+단일이 섞인 묶음이면 concat이 `None`만 **말없이 건너뛰어**
+  단일 아이템 건의 발주번호가 메일에서 빠진다. 크래시는 8/10에 처음 났지만 이쪽은
+  8/6 씨앤케이 발송 때부터 있었을 수 있다 — **터진 것보다 안 터진 것이 늦게 발견된다.**
+- 회귀 테스트는 **가짜 BuiltTS가 아니라 진짜 `_build_ts_from_dn`을 지나가게** 썼다
+  (조회·생성만 대역). fixture가 틀렸던 것이 원인이니 fixture를 더 만들어 봐야 소용없다.

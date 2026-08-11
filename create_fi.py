@@ -148,11 +148,7 @@ def generate_fi_by_po(customer_po: str) -> bool:
         return False
 
     # 2. 매칭된 DN 정보 출력
-    items_df = (
-        order_data.items_df
-        if order_data.items_df is not None
-        else pd.DataFrame([order_data.first_item])
-    )
+    items_df = order_data.all_items
     dn_ids = items_df['DN_ID'].dropna().unique().tolist() if 'DN_ID' in items_df.columns else []
     print(f"  고객: {order_data.get_value('customer_name', 'N/A')}")
     if dn_ids:
@@ -213,11 +209,7 @@ def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
     _print_item_info(order_data)
 
     # 3. RCK PO 그룹 감지
-    items_df = (
-        order_data.items_df
-        if order_data.items_df is not None
-        else pd.DataFrame([order_data.first_item])
-    )
+    items_df = order_data.all_items
     rck_po_col = resolve_column(items_df.columns, 'rck_po')
 
     if rck_po_col:

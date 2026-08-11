@@ -261,7 +261,9 @@ class BuiltTS:
     doc_id: str
     output_file: Path
     order_data: pd.Series      # 대표 행 (사업자번호·고객명·출고일)
-    items_df: pd.DataFrame     # 문서에 실린 전체 아이템 (발주번호 수집용)
+    # 문서에 실린 전체 아이템 (발주번호 수집용). **단일 아이템이어도 1행짜리 DataFrame**이다 —
+    # `OrderData.items_df`는 단일이면 None이라 그대로 담으면 묶음 메일의 concat이 죽는다.
+    items_df: pd.DataFrame
 
 
 def _report_generation_error(doc_id: str, result) -> None:
@@ -322,7 +324,7 @@ def _build_ts_from_dn(dn_id: str, service: DocumentService) -> BuiltTS | None:
         doc_id=dn_id,
         output_file=result.output_file,
         order_data=order_data.first_item,
-        items_df=order_data.items_df,
+        items_df=order_data.all_items,
     )
 
 
@@ -513,7 +515,7 @@ def _build_ts_from_adv(advance_id: str, service: DocumentService) -> BuiltTS | N
         doc_id=advance_id,
         output_file=gen_result.output_file,
         order_data=order_data.first_item,
-        items_df=order_data.items_df,
+        items_df=order_data.all_items,
     )
 
 

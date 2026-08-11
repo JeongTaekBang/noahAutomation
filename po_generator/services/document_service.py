@@ -84,7 +84,7 @@ class DocumentService:
         DN에 여러 SO_ID가 섞여 있어도 모든 아이템을 매칭합니다.
         매칭 실패 시 원본 데이터를 그대로 반환합니다.
         """
-        items_df = order_data.items_df if order_data.items_df is not None else pd.DataFrame([order_data.first_item])
+        items_df = order_data.all_items
 
         # DN에 SO_ID가 없으면 스킵
         so_id_col = resolve_column(items_df.columns, 'so_id')
@@ -526,11 +526,7 @@ class DocumentService:
 
         # RCK PO 필터링
         if rck_po is not None:
-            items_df = (
-                order_data.items_df
-                if order_data.items_df is not None
-                else pd.DataFrame([order_data.first_item])
-            )
+            items_df = order_data.all_items
             rck_po_col = resolve_column(items_df.columns, 'rck_po')
             if rck_po_col:
                 filtered = items_df[items_df[rck_po_col] == rck_po]

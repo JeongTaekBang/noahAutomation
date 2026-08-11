@@ -11,6 +11,7 @@ Excel COM을 타지 않도록 생성 단계(`_build_ts_from_dn`)와 메일 발�
 
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -18,6 +19,7 @@ import pytest
 import create_ts
 from po_generator import mailer
 from po_generator.mail_cli import MailMode, MailOptions
+from po_generator.services.finder_service import OrderData
 from po_generator.utils import normalize_biz_no
 
 # 2026-08-06 씨앤케이엔지니어링 실측: DN 8건, DN마다 고객 발주번호가 다르다
@@ -84,6 +86,44 @@ def make_built(doc_id, customer, biz_no, po, tmp_path, date='2026-08-06'):
         doc_id=doc_id, output_file=path,
         order_data=order, items_df=pd.DataFrame([order]),
     )
+
+
+def _single_item_order(customer, biz_no, po, date='2026-08-10'):
+    """DN 한 줄 = 단일 아이템 (실제 조회 결과는 DataFrame이 아니라 Series다)"""
+    return pd.Series({
+        'Business registration number': biz_no,
+        'Customer name': customer,
+        'Customer PO': po,
+        '출고일': pd.Timestamp(date),
+    })
+
+
+class _FakeService:
+    """DocumentService 대역 — 조회는 주어진 행, 생성은 빈 파일 (Excel COM 없이)"""
+
+    def __init__(self, rows: dict, out_dir: Path):
+        self.rows = rows
+        self.out_dir = out_dir
+        self.finder = SimpleNamespace(
+            find_dn=lambda dn_id: OrderData.from_result(self.rows[dn_id]))
+
+    def generate_ts(self, doc_id, doc_type='DN'):
+        path = self.out_dir / f'TS_{doc_id}.xlsx'
+        path.write_bytes(b'dummy')
+        return SimpleNamespace(success=True, output_file=path)
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    """create_ts_mail 호출 인자 수집 (메일은 나가지 않는다)"""
+    calls = []
+
+    def fake_mail(**kw):
+        calls.append(kw)
+        return mailer.MailResult(success=True, sent=False, recipient=kw['recipient'])
+
+    monkeypatch.setattr(create_ts, 'create_ts_mail', fake_mail)
+    return calls
 
 
 @pytest.fixture
@@ -211,18 +251,6 @@ class TestGroupLabels:
 # === 묶음 실행 (생성 N장 → 메일 1통) ===
 
 class TestGenerateTsBatch:
-    @pytest.fixture
-    def sent(self, monkeypatch):
-        """create_ts_mail 호출 인자 수집"""
-        calls = []
-
-        def fake_mail(**kw):
-            calls.append(kw)
-            return mailer.MailResult(success=True, sent=False, recipient=kw['recipient'])
-
-        monkeypatch.setattr(create_ts, 'create_ts_mail', fake_mail)
-        return calls
-
     def _patch_builder(self, monkeypatch, built):
         registry = {one.doc_id: one for one in built}
         monkeypatch.setattr(
@@ -342,6 +370,39 @@ class TestGenerateTsBatch:
         assert '10042' not in sent[0]['customer_po']
         assert '26071408R0' not in sent[0]['customer_po']   # 섞인 문서의 발주번호도 빠진다
 
+    def test_single_item_docs_still_mail(self, df_customer, sent, monkeypatch, tmp_path):
+        """단일 아이템 DN만 모여도 메일이 나간다 (2026-08-10 실측 크래시)
+
+        `OrderData.items_df`는 **단일 아이템이면 None**이다. 그것을 그대로 BuiltTS에
+        담았더니 묶음의 `pd.concat`이 'All objects passed were None'으로 죽었다.
+        여기 fixture들이 늘 1행짜리 DataFrame을 넘겨서 못 잡던 자리다 — 그래서 이
+        테스트만은 **진짜 `_build_ts_from_dn`을 지나간다** (조회·생성만 대역).
+        """
+        rows = {
+            'DND-2026-0756': _single_item_order(AUTO_NAME, AUTO_BIZ, '10051'),
+            'DND-2026-0757': _single_item_order(AUTO_NAME, AUTO_BIZ, '10086'),
+        }
+        monkeypatch.setattr(
+            create_ts, 'DocumentService', lambda: _FakeService(rows, tmp_path))
+        opts = MailOptions(mode=MailMode.DRAFT, df_customer=df_customer)
+
+        ok = create_ts.generate_ts_batch(list(rows), opts)
+
+        assert ok is True
+        assert len(sent) == 1
+        assert len(sent[0]['xlsx_path']) == 2
+        # 발주번호도 둘 다 실린다 (None을 흘려보내면 concat이 조용히 건너뛴다)
+        assert sent[0]['customer_po'] == '10051, 10086'
+
+    def test_single_item_builder_fills_items_df(self, monkeypatch, tmp_path):
+        """BuiltTS.items_df는 단일 아이템이어도 None이 아니다 (묶음의 전제)"""
+        rows = {'DND-2026-0756': _single_item_order(AUTO_NAME, AUTO_BIZ, '10051')}
+        built = create_ts._build_ts_from_dn(
+            'DND-2026-0756', _FakeService(rows, tmp_path))
+
+        assert built is not None
+        assert len(built.items_df) == 1
+
     def test_advance_id_uses_advance_builder(self, df_customer, sent, monkeypatch, tmp_path):
         """선수금도 같은 거래처면 한 통에 담긴다 (조용히 빠지지 않는다)"""
         dn = make_built('DND-2026-0742', CK_NAME, CK_BIZ, 'PO-1', tmp_path)
@@ -360,17 +421,6 @@ class TestGenerateTsBatch:
 
 class TestSingleDocPath:
     """`--one-mail` 없이 ID 하나를 주는 기존 사용법은 그대로여야 한다"""
-
-    @pytest.fixture
-    def sent(self, monkeypatch):
-        calls = []
-
-        def fake_mail(**kw):
-            calls.append(kw)
-            return mailer.MailResult(success=True, sent=False, recipient=kw['recipient'])
-
-        monkeypatch.setattr(create_ts, 'create_ts_mail', fake_mail)
-        return calls
 
     def test_one_doc_one_mail(self, df_customer, sent, monkeypatch, tmp_path):
         built = make_built('DND-2026-0742', CK_NAME, CK_BIZ, '26071402R0', tmp_path)
