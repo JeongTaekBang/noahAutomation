@@ -48,6 +48,7 @@ import pandas as pd
 
 from po_generator.config import EXCLUDED_SO_STATUSES
 from po_generator.recon_paths import resolve_period_dir
+from po_generator.utils import resolve_column
 
 logger = logging.getLogger(__name__)
 
@@ -195,24 +196,53 @@ def settled_statuses(month: int) -> set[str]:
 
 # === 월합 세금계산서 거래처 ==================================================
 
-def monthly_close_customers(dn_df: pd.DataFrame) -> dict[str, str]:
-    """사업자번호 → 월합 Remarks (기존 DN에서 유도)
+def monthly_close_customers(
+    dn_df: pd.DataFrame,
+    customer_df: pd.DataFrame | None = None,
+) -> dict[str, str]:
+    """사업자번호 → 월합 Remarks (고객 마스터 우선, 기존 DN은 폴백)
 
     월합 거래처는 출고 시점이 아니라 월말에 세금계산서를 끊는다. 그 사실을 Remarks로
     물려주면 나중에 발행일을 채울 때 어느 날짜를 쓸지 알 수 있다.
+
+    1순위는 마스터(`Customer_국내.REMARK`)다 — 기존 DN에서 유도하면 거래처
+    약정이 바뀌었을 때 낡은 문구가 새 행에 계속 복제된다 (2026-08-24 실측:
+    마스터는 '월 25일 마감, 말일자 세금계산서'인데 기존 DN의
+    '25일 마감, 월합세금계산서'가 새 행 16개에 그대로 딸려왔다).
+    마스터에 월합 키워드가 없는 거래처만 2순위로 기존 DN 최빈값을 쓴다.
     """
-    if 'Remarks' not in dn_df.columns or 'Business registration number' not in dn_df.columns:
+    # 1순위: 고객 마스터
+    out: dict[str, str] = _master_monthly_remarks(customer_df)
+
+    # 2순위: 마스터에 없는 거래처만 기존 DN 최빈값으로
+    if 'Remarks' in dn_df.columns and 'Business registration number' in dn_df.columns:
+        remarks = dn_df['Remarks'].astype(str)
+        mask = remarks.str.contains('|'.join(MONTHLY_CLOSE_KEYWORDS), na=False)
+        for biz, grp in dn_df[mask].groupby('Business registration number'):
+            key = normalize_biz_no(biz)
+            if not key or key in out:
+                continue
+            counts = grp['Remarks'].dropna().astype(str).value_counts()
+            if len(counts):
+                out[key] = counts.index[0]
+    return out
+
+
+def _master_monthly_remarks(customer_df: pd.DataFrame | None) -> dict[str, str]:
+    """고객 마스터(Customer_국내)의 REMARK 중 월합 키워드에 걸리는 것만"""
+    if customer_df is None or customer_df.empty:
         return {}
-    remarks = dn_df['Remarks'].astype(str)
-    mask = remarks.str.contains('|'.join(MONTHLY_CLOSE_KEYWORDS), na=False)
+    biz_col = resolve_column(customer_df.columns, 'biz_no')
+    remark_col = resolve_column(customer_df.columns, 'remark')
+    if not biz_col or not remark_col:
+        return {}
     out: dict[str, str] = {}
-    for biz, grp in dn_df[mask].groupby('Business registration number'):
-        key = normalize_biz_no(biz)
-        if not key:
-            continue
-        counts = grp['Remarks'].dropna().astype(str).value_counts()
-        if len(counts):
-            out[key] = counts.index[0]
+    for _, row in customer_df.iterrows():
+        key = normalize_biz_no(row[biz_col])
+        value = row[remark_col]
+        remark = '' if pd.isna(value) else str(value).strip()
+        if key and any(k in remark for k in MONTHLY_CLOSE_KEYWORDS):
+            out[key] = remark
     return out
 
 
@@ -232,6 +262,7 @@ def build_plan(
     po_df: pd.DataFrame,
     dn_df: pd.DataFrame,
     *,
+    customer_df: pd.DataFrame | None = None,
     delivery_file: Path | None = None,
 ) -> Plan:
     """출고리스트 → DN_국내 추가 행 계산
@@ -245,6 +276,7 @@ def build_plan(
         period: 기간 코드 (예: 'P08')
         delivery: `load_delivery()` 결과
         so_df/po_df/dn_df: `SO_국내` / `PO_국내` / `DN_국내`
+        customer_df: `Customer_국내` (월합 Remarks의 우선 출처 — 없으면 DN 이력만)
     """
     period = period.upper()
     month = period_month(period)
@@ -264,7 +296,7 @@ def build_plan(
     # 갱신되는데, 그걸 같이 보면 한 SO가 여러 날 나갈 때 앞 출고 때문에 뒤 출고가
     # "이미 기록됨"으로 걸려 통째로 사라진다 (2026-05 SOD-2026-0188 실측).
     recorded_maps = _shipment_maps(dn_df)
-    monthly = monthly_close_customers(dn_df)
+    monthly = monthly_close_customers(dn_df, customer_df)
 
     # 출고 이벤트는 (SO_ID, 출고일) 단위 — 같은 주문·같은 날이 두 줄로 적히기도 한다
     # (2026-05 SOD-2026-0467 실측). 행마다 돌면 같은 출고를 두 번 기록하게 된다.

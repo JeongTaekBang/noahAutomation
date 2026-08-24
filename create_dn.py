@@ -53,6 +53,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 from po_generator.cli_common import generate_output_filename
 from po_generator.config import (
     BASE_DIR,
+    CUSTOMER_DOMESTIC_SHEET,
     DN_BACKUP_DIR,
     DN_DOMESTIC_SHEET,
     DN_OUTPUT_DIR,
@@ -247,9 +248,10 @@ def main() -> int:
         delivery = load_delivery(delivery_file)
         # 반드시 핸들을 닫고 넘어간다 — 열어 두면 뒤에서 Excel이 같은 파일을
         # 쓰기로 못 연다 (우리 프로세스가 우리를 막는다)
-        so_df, po_df, dn_df = load_source_frames(
+        so_df, po_df, dn_df, customer_df = load_source_frames(
             NOAH_SO_PO_DN_FILE,
-            (SO_DOMESTIC_SHEET, PO_DOMESTIC_SHEET, DN_DOMESTIC_SHEET))
+            (SO_DOMESTIC_SHEET, PO_DOMESTIC_SHEET, DN_DOMESTIC_SHEET,
+             CUSTOMER_DOMESTIC_SHEET))
     except Exception as e:
         print(f"{MSG_ERROR} 데이터 로드 실패: {e}")
         return 1
@@ -257,6 +259,7 @@ def main() -> int:
     try:
         plan = build_plan(
             period, delivery, so_df, po_df, dn_df,
+            customer_df=customer_df,
             delivery_file=delivery_file,
         )
     except ValueError as e:

@@ -641,6 +641,52 @@ def test_하이픈_표기가_달라도_같은_거래처로_본다():
     assert plan.lines[0].remarks == '월합 세금계산서'
 
 
+def make_customer(rows: list[dict]) -> pd.DataFrame:
+    """Customer_국내 형태 — 월합 Remarks의 우선 출처"""
+    return _frame({
+        '사업자번호': BIZ_A,
+        '거래처명': '엔이에스 주식회사',
+        'REMARK': None,
+    }, rows)
+
+
+def test_마스터_REMARK가_기존_DN_문구보다_우선한다():
+    """거래처 약정이 바뀌면 기존 DN에는 낡은 문구만 남는다 — 그걸 물려주면
+    새 행마다 복제된다 (2026-08-24 DND-2026-0788 실측: 마스터는
+    '월 25일 마감, 말일자 세금계산서'인데 기존 DN의 '25일 마감, 월합세금계산서'가
+    새 행 16개에 딸려왔다)"""
+    dn = make_dn([{'Business registration number': BIZ_A,
+                   'Remarks': '25일 마감, 월합세금계산서'}])
+    customer = make_customer([{'REMARK': '월 25일 마감, 말일자 세금계산서'}])
+
+    plan = run(make_delivery([{}]), make_so([{}]), make_po([{}]), dn,
+               customer_df=customer)
+
+    assert plan.lines[0].remarks == '월 25일 마감, 말일자 세금계산서'
+
+
+def test_마스터_REMARK에_월합_키워드가_없으면_기존_DN으로_폴백한다():
+    """마스터 REMARK는 결제조건 등 다른 메모일 수 있다 — 월합 문구만 가져온다"""
+    dn = make_dn([{'Business registration number': BIZ_A,
+                   'Remarks': '25일 마감, 월합세금계산서'}])
+    customer = make_customer([{'REMARK': '선수금 30%'}])
+
+    plan = run(make_delivery([{}]), make_so([{}]), make_po([{}]), dn,
+               customer_df=customer)
+
+    assert plan.lines[0].remarks == '25일 마감, 월합세금계산서'
+
+
+def test_기존_DN이_없어도_마스터가_월합이면_Remarks를_받는다():
+    """월합 거래처의 첫 출고 — DN 이력이 없어도 마스터만으로 안다"""
+    customer = make_customer([{'REMARK': '월말 마감, 월합세금계산서'}])
+
+    plan = run(make_delivery([{}]), make_so([{}]), make_po([{}]), make_dn([]),
+               customer_df=customer)
+
+    assert plan.lines[0].remarks == '월말 마감, 월합세금계산서'
+
+
 # === 파일 핸들 =============================================================
 
 def test_시트를_읽고_나면_파일을_붙잡고_있지_않는다(tmp_path):
