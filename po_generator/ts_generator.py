@@ -22,6 +22,7 @@ import xlwings as xw
 
 from po_generator.config import (
     TS_TEMPLATE_FILE,
+    TS_PO_REMARK_CUSTOMERS,
     ITEM_START_ROW_FALLBACK,
     VAT_RATE_DOMESTIC,
 )
@@ -53,6 +54,67 @@ LABEL_SEARCH_END = 50
 # ITEM_START_ROW는 config의 ITEM_START_ROW_FALLBACK 사용
 BASE_PO_ROW = 23           # PO No. 행 (폴백값)
 BASE_TOTAL_ROW = 25        # 합계 행 (폴백값)
+
+# SO 비고(호선명) 컬럼 — 문서 경로마다 이름이 다르다.
+# DN 경로는 load_dn_data()가 DN 자체 Remarks(월합 세금계산서 문구)와 구분하려고
+# 'SO Remarks'로 개명해 병합하고, 선수금(ADV) 경로는 SO_국내 행 그대로라 'Remarks'다.
+# 컬럼 유무로 추측하면 안 된다 — DN 아이템에도 'Remarks'는 있는데 그건 월합 문구다.
+SO_REMARK_COLUMNS = {'DN': 'SO Remarks', 'ADV': 'Remarks'}
+
+
+def build_po_cell_text(
+    order_data: pd.Series,
+    items_df: pd.DataFrame | None,
+    doc_type: str = 'DN',
+) -> str:
+    """하단 PO No. 칸 텍스트 — 발주번호 나열 + (지정 거래처만) SO 비고(호선명) 병기
+
+    조선 기자재 거래처(config.TS_PO_REMARK_CUSTOMERS)는 발주가 호선 단위라,
+    거래명세표에도 호선명이 있어야 고객이 어느 배 물량인지 안다.
+    형식은 발주번호별 괄호 병기 — 'OR26060022 (H-8327)'. 한 발주에 호선이 여럿이면
+    나열한다: 'SCT2605-134 (한화-H4394, 한화-H4395, 한화-H4396)' (2026-08 실측).
+    비고가 빈 발주번호는 지금처럼 번호만 적는다.
+
+    Args:
+        order_data: 대표 행 (거래처 판정용 고객명)
+        items_df: 문서에 실린 전체 아이템 (None이면 order_data 단건)
+        doc_type: 'DN' 또는 'ADV' — SO 비고 컬럼명이 갈린다 (SO_REMARK_COLUMNS)
+
+    Returns:
+        PO No. 칸에 쓸 문자열 (여러 발주번호면 콤마로 구분)
+    """
+    if items_df is None or 'Customer PO' not in items_df.columns:
+        return str(get_value(order_data, 'customer_po', '') or '')
+
+    # 발주번호: 등장 순서 유지 + 중복 제거 (기존 동작)
+    po_values = list(dict.fromkeys(
+        str(v).strip() for v in items_df['Customer PO'].dropna() if str(v).strip()
+    ))
+
+    remark_col = SO_REMARK_COLUMNS.get(doc_type)
+    customer_name = str(get_value(order_data, 'customer_name', '') or '')
+    show_remarks = (
+        remark_col is not None
+        and remark_col in items_df.columns
+        and any(keyword in customer_name for keyword in TS_PO_REMARK_CUSTOMERS)
+    )
+    if not show_remarks:
+        return ', '.join(po_values)
+
+    # 발주번호 ↔ 호선명 짝짓기 (호선명은 SO 라인 단위라 아이템 행에서 그대로 짝이 나온다)
+    remarks_by_po: dict[str, list[str]] = {}
+    for _, item in items_df.iterrows():
+        po = item.get('Customer PO')
+        remark = item.get(remark_col)
+        po_key = '' if pd.isna(po) else str(po).strip()
+        text = '' if pd.isna(remark) else str(remark).strip()
+        if po_key and text and text not in remarks_by_po.setdefault(po_key, []):
+            remarks_by_po[po_key].append(text)
+
+    return ', '.join(
+        f"{po} ({', '.join(remarks_by_po[po])})" if remarks_by_po.get(po) else po
+        for po in po_values
+    )
 
 
 def create_ts_xlwings(
@@ -101,7 +163,10 @@ def create_ts_xlwings(
 
             # DN/ADV 공통 처리 (remark만 다름)
             remark = '선수금' if doc_type == 'ADV' else ''
-            _fill_ts_data(ws, order_data, items_df, dispatch_date, remark, use_po_as_remark)
+            _fill_ts_data(
+                ws, order_data, items_df, dispatch_date, remark, use_po_as_remark,
+                doc_type=doc_type,
+            )
 
             # 임시 위치에 저장
             wb.save(str(temp_output))
@@ -197,6 +262,7 @@ def _fill_ts_data(
     dispatch_date: datetime,
     remark: str = '',
     use_po_as_remark: bool = False,
+    doc_type: str = 'DN',
 ) -> None:
     """거래명세표 데이터 채우기 (DN/ADV 공통) - 배치 쓰기 최적화
 
@@ -207,6 +273,7 @@ def _fill_ts_data(
         dispatch_date: 출고일
         remark: 비고 텍스트 (예: '선수금')
         use_po_as_remark: 월합 거래명세표 — 각 행 비고(C열)에 해당 아이템의 Customer PO 표기
+        doc_type: 'DN' 또는 'ADV' — PO No. 칸의 호선명 병기 시 SO 비고 컬럼명이 갈린다
     """
     # 아이템 준비
     if items_df is None:
@@ -273,12 +340,8 @@ def _fill_ts_data(
     row_shift = num_items - template_item_count
     label_search_end = LABEL_SEARCH_END + max(0, row_shift)
 
-    # PO No. 채우기 (여러 발주번호면 콤마로 구분)
-    if items_df is not None and 'Customer PO' in items_df.columns:
-        po_values = items_df['Customer PO'].dropna().unique()
-        customer_po = ', '.join(str(v) for v in po_values if str(v).strip())
-    else:
-        customer_po = get_value(order_data, 'customer_po', '')
+    # PO No. 채우기 (여러 발주번호면 콤마로 구분, 지정 거래처는 SO 비고의 호선명 병기)
+    customer_po = build_po_cell_text(order_data, items_df, doc_type)
     po_row = find_text_in_column_batch(ws, 'A', 'PO No', LABEL_SEARCH_START, label_search_end)
     if po_row is None:
         po_row = BASE_PO_ROW + row_shift

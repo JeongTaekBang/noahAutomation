@@ -1,3 +1,27 @@
+# 거래명세표 PO No. 옆 호선명(SO Remarks) 병기 (2026-08-25) — 완료
+
+사용자 요청: 거래명세표 하단 PO No. 옆에 `SO_국내.Remarks`(호선 이름)를 표시.
+대상은 **스칸텍·브이티엘·엔이에스·파나시아 4개 거래처만** (요청 원문의 '파나이사'는
+시트에 없고 '주식회사 파나시아'가 실데이터 — 오타로 판단).
+
+- [x] `config.py` — `TS_PO_REMARK_CUSTOMERS` (고객명 부분일치 키워드 4개)
+- [x] `utils.py: load_dn_data()` — SO 병합 컬럼에 `Remarks` 추가, 이름은 `SO Remarks`로
+      (DN_국내 자체 `Remarks`는 월합 세금계산서 문구라 뜻이 다름 — 충돌 방지 명시 개명.
+      suffix `_SO`에 맡기지 않은 이유: DN 컬럼 유무에 따라 이름이 달라져 소비처가 헛짚는다)
+- [x] `ts_generator.py` — `build_po_cell_text()`: 대상 거래처면 `PO (호선명)` 형식,
+      한 PO에 호선 여럿이면 나열 — `SCT2605-134 (한화-H4394, 한화-H4395, 한화-H4396)`.
+      경로별 컬럼은 `SO_REMARK_COLUMNS` 명시 (DN='SO Remarks', 선수금 ADV='Remarks' —
+      컬럼 유무로 추측하면 DN 월합 문구가 샌다). 단건/월합/묶음/선수금 네 경로 공통
+- [x] `tests/test_ts_generator.py` — 16건 (병기 6, 새면 안 되는 자리 4, 기존 PO 나열 회귀 4,
+      load_dn_data 'SO Remarks' 계약 2). 전체 스위트 787 passed, 2 skipped
+- [x] 실물 검증 — `DND-2026-0790`(스칸텍, 호선 3개) 생성 →
+      `B33 = 'SCT2605-134 (한화-H4394, 한화-H4395, 한화-H4396)'` 확인 후 검증 파일 삭제
+- [x] CLAUDE.md Business Rules + docs/TEMPLATE_MAPPINGS.md 반영
+
+리뷰: 다른 거래처 Remarks에는 내부 메모('노아->RCK 이관 건' 등)가 있어 4사 화이트리스트가
+안전장치다. 병기 텍스트는 병합 없는 B셀이라 오른쪽 빈 칸으로 흘러넘쳐 표시된다 —
+월합처럼 PO가 아주 많으면 길어지는 건 기존 PO 나열과 같은 성질(현행 유지).
+
 # DN_국내 출고기록 자동화 — `create_dn.py` (2026-08-07) — 완료
 
 사용자 요청: 매달 공장 출고리스트(`po_reconciliation/{year}/{period}/2026리스트_RCK_Pxx.xlsx`)를

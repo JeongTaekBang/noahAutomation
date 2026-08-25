@@ -428,9 +428,14 @@ def load_dn_data() -> pd.DataFrame:
         'Sales Unit Price',     # 판매단가
         'Total Sales',          # 총 판매금액
         'Business registration number',
+        'Remarks',              # SO 비고 (조선 기자재 거래처는 호선명이 여기 있다)
     ]
     so_cols = [c for c in so_cols if c in df_so.columns]
     df_so_subset = df_so[so_cols].copy()
+    # DN_국내에도 'Remarks'가 있지만 뜻이 다르다 — DN 쪽은 월합 세금계산서 문구,
+    # SO 쪽은 호선명. suffix('_SO')에 맡기지 않고 'SO Remarks'로 명시 개명한다 —
+    # suffix는 DN 컬럼 유무에 따라 이름이 달라져 소비처(ts_generator)가 헛짚게 된다.
+    df_so_subset = df_so_subset.rename(columns={'Remarks': 'SO Remarks'})
 
     # Line item 존재 시 SO_ID + Line item 복합키로 join (PO 로딩과 동일 패턴)
     join_keys = ['SO_ID']

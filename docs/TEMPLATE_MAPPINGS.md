@@ -33,7 +33,7 @@
 
 | 위치 | 필드명 | 설명 |
 |------|--------|------|
-| PO No 행 (B열) | PO No | Customer PO 번호 |
+| PO No 행 (B열) | PO No | Customer PO 번호. 조선 기자재 4사(`config.TS_PO_REMARK_CUSTOMERS`)는 SO_국내.Remarks의 호선명을 발주번호별 괄호 병기 — `SCT2605-134 (한화-H4394, ...)` |
 | 소계 행 | SUM | E/G/H열 합계 수식 |
 | 합계 행 (G열) | 합계 | 공급가 + 세액 |
 

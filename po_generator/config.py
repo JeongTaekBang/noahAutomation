@@ -451,6 +451,12 @@ class TSColumnWidths:
 
 TS_COLUMN_WIDTHS: Final[TSColumnWidths] = TSColumnWidths()
 
+# 거래명세표 하단 PO No. 옆에 SO_국내 Remarks(호선명)를 병기하는 거래처.
+# 조선 기자재 거래처는 발주가 호선 단위라 명세표에 호선명이 있어야 어느 배 물량인지
+# 알 수 있다 (2026-08-25 사용자 지시 — 이 4곳만). 고객명 부분일치로 판정한다
+# (시트 표기가 '주식회사 스칸텍'·'엔이에스 주식회사'처럼 법인 접두/접미가 제각각이라).
+TS_PO_REMARK_CUSTOMERS: Final[tuple[str, ...]] = ('스칸텍', '브이티엘', '엔이에스', '파나시아')
+
 
 # === 거래명세표 메일 발송 설정 ===
 # 수신자(To)는 Customer_국내에서 사업자번호로 조회하고, 아래 CC는 항상 붙는 고정 참조자.
