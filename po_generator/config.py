@@ -431,18 +431,29 @@ else:
 # === 거래명세표 열 너비 ===
 @dataclass(frozen=True)
 class TSColumnWidths:
-    """거래명세표 시트 열 너비"""
-    A: int = 8   # 월/일
-    B: int = 22  # DESCRIPTION
-    C: int = 10  # 비고
-    D: int = 8   # 규격 SIZE
-    E: int = 8   # 수량 QTY
-    F: int = 14  # 단가 UNIT/PRICE
-    G: int = 14  # 금액 AMOUNT
-    H: int = 14  # 세액 TAXABLE AMOUNT
-    I: int = 8   # 여유 열
+    """거래명세표 시트 열 너비 — 생성 시 ts_generator가 매번 적용 (템플릿 값 무시)
 
-    def as_dict(self) -> dict[str, int]:
+    본문만 보면 F(단가)·H(세액)가 과폭이지만(최대 단가 10자, 세액 9자) **줄이면
+    안 된다** — 상단 공급자 박스의 고정 문구가 같은 열을 쓴다 (2026-08-25 실측:
+    F=12·H=17로 줄였더니 상호·주소·종목이 잘렸다):
+      F3  상호 '로토크 콘트롤즈 코리아㈜' (9pt, 병합 없음)      → F ≥ 20
+      H5  종목 '기타운수및기계장비, 밸브류, 무역' (8pt)         → H ≥ 23.6
+      F4:H4 주소 '경기도 ... 야탑리더스빌딩 515' (11pt, 폭 49)  → F+G+H ≥ 50
+    그래서 B(품명)·C(비고)를 넓힐 폭은 A·D·E·G의 진짜 여유에서만 걷는다.
+    이전 템플릿은 B=22(품명 28%가 접힘)·C=10('한화-H4394' 폭 10도 두 줄)이었다.
+    인쇄가 fitToPage(축소)라 총폭이 늘면 글자가 작아진다 — 119.9 → 122.6(+2.2%)로 억제.
+    """
+    A: float = 11     # 월/일 ('12월 31일'=9, '인 수 자 :'=10)
+    B: float = 27     # DESCRIPTION (품명 p75=24, 'NLB3-AM5A/M25/BEACON TYPE'=25 한 줄)
+    C: float = 13     # 비고 (호선명 '한화-H4394'=10, 'PD5515(HPS)'=11 한 줄)
+    D: float = 7.5    # 규격 SIZE ('EA', 헤더 '규 격'=6)
+    E: float = 7.5    # 수량 QTY (헤더 '수 량'=6)
+    F: float = 20     # 단가 — 헤더 박스 상호(F3)가 정한 폭
+    G: float = 13     # 금액 AMOUNT (총합계 11자까지)
+    H: float = 23.6   # 세액 — 헤더 박스 종목(H5)이 정한 폭
+    I: float = 8      # 여유 열 (인쇄영역 밖)
+
+    def as_dict(self) -> dict[str, float]:
         return {
             'A': self.A, 'B': self.B, 'C': self.C, 'D': self.D,
             'E': self.E, 'F': self.F, 'G': self.G, 'H': self.H, 'I': self.I,

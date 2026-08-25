@@ -17,7 +17,11 @@ import pandas as pd
 import pytest
 
 from po_generator.config import DN_DOMESTIC_SHEET, SO_DOMESTIC_SHEET
-from po_generator.ts_generator import build_po_cell_text
+from po_generator.ts_generator import (
+    build_po_cell_text,
+    build_row_remark,
+    resolve_so_remark_column,
+)
 from po_generator import utils as po_utils
 
 
@@ -120,6 +124,63 @@ class TestVesselNameNotAppended:
             {'Customer PO': 'PO-1', 'SO Remarks': 'H-8327'},
         ), doc_type='PMT')
         assert result == 'PO-1'
+
+
+# === 본문 비고(C열)의 호선명 ===
+
+class TestRowRemark:
+    """행별 비고 우선순위: 월합 PO > 선수금 > 호선명 > 빈 값
+
+    호선명은 **비고가 비어 있을 자리에만** 들어간다 — 월합의 행별 발주번호와
+    선수금 표기는 문서의 성격을 말하는 기존 정보라 밀어내면 안 된다.
+    """
+
+    def test_vessel_fills_empty_remark(self):
+        """일반 DN + 지정 거래처: 행마다 제 호선 (배 3척짜리 문서에서 행 구분이 목적)"""
+        item = pd.Series({'Customer PO': 'SCT2605-134', 'SO Remarks': '한화-H4394'})
+        assert build_row_remark(item, so_remark_col='SO Remarks') == '한화-H4394'
+
+    def test_no_vessel_stays_empty(self):
+        item = pd.Series({'Customer PO': 'PO-1', 'SO Remarks': None})
+        assert build_row_remark(item, so_remark_col='SO Remarks') == ''
+
+    def test_non_target_customer_stays_empty(self):
+        """비대상 거래처(so_remark_col=None)는 기존 그대로 빈 비고"""
+        item = pd.Series({'Customer PO': 'PO-1', 'SO Remarks': '내부 메모'})
+        assert build_row_remark(item, so_remark_col=None) == ''
+
+    def test_merged_po_beats_vessel(self):
+        """월합은 행별 발주번호가 우선 — 발주↔호선 짝은 하단 PO No.가 보인다"""
+        item = pd.Series({'Customer PO': 'OR26060022', 'SO Remarks': 'H-8327'})
+        result = build_row_remark(item, use_po_as_remark=True, so_remark_col='SO Remarks')
+        assert result == 'OR26060022'
+
+    def test_advance_marker_beats_vessel(self):
+        """선수금 표기는 문서 성격이다 — 호선명이 밀어내면 안 된다"""
+        item = pd.Series({'Customer PO': 'PO-1', 'Remarks': 'H-8327'})
+        result = build_row_remark(item, remark='선수금', so_remark_col='Remarks')
+        assert result == '선수금'
+
+
+class TestResolveSoRemarkColumn:
+    """하단 병기와 본문 비고가 공유하는 관문"""
+
+    def test_target_customer_dn_path(self):
+        df = items({'Customer PO': 'PO-1', 'SO Remarks': 'H-8327'})
+        assert resolve_so_remark_column(order(), df) == 'SO Remarks'
+
+    def test_target_customer_adv_path(self):
+        df = items({'Customer PO': 'PO-1', 'Remarks': 'H-8327'})
+        assert resolve_so_remark_column(order(), df, doc_type='ADV') == 'Remarks'
+
+    def test_non_target_customer_is_none(self):
+        df = items({'Customer PO': 'PO-1', 'SO Remarks': '내부 메모'})
+        assert resolve_so_remark_column(order(CK), df) is None
+
+    def test_dn_path_ignores_dn_own_remarks(self):
+        """'SO Remarks' 없이 'Remarks'만 있으면 DN 경로에선 None — 월합 문구이기 때문"""
+        df = items({'Customer PO': 'PO-1', 'Remarks': '25일 마감, 월합세금계산서'})
+        assert resolve_so_remark_column(order(), df) is None
 
 
 # === 기존 동작 회귀 (호선명과 무관한 PO 나열) ===

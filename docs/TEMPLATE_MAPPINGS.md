@@ -20,10 +20,16 @@
 
 아이템 시작 행은 동적 탐지 (`TS_HEADER_LABELS`로 `월/일`, `품명` 등 검색).
 
+**열 너비는 템플릿이 아니라 `config.TS_COLUMN_WIDTHS`가 정한다** — 생성 시 매번 덮어쓴다.
+F(단가)·H(세액)는 본문 기준으로는 과폭이지만 상단 공급자 박스(상호 F3, 종목 H5, 주소 F4:H4)가
+같은 열을 쓰므로 줄이면 헤더가 잘린다. 근거 수치는 config의 `TSColumnWidths` 주석 참조.
+
 | 열 | 필드명 | 설명 |
 |----|--------|------|
 | A | 월/일 | 출고일 (MM/DD) |
-| B~D | 품명 | 품목명 (item_name) |
+| B | 품명 | 품목명 (item_name) |
+| C | 비고 | 월합=행별 Customer PO > 선수금='선수금' > 조선 기자재 4사=행별 호선명(SO_국내.Remarks) > 빈 값 (`build_row_remark`) |
+| D | 규격 | 고정값 "EA" |
 | E | 수량 | item_qty |
 | F | 단가 | unit_price |
 | G | 공급가 | 수량 × 단가 |

@@ -22,6 +22,7 @@ import xlwings as xw
 
 from po_generator.config import (
     TS_TEMPLATE_FILE,
+    TS_COLUMN_WIDTHS,
     TS_PO_REMARK_CUSTOMERS,
     ITEM_START_ROW_FALLBACK,
     VAT_RATE_DOMESTIC,
@@ -62,6 +63,55 @@ BASE_TOTAL_ROW = 25        # 합계 행 (폴백값)
 SO_REMARK_COLUMNS = {'DN': 'SO Remarks', 'ADV': 'Remarks'}
 
 
+def resolve_so_remark_column(
+    order_data: pd.Series,
+    items_df: pd.DataFrame | None,
+    doc_type: str = 'DN',
+) -> str | None:
+    """호선명을 표기할 문서인지 판정 — 맞으면 SO 비고 컬럼명, 아니면 None
+
+    하단 PO No. 병기와 본문 비고(C열) 표기가 같은 관문을 쓴다 —
+    지정 거래처(config.TS_PO_REMARK_CUSTOMERS, 고객명 부분일치)이고
+    경로별 SO 비고 컬럼(SO_REMARK_COLUMNS)이 실제로 있을 때만.
+    """
+    if items_df is None:
+        return None
+    remark_col = SO_REMARK_COLUMNS.get(doc_type)
+    customer_name = str(get_value(order_data, 'customer_name', '') or '')
+    if (
+        remark_col is not None
+        and remark_col in items_df.columns
+        and any(keyword in customer_name for keyword in TS_PO_REMARK_CUSTOMERS)
+    ):
+        return remark_col
+    return None
+
+
+def build_row_remark(
+    item: pd.Series,
+    remark: str = '',
+    use_po_as_remark: bool = False,
+    so_remark_col: str | None = None,
+) -> str:
+    """아이템 행 비고(C열) 텍스트
+
+    우선순위 — 기존 표기를 밀어내지 않는다:
+    1. 월합(use_po_as_remark): 행별 Customer PO (하단에서 발주번호↔호선 짝을 보인다)
+    2. 공통 remark: 선수금 문서의 '선수금' 표기
+    3. 지정 거래처의 호선명(SO 비고) — 비고가 비어 있을 자리에만 들어간다.
+       한 문서에 호선이 여럿이면(실측 DND-2026-0790: 12행에 배 3척) 하단 나열만으로는
+       어느 행이 어느 배인지 알 수 없어서 행마다 적는다
+    """
+    if use_po_as_remark:
+        return str(get_value(item, 'customer_po', '') or '')
+    if remark:
+        return remark
+    if so_remark_col is not None:
+        value = item.get(so_remark_col)
+        return '' if pd.isna(value) else str(value).strip()
+    return ''
+
+
 def build_po_cell_text(
     order_data: pd.Series,
     items_df: pd.DataFrame | None,
@@ -91,14 +141,8 @@ def build_po_cell_text(
         str(v).strip() for v in items_df['Customer PO'].dropna() if str(v).strip()
     ))
 
-    remark_col = SO_REMARK_COLUMNS.get(doc_type)
-    customer_name = str(get_value(order_data, 'customer_name', '') or '')
-    show_remarks = (
-        remark_col is not None
-        and remark_col in items_df.columns
-        and any(keyword in customer_name for keyword in TS_PO_REMARK_CUSTOMERS)
-    )
-    if not show_remarks:
+    remark_col = resolve_so_remark_column(order_data, items_df, doc_type)
+    if remark_col is None:
         return ', '.join(po_values)
 
     # 발주번호 ↔ 호선명 짝짓기 (호선명은 SO 라인 단위라 아이템 행에서 그대로 짝이 나온다)
@@ -156,6 +200,10 @@ def create_ts_xlwings(
             wb = app.books.open(str(temp_template))
             ws = wb.sheets[0]
 
+            # 0. 열 너비 — config가 단일 소스 (템플릿 값 무시). 줄바꿈·행 높이
+            # 자동 조정(_wrap_item_text)이 열 너비에 좌우되므로 데이터보다 먼저 적용
+            _apply_column_widths(ws)
+
             # 1. 헤더 정보 (출고일 사용)
             ws.range(CELL_DATE).value = f"DATE : {dispatch_date_str}"
             customer_name = get_value(order_data, 'customer_name', '')
@@ -179,6 +227,17 @@ def create_ts_xlwings(
     # 최종 출력 경로로 이동
     shutil.move(str(temp_output), str(output_path))
     logger.info(f"거래명세표 저장 완료: {output_path}")
+
+
+def _apply_column_widths(ws: xw.Sheet) -> None:
+    """열 너비 적용 — config.TS_COLUMN_WIDTHS가 단일 소스
+
+    템플릿 파일의 열 너비를 매번 덮어쓴다. 템플릿 이진 파일 속 값은 리뷰가 안 보여서
+    한번 어긋나면 계속 어긋난 채 나간다. 너비 근거(품명·비고를 넓히되 F·H는 상단
+    공급자 박스가 폭을 고정한다)는 config의 TSColumnWidths 주석이 소유한다.
+    """
+    for col, width in TS_COLUMN_WIDTHS.as_dict().items():
+        ws.range(f'{col}1').api.EntireColumn.ColumnWidth = width
 
 
 def _find_ts_subtotal_row(ws: xw.Sheet, start_row: int, max_search: int = 15) -> int:
@@ -317,8 +376,10 @@ def _fill_ts_data(
     ws.range(f'A{item_start_row}:H{end_row}').value = None
 
     # 아이템 데이터 배치 쓰기 (N개 아이템 * 8열 COM 호출 → 1회로 감소)
+    so_remark_col = resolve_so_remark_column(order_data, items_df, doc_type)
     total_amount, total_tax = _fill_items_batch(
-        ws, item_start_row, items_df, dispatch_date, remark, use_po_as_remark
+        ws, item_start_row, items_df, dispatch_date, remark, use_po_as_remark,
+        so_remark_col=so_remark_col,
     )
 
     # 품명·비고 줄바꿈 + 행 높이 자동 조정
@@ -362,6 +423,7 @@ def _fill_items_batch(
     dispatch_date: datetime,
     remark: str = '',
     use_po_as_remark: bool = False,
+    so_remark_col: str | None = None,
 ) -> tuple[int, int]:
     """아이템 데이터 배치 쓰기 (성능 최적화)
 
@@ -374,6 +436,7 @@ def _fill_items_batch(
         dispatch_date: 출고일
         remark: 비고 텍스트
         use_po_as_remark: True면 행별 비고를 해당 아이템의 Customer PO로 채움
+        so_remark_col: 지정 거래처의 호선명 컬럼 (resolve_so_remark_column 결과, 아니면 None)
 
     Returns:
         (총 금액, 총 세액)
@@ -418,11 +481,8 @@ def _fill_items_batch(
         total_amount += amount
         total_tax += tax
 
-        # 비고: 월합 케이스에선 행별 Customer PO, 그 외엔 공통 remark
-        if use_po_as_remark:
-            row_remark = str(get_value(item, 'customer_po', '') or '')
-        else:
-            row_remark = remark
+        # 비고: 월합=행별 PO > 선수금 > 지정 거래처 호선명 (build_row_remark)
+        row_remark = build_row_remark(item, remark, use_po_as_remark, so_remark_col)
 
         # 행 데이터: A(월/일), B(품명), C(비고), D(규격), E(수량), F(단가), G(금액), H(세액)
         data_2d.append([
