@@ -475,6 +475,10 @@ def print_summary_table(raw_data: pd.DataFrame, missing: pd.DataFrame,
         print(f"  {src}:  {src_total:>14,.0f}")
 
 
+# 분류 우선순위 — 요약 시트가 GRN을 '국내 우선'으로 귀속시키는 것과 같은 순서
+_VS_AX_ORDER = {'Product(국내)': 0, 'Product(해외)': 1, 'Service': 2}
+
+
 def _build_excel_vs_ax(df_po_period: pd.DataFrame, delivery: pd.DataFrame,
                        grn: pd.DataFrame) -> pd.DataFrame:
     """AX PO 단위로 Excel vs AX 금액 상세 비교 DataFrame 생성.
@@ -528,13 +532,42 @@ def _build_excel_vs_ax(df_po_period: pd.DataFrame, delivery: pd.DataFrame,
 
     excel_df = (pd.DataFrame(rows)
                 if rows else pd.DataFrame(columns=['분류', 'AX PO', 'Excel', '참조']))
+    excel_df['AX PO'] = excel_df['AX PO'].astype(str).str.strip()
 
     ax_agg = (grn.groupby('Purchase order', as_index=False)
               .agg(AX=('Cost amount physical', 'sum'))
               .rename(columns={'Purchase order': 'AX PO'}))
     ax_agg['AX'] = ax_agg['AX'].astype(float)
+    ax_agg['AX PO'] = ax_agg['AX PO'].astype(str).str.strip()
 
-    merged = excel_df.merge(ax_agg, on='AX PO', how='outer')
+    # 같은 AX PO가 두 분류에 걸릴 수 있다 (PO_국내 라인의 AX PO 오타가 직접출고 Service
+    # 건과 충돌 — 2026-08 P024792 실측). 그때 AX PO로 outer merge하면 GRN 1건이 분류
+    # 행마다 복제돼 AX 합계가 부풀고, 요약 시트(Service를 잔차로 계산 → AX 합계 ≡ GRN
+    # 총액)와 Diff 총액이 어긋난다. 요약은 GRN을 '국내 우선' 한 버킷에만 귀속시키므로
+    # 여기서도 같은 우선순위의 대표 1행에만 붙인다 → 두 시트가 항상 tie-out.
+    excel_df['_o'] = excel_df['분류'].map(_VS_AX_ORDER).fillna(3)
+    excel_df = (excel_df.sort_values(['_o', 'AX PO'], kind='stable')
+                .drop(columns='_o')
+                .reset_index(drop=True))
+    dup_mask = excel_df.duplicated('AX PO')
+    if bool(dup_mask.any()):
+        logger.warning(
+            "같은 AX PO가 여러 분류에 존재 %d건 — AX PO 오타 의심, GRN은 국내 우선 "
+            "1행에만 귀속: %s",
+            int(excel_df.loc[dup_mask, 'AX PO'].nunique()),
+            sorted(set(excel_df.loc[dup_mask, 'AX PO']))[:5],
+        )
+
+    ax_map = dict(zip(ax_agg['AX PO'], ax_agg['AX']))
+    excel_df['AX'] = 0.0
+    excel_df.loc[~dup_mask, 'AX'] = (excel_df.loc[~dup_mask, 'AX PO']
+                                     .map(ax_map).fillna(0.0).astype(float))
+
+    grn_only = ax_agg[~ax_agg['AX PO'].isin(set(excel_df['AX PO']))].copy()
+    grn_only['분류'] = 'Service'
+    grn_only['Excel'] = 0.0
+    grn_only['참조'] = ''
+    merged = pd.concat([excel_df, grn_only], ignore_index=True)
     merged['Excel'] = merged['Excel'].fillna(0.0)
     merged['AX'] = merged['AX'].fillna(0.0)
     merged['분류'] = merged['분류'].fillna('Service')
@@ -549,9 +582,8 @@ def _build_excel_vs_ax(df_po_period: pd.DataFrame, delivery: pd.DataFrame,
 
     merged['Diff'] = merged['AX'] - merged['Excel']
     merged = merged[['분류', 'AX PO', 'Excel', 'AX', 'Diff', '참조']]
-    merged['_o'] = merged['분류'].map(
-        {'Product(국내)': 0, 'Product(해외)': 1, 'Service': 2}).fillna(3)
-    merged = (merged.sort_values(['_o', 'AX PO'])
+    merged['_o'] = merged['분류'].map(_VS_AX_ORDER).fillna(3)
+    merged = (merged.sort_values(['_o', 'AX PO'], kind='stable')
               .drop(columns='_o')
               .reset_index(drop=True))
     return merged
