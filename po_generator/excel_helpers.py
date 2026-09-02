@@ -446,6 +446,140 @@ PROBE_COLUMN: str = 'Z'
 # 놓고 읽히므로, 두 문서의 줄 높이 규칙이 갈리면 바로 눈에 띈다.
 ITEM_NAME_MERGED_COLS: str = 'ABCD'
 
+# 라인별 HS CODE 판(Sectoriel 전용 CI·PL)은 D를 HS 열로 떼어내 품목명이 A:C만 쓴다.
+# **두 값 다 여기서만 정의하고, 고르는 것도 여기서 한다** — 생성기가 열 이름을 직접
+# 들고 있으면 CI와 PL이 갈라지고, 같은 봉투에 든 두 장이 다른 줄간격으로 나간다.
+# 호출부는 `hs_column=` 플래그만 넘긴다.
+ITEM_NAME_MERGED_COLS_HS: str = 'ABC'
+
+
+def _item_name_cols(hs_column: bool) -> str:
+    """품목명 병합이 걸치는 열 — HS 열을 쓰면 D를 내준다"""
+    return ITEM_NAME_MERGED_COLS_HS if hs_column else ITEM_NAME_MERGED_COLS
+
+
+HS_COLUMN_LETTER: str = 'D'
+HS_HEADER_TEXT: str = 'HS CODE'
+# 자동 맞춤은 딱 맞게 재서 글자가 테두리에 닿는다 — 좌우 여유를 조금 준다
+HS_COLUMN_PAD: float = 1.0
+
+
+def apply_hs_layout(
+    ws: xw.Sheet,
+    *,
+    header_row: int,
+    first_item_row: int,
+    last_row: int,
+    width_donors: tuple[str, ...],
+    doc_hs_cells: tuple[str, ...] = (),
+) -> None:
+    """아이템 격자에 HS CODE 열(D)을 만들어 낸다 — **임시 사본 위에서**
+
+    **왜 템플릿 파일을 따로 두지 않나.** 사본은 갈라진다 — 나중에 은행 계좌·주소·약관
+    URL을 고치면 고객 제출용 템플릿만 낡은 채로 남고, 그걸 막을 장치가 없다. 그래서
+    `prepare_template()`이 이미 떠 놓은 임시 사본을 고친다. 원본 xlsx는 손대지 않으므로
+    이미지·drawing·머리글·printerSettings가 전부 그대로 따라온다 (openpyxl로 다시 쓰면
+    머리글이 사라진다 — 실측 경고 `Cannot parse header or footer`).
+
+    **값을 채우기 전에, 행을 지우거나 삽입하기 전에** 부른다 — 그 시점에만 Total 행이
+    템플릿 좌표에 있다. 이후 복사·삽입되는 행은 첫 아이템 행의 A:C를 물려받고,
+    `layout_item_rows(hs_column=True)`가 한 번 더 보장한다.
+
+    아이템 격자에는 세로 괘선이 없어서(실측: 전 셀 left/right = None) D를 노출해도
+    빈 칸이 뚫려 보이지 않는다 — 가로선은 각 행이 이미 갖고 있다.
+
+    Args:
+        ws: xlwings Sheet
+        header_row: 열 이름 행 (Description/PO No./Quantity...)
+        first_item_row: 첫 아이템 행
+        last_row: 아이템 격자의 마지막 행 (Total 행)
+        width_donors: D 폭을 되돌리며 그만큼을 내줄 열들 (Σ(A..I) 불변)
+        doc_hs_cells: 비울 문서 단위 HS 셀. 라인별 코드와 한 장에 같이 남으면
+            **문서가 서로 다른 두 HS를 주장한다** (템플릿 기본값은 밸브 부품 코드)
+    """
+    col = HS_COLUMN_LETTER
+    std_cols, hs_cols = ITEM_NAME_MERGED_COLS, ITEM_NAME_MERGED_COLS_HS
+
+    # 표준판의 품목명 칸이 실제로 몇 pt인지 먼저 재 둔다 (병합을 풀기 전에)
+    target_pt = ws.range(f'{std_cols[0]}{first_item_row}:{std_cols[-1]}{first_item_row}').api.Width
+    hs_width_before = ws.range(f'{col}1').column_width
+
+    # 1. 품목명 병합 A:D → A:C (헤더·카테고리·아이템·Total 행이 한 덩어리라 2회로 끝난다)
+    span = f'{std_cols[0]}{header_row}:{std_cols[-1]}{last_row}'
+    ws.range(span).api.UnMerge()
+    ws.range(f'{hs_cols[0]}{header_row}:{hs_cols[-1]}{last_row}').api.Merge(True)
+
+    # 2. 헤더 칸 — 병합을 풀면 A의 서식을 물려받지 않으므로 옆 헤더(E)에서 가져온다
+    neighbor = ws.range(f'E{header_row}')
+    header_cell = ws.range(f'{col}{header_row}')
+    header_cell.value = HS_HEADER_TEXT
+    header_cell.api.Font.Bold = neighbor.api.Font.Bold
+    header_cell.api.Font.Size = neighbor.api.Font.Size
+    header_cell.api.HorizontalAlignment = XlConstants.xlCenter
+
+    # 3. 아이템 칸 — 텍스트 서식을 **쓰기 전에** 걸어야 '85013100'이 숫자로 변환돼
+    #    우측 정렬되는 것을 막는다. 세로 가운데는 품목명이 2~3줄로 접힌 행에서 필요하다.
+    item_cells = ws.range(f'{col}{first_item_row}:{col}{last_row}')
+    item_cells.api.NumberFormat = '@'
+    item_cells.api.HorizontalAlignment = XlConstants.xlCenter
+    item_cells.api.VerticalAlignment = XlConstants.xlCenter
+    item_cells.api.Font.Size = ws.range(f'A{first_item_row}').api.Font.Size
+
+    # 3-1. D 폭은 **Excel에게 재게 한다** — 템플릿의 원래 D 폭(약 7자)으로는 굵은 헤더
+    #      'HS CODE'와 8자리 코드가 둘 다 잘린다 (2026-09-02 실측: 'IS COD', '3535290').
+    #      폰트 폭을 코드로 추정하지 않고, 8자리 표본을 넣어 자동 맞춤을 시킨 뒤 치운다
+    #      (표의 코드는 전부 8자리 — `tests/test_hs_code.py`가 감시).
+    probe = ws.range(f'{col}{first_item_row}')
+    probe.value = '0' * 8
+    ws.range(f'{col}:{col}').api.EntireColumn.AutoFit()
+    probe.value = ''
+    ws.range(f'{col}1').column_width = ws.range(f'{col}1').column_width + HS_COLUMN_PAD
+
+    # 4. 열 폭 — **파일에 적힌 숫자를 그대로 쓰지 않고 시트를 재서 맞춘다.**
+    #    COM의 `ColumnWidth`(문자)와 저장되는 width는 열 패딩만큼 다르고(실측 0.83자),
+    #    병합 칸의 pt 폭은 걸친 열 수만큼 패딩이 더 붙는다 (A:D는 A:C보다 패딩 1개 더).
+    #    그래서 "A:C가 표준판 A:D와 같은 pt가 되도록" C를 키우고, 같은 문자 수를
+    #    기부 열에서 뺀다 — 모든 열이 같은 폰트라 문자 수 합이 보존되면 인쇄 폭도 보존된다.
+    name_cell = ws.range(f'{hs_cols[0]}{first_item_row}:{hs_cols[-1]}{first_item_row}')
+    grow_col = hs_cols[-1]
+    grow_chars = ws.range(f'{grow_col}1').column_width
+    grow_pt = ws.range(f'{grow_col}{first_item_row}').api.Width
+    if grow_pt <= 0 or grow_chars <= 0:
+        return
+
+    pt_per_char = grow_pt / grow_chars
+    name_delta = (target_pt - name_cell.api.Width) / pt_per_char
+    ws.range(f'{grow_col}1').column_width = grow_chars + name_delta
+    needed = name_delta + (ws.range(f'{col}1').column_width - hs_width_before)
+
+    # 기부 몫을 어떻게 나눌지도 **추측하지 않는다.** 폭에 비례해 걷으면 헤더가 긴 열이
+    # 먼저 잘린다 (실측: CI 'Quantity' → 'Quantit', PL 'Measurement' → 'Measurem',
+    # 'Gross Weight' 2줄 클립). 각 열을 제 내용에 맞춰 재게 해서 **진짜 여유만** 걷는다.
+    before = {c: ws.range(f'{c}1').column_width for c in width_donors}
+    for letter in width_donors:
+        ws.range(f'{letter}:{letter}').api.EntireColumn.AutoFit()
+    freed = sum(before[c] - ws.range(f'{c}1').column_width for c in width_donors)
+
+    # 그래도 모자란다 — 실측 여유는 3~5자인데 필요한 건 12자 남짓이다. 오른쪽 블록은
+    # 헤더가 길어(`Gross Weight`·`Measurement`·`Payment terms:`) 짜낼 것이 없다.
+    # **모자란 만큼은 인쇄 배율로 흡수한다**: 열 폭을 건드리지 않으므로 줄바꿈과 행 높이가
+    # 표준판과 완전히 같고(= 같은 봉투의 두 장이 줄 단위로 일치), 폭만 한 페이지에 맞춰
+    # 줄어든다. 품목명을 좁히는 대안은 200줄이 406 → 505줄로 늘어 쪽수가 갈린다.
+    ws.api.PageSetup.Zoom = False
+    ws.api.PageSetup.FitToPagesWide = 1
+    ws.api.PageSetup.FitToPagesTall = False
+
+    logger.debug(
+        f"폭 재배분: {grow_col} +{name_delta:.2f}자, {col} +{needed - name_delta:.2f}자, "
+        f"기부 열 {list(width_donors)}에서 {freed:.2f}자 회수 → 나머지는 인쇄 배율로 흡수"
+    )
+
+    # 5. 문서 단위 HS 비우기
+    for cell in doc_hs_cells:
+        ws.range(cell).value = ''
+
+    logger.debug(f"HS 열 배치 적용: {col}{header_row}~{col}{last_row}")
+
 # 아이템 그리드 내부 가로선 색 — 템플릿 상단 규칙선(#BBBBBB thin)과 같은 톤.
 # 검정 thin은 PDF로 나가면 0.96pt 실선이라(캘리브레이션 실측: hairline=0.12 /
 # thin=0.96 / medium=1.92pt) 격자 전체가 유독 무겁게 보인다(2026-08-05 보고).
@@ -454,7 +588,13 @@ ITEM_NAME_MERGED_COLS: str = 'ABCD'
 ITEM_GRID_INNER_COLOR: int = 0xBBBBBB
 
 
-def ensure_row_merges(ws: xw.Sheet, start_row: int, end_row: int) -> None:
+def ensure_row_merges(
+    ws: xw.Sheet,
+    start_row: int,
+    end_row: int,
+    *,
+    hs_column: bool = False,
+) -> None:
     """아이템 행마다 품목명 칸(A:D) 병합을 다시 보장한다
 
     **행을 복사해 삽입하면 일부 행이 병합을 잃는다.** 48아이템 OC를 만들어 보니
@@ -467,18 +607,21 @@ def ensure_row_merges(ws: xw.Sheet, start_row: int, end_row: int) -> None:
 
     값을 채운 뒤에 불러도 안전하다 — 병합은 좌상단(A열) 값만 남기는데 품목명이 거기 있다.
 
-    병합 범위는 `ITEM_NAME_MERGED_COLS` 고정이다 — 문서 5종이 같은 값을 쓰는 것이
-    불변식이라 인자로 열어 두지 않는다 (CI·PL은 늘 같이 첨부되어 나란히 읽힌다).
+    병합 범위는 `ITEM_NAME_MERGED_COLS`(A:D) 하나가 기본이다 — 문서 5종이 같은 값을
+    쓰는 것이 불변식이다 (CI·PL은 늘 같이 첨부되어 나란히 읽힌다). 예외는 라인별 HS
+    CODE 판 하나뿐이라, 열 이름 대신 `hs_column` 플래그로만 고르게 한다 (문자열을
+    받으면 생성기마다 제각각이 된다).
 
     Args:
         ws: xlwings Sheet
         start_row: 첫 행
         end_row: 마지막 행
+        hs_column: D를 HS CODE 열로 쓰는 판이면 True (품목명은 A:C)
     """
     if end_row < start_row:
         return
 
-    cols = ITEM_NAME_MERGED_COLS
+    cols = _item_name_cols(hs_column)
     span = f'{cols[0]}{start_row}:{cols[-1]}{end_row}'
     rng = ws.range(span).api
     rng.UnMerge()
@@ -595,6 +738,8 @@ def autofit_merged_rows(
     start_row: int,
     end_row: int,
     texts: list[str],
+    *,
+    hs_column: bool = False,
 ) -> list[float]:
     """병합 셀이 든 행의 높이를 내용에 맞게 키운다
 
@@ -623,6 +768,7 @@ def autofit_merged_rows(
         start_row: 첫 아이템 행
         end_row: 마지막 아이템 행
         texts: 각 행에 들어간 텍스트 (길이가 행 수와 같아야 한다)
+        hs_column: D를 HS CODE 열로 쓰는 판이면 True (품목명 폭이 A:C로 좁아진다)
 
     Returns:
         각 행에 적용된 높이 (pt) — 페이지 계산에 그대로 쓴다
@@ -638,7 +784,7 @@ def autofit_merged_rows(
         raise ValueError(f"texts {len(texts)}개 != 행 {num_rows}개 ({start_row}~{end_row})")
 
     measured = _measure_wrapped_heights(
-        ws, start_row, end_row, texts, ITEM_NAME_MERGED_COLS
+        ws, start_row, end_row, texts, _item_name_cols(hs_column)
     )
     heights = [max(MIN_ITEM_ROW_HEIGHT, m + ROW_HEIGHT_PAD) for m in measured]
 
@@ -749,7 +895,13 @@ def layout_address_rows(
     )
 
 
-def layout_item_rows(ws: xw.Sheet, start_row: int, texts: list[str]) -> list[float]:
+def layout_item_rows(
+    ws: xw.Sheet,
+    start_row: int,
+    texts: list[str],
+    *,
+    hs_column: bool = False,
+) -> list[float]:
     """아이템 행 마무리 손질: 병합 보장 → 행 높이 교정 (문서 5종 공통)
 
     행 복사·삽입은 병합을 잃을 수 있고(`ensure_row_merges` docstring의 실측),
@@ -761,6 +913,7 @@ def layout_item_rows(ws: xw.Sheet, start_row: int, texts: list[str]) -> list[flo
         ws: xlwings Sheet
         start_row: 첫 아이템 행
         texts: 각 행의 품목명 — 행 수는 len(texts)로 정한다
+        hs_column: D를 HS CODE 열로 쓰는 판이면 True (병합·측정이 모두 A:C 기준)
 
     Returns:
         각 행에 적용된 높이 (pt)
@@ -768,7 +921,7 @@ def layout_item_rows(ws: xw.Sheet, start_row: int, texts: list[str]) -> list[flo
     if not texts:
         return []
     end_row = start_row + len(texts) - 1
-    ensure_row_merges(ws, start_row, end_row)
-    return autofit_merged_rows(ws, start_row, end_row, texts)
+    ensure_row_merges(ws, start_row, end_row, hs_column=hs_column)
+    return autofit_merged_rows(ws, start_row, end_row, texts, hs_column=hs_column)
 
 

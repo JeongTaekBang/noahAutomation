@@ -20,10 +20,12 @@ from pathlib import Path
 import pandas as pd
 import xlwings as xw
 
-from po_generator.config import PL_TEMPLATE_FILE
+from po_generator.config import PL_HS_WIDTH_DONORS, PL_TEMPLATE_FILE
+from po_generator.hs_code import HS_COLUMN
 from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
     XlConstants,
+    apply_hs_layout,
     xlwings_app_context,
     prepare_template,
     cleanup_temp_file,
@@ -54,6 +56,12 @@ ITEM_START_ROW = 20
 
 # 아이템 열 (E=Customer PO, F=Qty, G=Net Weight, H=Gross Weight, I=CBM)
 COL_ITEM_NAME = 'A'
+# 라인별 HS CODE 판에서만 쓰는 열. 표준판에서는 D가 품목명 병합(A:D) 안이라
+# 여기에 쓰지 않는다 — `apply_hs_layout()`이 병합을 A:C로 줄여 D를 열어 준 뒤에만 쓴다.
+COL_HS_CODE = 'D'
+# 템플릿에 박힌 문서 단위 HS(밸브 부품 코드). 라인별 판에서는 비운다 —
+# 한 장이 서로 다른 두 HS를 주장하면 통관에서 어느 쪽을 믿을지 알 수 없다.
+CELLS_DOC_HS = ('H12', 'I12')
 COL_CUSTOMER_PO = 'E'
 COL_QTY = 'F'
 COL_NET_WEIGHT = 'G'    # Net Weight (KG/PC)
@@ -80,7 +88,10 @@ def create_pl_xlwings(
         order_data: 주문 데이터 (첫 번째 아이템 또는 단일 아이템)
         items_df: 다중 아이템인 경우 전체 아이템 DataFrame
     """
-    temp_template, temp_output = prepare_template(template_path, "pl")
+    hs_mode = items_df is not None and HS_COLUMN in items_df.columns
+    temp_template, temp_output = prepare_template(
+        template_path, "pl_hs" if hs_mode else "pl",
+    )
 
     try:
         with xlwings_app_context() as app:
@@ -214,6 +225,18 @@ def _fill_items(
     template_item_count = total_row - ITEM_START_ROW
     logger.debug(f"템플릿 아이템 수: {template_item_count}, 실제 아이템 수: {num_items}")
 
+    # 라인별 HS 판이면 임시 사본의 아이템 격자에 D열을 만들어 낸다.
+    # 행을 지우거나 삽입하기 전에 해야 Total 행이 아직 템플릿 좌표에 있다.
+    if HS_COLUMN in items_df.columns:
+        apply_hs_layout(
+            ws,
+            header_row=ITEM_START_ROW - 2,
+            first_item_row=ITEM_START_ROW,
+            last_row=total_row,
+            width_donors=PL_HS_WIDTH_DONORS,
+            doc_hs_cells=CELLS_DOC_HS,
+        )
+
     if num_items < template_item_count:
         rows_to_delete = template_item_count - num_items
         delete_rows_range(ws, ITEM_START_ROW + num_items, rows_to_delete)
@@ -234,7 +257,7 @@ def _fill_items(
     # (복사·삽입한 행은 병합을 잃을 수 있고, 병합 칸은 autofit이 먹지 않는다.
     #  PL과 CI는 늘 같이 첨부되므로 같은 공용 헬퍼를 그대로 쓴다 — 규칙이 갈리면 안 된다)
     names = _fill_items_batch(ws, items_df)
-    layout_item_rows(ws, ITEM_START_ROW, names)
+    layout_item_rows(ws, ITEM_START_ROW, names, hs_column=HS_COLUMN in items_df.columns)
 
     _update_total_row(ws, num_items)
 
@@ -343,6 +366,11 @@ def _fill_items_batch(
 
     # 열별 배치 쓰기 (6회 COM 호출)
     ws.range(f'{COL_ITEM_NAME}{ITEM_START_ROW}:{COL_ITEM_NAME}{end_row}').value = [[n] for n in names]
+    if HS_COLUMN in items_df.columns:
+        # 코드는 items_df에 열로 붙어 있다 — 정렬을 거쳐도 행과 함께 움직이므로
+        # 별도 리스트로 넘길 때처럼 순서가 어긋날 수 없다.
+        hs_codes = [to_text(code) for code in items_df[HS_COLUMN]]
+        ws.range(f'{COL_HS_CODE}{ITEM_START_ROW}:{COL_HS_CODE}{end_row}').value = [[c] for c in hs_codes]
     ws.range(f'{COL_CUSTOMER_PO}{ITEM_START_ROW}:{COL_CUSTOMER_PO}{end_row}').value = [[p] for p in customer_pos]
     ws.range(f'{COL_QTY}{ITEM_START_ROW}:{COL_QTY}{end_row}').value = [[q] for q in qtys]
     ws.range(f'{COL_NET_WEIGHT}{ITEM_START_ROW}:{COL_NET_WEIGHT}{end_row}').value = [[n] for n in net_weights]

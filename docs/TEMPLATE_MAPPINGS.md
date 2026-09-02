@@ -87,9 +87,28 @@ F(단가)·H(세액)는 본문 기준으로는 과폭이지만 상단 공급자 
 ## CI — Commercial Invoice (`templates/commercial_invoice.xlsx`)
 
 **생성기**: `ci_generator.py` (xlwings)
-**데이터 소스**: DN_해외 + Customer_해외 + SO_해외 (Model number 보강)
+**데이터 소스**: DN_해외 + Customer_해외 + SO_해외 (Model number·OS name 보강)
 
 > PI와 동일한 셀 구조이나, 데이터 소스가 DN_해외이며 아래 차이점이 있습니다.
+
+### 라인별 HS CODE 판 (SECTORIEL 전용, CI·PL 공통)
+
+`config.HS_LINE_CUSTOMERS`에 걸리는 거래처는 **같은 템플릿으로 한 장을 더** 만든다
+(`CI-HS_*` / `PL-HS_*`). 템플릿 파일은 하나뿐이고, `excel_helpers.apply_hs_layout()`이
+`prepare_template()`이 뜬 **임시 사본**에서 아래를 바꾼다:
+
+| 위치 | 표준판 | 라인별 HS 판 |
+|------|--------|--------------|
+| 품목명 병합 (헤더~Total 행) | `A:D` | **`A:C`** (D를 HS 열로 내줌) |
+| `D18` | 품목명 병합 안 | **`HS CODE`** (E18 서식 상속) |
+| `D20`~ | 품목명 병합 안 | **HS 코드** (텍스트 서식 `@`, 가운데 정렬) |
+| `H12`/`I12` | `HS CODE: ` / `8481.90.0000` | **비움** (문서 단위 HS가 라인별과 충돌) |
+| C 열 폭 | — | D가 가져간 만큼 되돌림 (**품목명 폭 = 표준판 A:D**) |
+| E~I 열 폭 | — | 각 열 내용에 맞춰 축소(자동 맞춤)해 여유만 회수 |
+| 인쇄 배율 | 없음 | **`FitToPagesWide = 1`** (모자란 폭을 배율로 흡수) |
+
+값은 `hs_code.enrich_hs_codes()`가 붙인 `_hs_code` **열**에서 온다 — 생성기가 Model
+number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 
 ### PI와의 차이점
 
@@ -177,6 +196,8 @@ F(단가)·H(세액)는 본문 기준으로는 과폭이지만 상단 공급자 
 **데이터 소스**: DN_해외 + Customer_해외 + SO_해외 (Model number/Model code 보강) + Weight 시트
 
 > CI와 동일한 헤더 구조이나, 아이템 열이 다릅니다 (단가/금액 대신 Weight/CBM).
+> 라인별 HS CODE 판(SECTORIEL)도 CI와 **같은 규칙**으로 만들어진다 — 위 CI 절의 표 참조.
+> (두 문서는 늘 같이 첨부되므로 규칙이 갈리면 안 된다.)
 
 ### 고정 필드 (Header)
 

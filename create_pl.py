@@ -54,7 +54,7 @@ def print_available_ids(df_dn: pd.DataFrame, limit: int = 15) -> None:
     print("=" * 60)
 
 
-def generate_pl(dn_id: str, df_dn: pd.DataFrame) -> bool:
+def generate_pl(dn_id: str, df_dn: pd.DataFrame) -> tuple[bool, list[str]]:
     """Packing List 생성
 
     Args:
@@ -62,7 +62,7 @@ def generate_pl(dn_id: str, df_dn: pd.DataFrame) -> bool:
         df_dn: DN 해외 데이터 (하위 호환용)
 
     Returns:
-        성공 여부
+        (성공 여부, 사람이 확인해야 할 메모 — 마지막에 다시 모아 찍는다)
     """
     print(f"\n{'=' * 60}")
     print(f"Packing List 생성: {dn_id}")
@@ -74,7 +74,7 @@ def generate_pl(dn_id: str, df_dn: pd.DataFrame) -> bool:
     order_data = service.finder.find_dn_export(dn_id)
     if order_data is None:
         print(f"  [오류] '{dn_id}'를 찾을 수 없습니다.")
-        return False
+        return False, []
 
     # 2. 기본 정보 출력
     print(f"  고객: {order_data.get_value('customer_name', 'N/A')}")
@@ -101,14 +101,23 @@ def generate_pl(dn_id: str, df_dn: pd.DataFrame) -> bool:
     # 4. 결과 처리
     if result.success:
         print(f"  -> Packing List 생성 완료: {result.output_file.name}")
-        return True
+        # 라인별 HS 판(고객 제출용)은 대상 거래처에서만 나온다
+        for extra in result.extra_files:
+            print(f"  -> 고객 제출용(라인별 HS) 생성 완료: {extra.name}")
+        for warning in result.warnings:
+            print(f"  [확인 필요] {warning}")
+        for error in result.errors:
+            print(f"  [실패] {error}")
+        # 두 장을 다 요구한 건에서 한 장이 빠지면 성공으로 보고하지 않는다 —
+        # 사람이 다 있다고 믿고 하나만 보낸다
+        return not result.errors, result.warnings + result.errors
     else:
         if result.status == GenerationStatus.FILE_ERROR:
             print(f"  [오류] {result.errors[0] if result.errors else result.message}")
         else:
             print(f"  [오류] {result.message}")
         logger.error(f"Packing List 생성 실패: {result.message}")
-        return False
+        return False, []
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -174,12 +183,18 @@ def main() -> int:
     print(f"DN 해외: {len(df_dn)}건 로드 완료")
 
     success_count = 0
+    notices: list[str] = []
     for dn_id in args.dn_ids:
-        if generate_pl(dn_id, df_dn):
+        ok, dn_notices = generate_pl(dn_id, df_dn)
+        if ok:
             success_count += 1
+        notices.extend(f"{dn_id}  {note}" for note in dn_notices)
 
     print(f"\n{'=' * 60}")
     print(f"완료: {success_count}/{len(args.dn_ids)}건 Packing List 생성")
+    # 경고는 문서가 길면 스크롤 위로 사라진다 — 요약에서 한 번 더 보여 준다
+    for note in notices:
+        print(f"[확인 필요] {note}")
     print(f"출력 폴더: {PL_OUTPUT_DIR}")
     print('=' * 60)
 

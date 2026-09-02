@@ -13,11 +13,15 @@
 """
 
 import pytest
+from pathlib import Path
 
 from po_generator.excel_helpers import (
+    HS_COLUMN_LETTER,
     ITEM_NAME_MERGED_COLS,
+    ITEM_NAME_MERGED_COLS_HS,
     MIN_ITEM_ROW_HEIGHT,
     ROW_HEIGHT_PAD,
+    _item_name_cols,
     address_row_heights,
 )
 
@@ -106,6 +110,17 @@ class TestLayoutConstants:
         """CI와 PL은 늘 같이 첨부되므로 두 문서가 같은 값을 써야 한다"""
         assert ITEM_NAME_MERGED_COLS == 'ABCD'
 
+    def test_HS판은_D만_떼어낸_A_C다(self):
+        """라인별 HS 판의 품목명은 A:C — 떨어져 나온 D가 곧 HS 열이다"""
+        assert ITEM_NAME_MERGED_COLS_HS == 'ABC'
+        assert ITEM_NAME_MERGED_COLS.startswith(ITEM_NAME_MERGED_COLS_HS)
+        assert ITEM_NAME_MERGED_COLS[len(ITEM_NAME_MERGED_COLS_HS):] == HS_COLUMN_LETTER
+
+    def test_판은_둘뿐이고_헬퍼가_고른다(self):
+        """호출부는 bool만 넘긴다 — 열 문자열을 직접 넘길 수 있으면 CI와 PL이 갈린다"""
+        assert _item_name_cols(False) == ITEM_NAME_MERGED_COLS
+        assert _item_name_cols(True) == ITEM_NAME_MERGED_COLS_HS
+
     def test_생성기들이_병합_열을_재정의하지_않는다(self):
         """한쪽만 바뀌면 같은 봉투 안의 두 장이 다른 줄간격으로 나간다"""
         import po_generator.ci_generator as ci
@@ -159,3 +174,52 @@ class TestGeneratorsUseSharedHelper:
 
         source = inspect.getsource(importlib.import_module(module_name))
         assert 'layout_item_rows(' in source, f"{module_name}: layout_item_rows 미사용"
+
+
+class TestHsWidthDonors:
+    """라인별 HS 판의 폭 재배분 정책
+
+    D를 A:D에서 그냥 떼면 품목명 폭이 20% 좁아져 SECTORIEL 실측 200줄이
+    406 → 505줄로 늘어난다. CI/PL은 `fitToPage`가 없어 그대로 쪽수가 되므로,
+    같은 봉투에 든 수출신고용과 고객 제출용의 쪽수가 갈린다 (2026-09-02 실측).
+    그래서 D 폭은 품목명 칸에 되돌리고 그만큼을 아래 열에서 걷는다.
+
+    (실제 폭 계산은 시트를 재야 해서 COM이 필요하다 — 여기서는 정책만 지킨다.)
+    """
+
+    @pytest.mark.parametrize('donors_name', ['CI_HS_WIDTH_DONORS', 'PL_HS_WIDTH_DONORS'])
+    def test_기부_열은_인쇄영역_안의_실제_열이다(self, donors_name):
+        from po_generator import config
+
+        donors = getattr(config, donors_name)
+        assert donors, f"{donors_name}: 기부 열이 없으면 인쇄 폭이 넘친다"
+        assert all(col in 'ABCDEFGHI' for col in donors), donors
+
+    @pytest.mark.parametrize('donors_name', ['CI_HS_WIDTH_DONORS', 'PL_HS_WIDTH_DONORS'])
+    def test_품목명_열과_HS_열은_기부하지_않는다(self, donors_name):
+        """A:C에서 걷으면 품목명이 다시 좁아지고, D에서 걷으면 HS 열이 사라진다"""
+        from po_generator import config
+
+        forbidden = set(ITEM_NAME_MERGED_COLS_HS) | {HS_COLUMN_LETTER}
+        assert not (set(getattr(config, donors_name)) & forbidden)
+
+
+class TestGeneratorsDoNotHardcodeColumns:
+    """생성기가 병합 열 문자열을 직접 들고 있으면 CI와 PL이 갈린다"""
+
+    @pytest.mark.parametrize('module_name', [
+        'po_generator.ci_generator',
+        'po_generator.pl_generator',
+    ])
+    def test_병합_열_리터럴이_없다(self, module_name):
+        import importlib
+        import inspect
+
+        source = inspect.getsource(importlib.import_module(module_name))
+        code_lines = [
+            line for line in source.splitlines()
+            if not line.strip().startswith('#')
+        ]
+        for literal in ("'ABCD'", '"ABCD"', "'ABC'", '"ABC"'):
+            offending = [ln.strip() for ln in code_lines if literal in ln]
+            assert not offending, f"{module_name}: {literal} 하드코딩 — {offending}"

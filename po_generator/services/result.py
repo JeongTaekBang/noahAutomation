@@ -37,6 +37,8 @@ class DocumentResult:
         errors: 오류 목록
         warnings: 경고 목록
         message: 결과 메시지
+        extra_files: 같은 실행에서 함께 나온 부가 문서 (예: Sectoriel 라인별 HS 판
+            CI/PL — 기존 문서는 수출신고용 그대로 두고 고객 제출용을 한 장 더 만든다)
     """
     success: bool
     status: GenerationStatus
@@ -48,6 +50,7 @@ class DocumentResult:
     warnings: list[str] = field(default_factory=list)
     message: str = ''
     history_saved: bool = True
+    extra_files: list[Path] = field(default_factory=list)
 
     @classmethod
     def success_result(

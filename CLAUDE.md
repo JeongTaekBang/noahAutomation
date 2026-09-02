@@ -33,6 +33,8 @@ python create_fi.py --po                # 사용 가능한 발주번호 목록 �
 python create_oc.py SOO-2026-0001        # Order confirmation (생성 후 "이메일 발송?" y/N → 영문 메일)
 python create_oc.py SOO-2026-0001 --mail    # 확인 없이 메일 초안
 python create_oc.py SOO-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
+python create_ci.py DNO-2026-0001        # Commercial invoice (SECTORIEL은 라인별 HS 판을 한 장 더)
+python create_pl.py DNO-2026-0001        # Packing list (동일)
 
 # DN 출고기록 자동 입력 (출고리스트 → DN_국내)
 python create_dn.py P08                   # 미리보기 → y/N → 워크북에 추가
@@ -118,7 +120,7 @@ Reconciliation layer:
 - **Dual Library Strategy**: openpyxl for PO (fast, no image needs); xlwings for TS/PI/FI/OC (preserves images, formulas, COM-dependent).
 - **Template Engine** (`template_engine.py`): Clones rows for multi-item orders, auto-adjusts SUM formulas after row insertion.
 - **병합 셀에는 `rows.autofit()`이 먹지 않는다** (`excel_helpers.py`): 해외 문서 5종(OC·FI·PI·CI·PL)의 품목명 칸은 A:D 병합인데, Excel의 자동 맞춤은 **병합 셀을 측정에서 제외한다**. 105자 품목명에 `autofit()`을 부르면 높이가 15pt → **12.75pt로 오히려 줄면서 1줄로 잘린다** (2026-08-03 실측). 그래서 `autofit_merged_rows()`가 인쇄영역 밖 보조 열(Z)에 같은 텍스트를 넣고 Excel에게 재게 한 뒤 그 높이를 되쓴다. 보조 열 폭은 **문자 단위가 아니라 포인트로** 맞춘다 — 열마다 안쪽 여백이 붙어 A:D(198.00pt)와 같은 문자폭의 단일 열(186.75pt)이 11.25pt 어긋난다. COM 왕복은 배치가 원칙: 높이 되쓰기는 같은 높이 연속 구간당 1회, 행 삽입은 `insert_copied_rows`(일괄 Insert + 타일 Copy, 3회). **병합 셀은 넘친 텍스트를 옆 칸으로 흘리지도 않는다** — 경계에서 그냥 클립된다. OC·FI 헤더의 주소 칸(행별 A:E 병합 + 세로 G:I 병합)이 이 경우라, 값을 쓴 뒤 `layout_address_rows()`로 wrap + 행 높이를 확보한다 (2026-08-05 실측: 74자/81자 주소 클립. `tests/test_doc_layout.py`가 호출 여부 감시).
-- **행을 복사해 삽입하면 일부 행이 병합을 잃는다** (`excel_helpers.py`): 48아이템 OC에서 삽입한 41행 중 6행의 A:D 병합이 사라져 품목명이 A열에 갇혀 5~7줄로 흘렀다 (2026-08-03 실측 — 이 결함은 행 높이 교정 이전부터 있었다). 그래서 병합 보장(`ensure_row_merges`)과 높이 교정은 늘 세트고, 5종 생성기는 값 채우기 직후 **복합 헬퍼 `layout_item_rows()` 하나만** 부른다 — 여섯 번째 문서가 한쪽만 부르는 실수를 원천 차단 (`tests/test_doc_layout.py`가 감시). 병합 범위 `ITEM_NAME_MERGED_COLS`는 **excel_helpers 한 곳**에만 둔다 — 특히 CI와 PL은 선적서류라 늘 같이 첨부되어 나란히 읽히므로 줄 높이 규칙이 갈리면 바로 눈에 띈다.
+- **행을 복사해 삽입하면 일부 행이 병합을 잃는다** (`excel_helpers.py`): 48아이템 OC에서 삽입한 41행 중 6행의 A:D 병합이 사라져 품목명이 A열에 갇혀 5~7줄로 흘렀다 (2026-08-03 실측 — 이 결함은 행 높이 교정 이전부터 있었다). 그래서 병합 보장(`ensure_row_merges`)과 높이 교정은 늘 세트고, 5종 생성기는 값 채우기 직후 **복합 헬퍼 `layout_item_rows()` 하나만** 부른다 — 여섯 번째 문서가 한쪽만 부르는 실수를 원천 차단 (`tests/test_doc_layout.py`가 감시). 병합 범위 `ITEM_NAME_MERGED_COLS`(A:D)는 **excel_helpers 한 곳**에만 둔다 — 특히 CI와 PL은 선적서류라 늘 같이 첨부되어 나란히 읽히므로 줄 높이 규칙이 갈리면 바로 눈에 띈다. 예외는 라인별 HS 판(A:C, `ITEM_NAME_MERGED_COLS_HS`) 하나뿐인데, **그 값도 excel_helpers가 소유하고 고르는 것도 excel_helpers가 한다** — 호출부는 `hs_column=` 불리언만 넘긴다. 열 문자열을 인자로 열어 두면 CI만 A:C, PL은 A:D로 갈릴 수 있다 (`tests/test_doc_layout.py`가 생성기 소스에 `'ABC'`/`'ABCD'` 리터럴이 없는지까지 감시).
 - **History as DB**: `po_history/YYYY/M월/YYYYMMDD_주문번호_고객명.xlsx` — one file per transaction enables duplicate detection without a database.
 - **Result Pattern** (`services/result.py`): `DocumentResult` + `GenerationStatus` enum for structured operation outcomes. `history_saved` field tracks history persistence separately from generation success.
 - **Output File Safety** (`cli_common.py`): Generated files auto-suffix on collision (`_1`, `_2`, ...) to prevent silent overwrites. Raises `FileExistsError` if 100+ collisions.
@@ -153,6 +155,7 @@ Reconciliation layer:
 | `cli_dist/build_portable_gui.py` | 문서생성기 배포판 — `build_common` 위에 이 배포판만의 것을 얹는다: `APP_FILES`(담을 것) · 런처/설치 스크립트 · `verify()`(`DOC_TYPES` 대조 + CLI 전수 `--help` 스모크). **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드하며, 예외는 `build_common`을 찾는 sys.path 한 줄뿐) |
 | `dashboard_dist/build_portable_dashboard.py` | 대시보드 배포판 — `dashboard.py`를 **무수정으로** 담고 `po_generator/`·`sql/`을 동봉한다. 예전 `build_dist.py`는 import를 문자열 치환해 standalone 파일을 만들었는데, import 한 줄이 바뀌자 패턴이 안 맞아 빌드가 죽었고 배포본이 4개월 낡았다 — 그래서 재작성을 아예 없앴다. `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다(import만으로는 트리밍 사고를 못 잡는다). pyarrow는 flight/parquet/dataset/substrait를 잘라내되 `arrow_compute`는 남긴다 (streamlit이 로드한다 — 실측) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
+| `po_generator/hs_code.py` | SECTORIEL 라인별 HS CODE 판정 — 규칙 사다리(운임 → 모델번호 → 품목텍스트 → OS 제품군 → 미매칭)와 고객 제공 코드표. **COM 없는 순수 판정**이라 실데이터 전수로 테스트한다(`dn_recorder`/`dn_writer`를 가른 것과 같은 이유). 결과는 `_hs_code` **열**로 items_df에 붙는다 — 생성기가 Model number로 재정렬하므로 리스트로 넘기면 코드가 남의 품목에 붙는다(8자리 숫자라 눈으로 안 보인다). 새 스페어 코드는 `SPARE_HS_BY_MODEL`에 한 줄 |
 | `po_generator/mailer.py` | 고객 메일 발송 — 고객 마스터에서 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **첨부는 여러 장일 수 있다** — `as_paths()`가 단건/복수를 흡수하고 `export_pdfs()`가 Excel **1회 기동**으로 N장을 변환한다(8장 실측 24초; 장마다 띄우면 그 두 배). **조인키가 국내/해외로 갈린다**: `find_recipient()`는 사업자번호로 `Customer_국내`, `find_recipient_overseas()`는 고객코드로 `Customer_해외` — 둘 다 `_build_recipient()` 하나를 공유한다. **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
 | `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`add_mail_arguments`/`prepare_mail_options`/`confirm_recipient`(수신자 조회→표시→y/N 관문)/`collect_customer_po`/`format_mail_date`. `create_ts.py`·`delivery_status.py`·`create_oc.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다). 어느 마스터를 읽을지는 `MailOptions.loader`/`sheet_label` **짝**으로 주입 — 기본은 국내, OC만 해외. **`loader` 기본값에 함수를 박지 말 것**: 클래스 정의 시점에 굳어 모듈 속성 교체(테스트 monkeypatch)가 무시된다 |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
@@ -217,6 +220,38 @@ Reconciliation layer:
   아니라 `{supplier_en}`. 첨부 기본 PDF, 고정 참조는 `OC_MAIL_CC`.
   나머지 규약(수신자 확인 후 y/N, 비대화형 자동 OFF, 메일 실패가 문서 생성을 뒤엎지 않음)은
   거래명세표와 동일하다
+- **SECTORIEL은 CI·PL을 2장씩 낸다 — 수출신고용(기존)과 고객 제출용(라인별 HS)**
+  (`config.HS_LINE_CUSTOMERS`, 고객명 부분일치 — 2026-09-02 사용자 지시).
+  고객이 자기네 수입통관 HS CODE를 라인마다 요구했다. 기존 문서는 손대지 않고
+  `CI-HS_*`/`PL-HS_*`를 한 장 더 만든다. 판정은 `hs_code.py`가 소유하고
+  **우선순위가 곧 안전장치**다 — 운임 → 모델번호 → 품목텍스트 → OS 제품군 → 미매칭:
+  - **운임(`FEDEX COST` 등)은 HS가 없는 것이 정상**이라 빈칸이고 **경고 대상도 아니다**.
+    실측 3줄의 `OS name`이 `Noah NA`/`SA`/`Electric Spares`로 제각각 찍혀 있어,
+    OS를 먼저 보면 **운임에 액추에이터 세번이 붙는다**
+  - `OS name`은 '이 라인에 실린 물건'이 아니라 '이 주문 라인의 제품군'이라 **폴백**이다
+    (운임에서 이미 거짓말했다). 액추에이터에 딸려 나가는 히터·핸들휠은 별도 세번이므로
+    품목텍스트를 먼저 본다. 순서를 바꿔도 실데이터 200줄 결과는 동일 — 공짜 안전장치
+  - **SR도 액추에이터**(85013100)다. SR05/SR10/SR30은 스프링리턴 본체고, 고객 표의
+    'Governor for SR'은 SR용 부품이다. 덤으로 `OS name` 오타(SA05X가 SR, SR03이 SA)가
+    무해해진다
+  - **모르는 것은 추측하지 않는다** — 빈칸 + 생성 시 경고(품목명·모델번호 나열).
+    2026년 실적에선 전기모터(980737/980739)와 스템커버(980800)가 여기 걸린다.
+    코드를 받으면 `SPARE_HS_BY_MODEL`에 한 줄 추가
+  - `OS name` 컬럼 자체가 없으면(SO 조인 실패) **HS 판을 아예 만들지 않는다** — 한 줄
+    미지정과 전 행 빈칸은 다른 사건이다. 이때는 경고가 아니라 오류로 보고한다
+- **HS 판 템플릿은 따로 두지 않는다 — 임시 사본을 런타임에 고친다**
+  (`excel_helpers.apply_hs_layout`). 사본을 뜨면 갈라진다: 주소·계좌·약관 URL을 고칠 때
+  고객 제출용만 낡는다 (`mail_cli.py`·`build_common.py`·`v_dn_revenue`와 같은 이유).
+  `prepare_template()`이 뜬 사본에서 A:D 병합을 A:C로 줄여 D를 열고, 문서 단위
+  HS(`H12`/`I12` = 밸브 부품 코드)는 **비운다** — 한 장이 서로 다른 두 HS를 주장하면
+  통관에서 어느 쪽을 믿을지 알 수 없다.
+  **품목명 폭(A:C)은 표준판 A:D와 같게 되돌린다** — 그냥 떼면 200줄이 406 → 505줄(+24%)로
+  늘어 같은 봉투의 두 장이 줄 단위로 어긋난다(실측). 폭 숫자는 코드에 박지 않는다:
+  COM `ColumnWidth`와 파일의 width가 열 패딩(0.83자)만큼 다르고, 병합 칸은 걸친 열 수만큼
+  패딩이 더 붙는다 — **시트를 재서** 맞춘다. 오른쪽 블록의 실제 여유는 3~5자뿐인데
+  필요한 건 12자라(헤더가 `Gross Weight`·`Measurement`처럼 길다) **모자란 만큼은 인쇄
+  배율(`FitToPagesWide=1`)로 흡수**한다 — 열 폭을 안 건드리므로 줄바꿈·행 높이가 표준판과
+  완전히 같다 (실측 확인: 36행 높이 합 1090.05pt 동일)
 - **거래명세표에 호선명을 표기하는 건 조선 기자재 4사뿐이다**
   (`config.TS_PO_REMARK_CUSTOMERS` = 스칸텍·브이티엘·엔이에스·파나시아, 고객명 부분일치 —
   2026-08-25 사용자 지시). 호선명은 `SO_국내.Remarks`에 있고 두 군데 찍힌다:

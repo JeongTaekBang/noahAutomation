@@ -119,6 +119,36 @@ FI_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_fi"
 PL_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "packing_list.xlsx"
 PL_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_pl"
 
+# === 라인별 HS CODE 판을 따로 받는 거래처 (CI·PL 공통) ===
+# SECTORIEL이 자기네 수입통관 HS CODE를 라인마다 요구했다 (2026-09-02 사용자 지시).
+# 기존 문서는 손대지 않고(수출신고용) **고객 제출용 한 장을 더** 만든다 — 판정은 hs_code.py.
+# 고객명 부분일치로 보는 이유는 TS_PO_REMARK_CUSTOMERS와 같다 (시트 표기가 흔들린다).
+HS_LINE_CUSTOMERS: Final[tuple[str, ...]] = ('SECTORIEL',)
+
+# 라인별 HS 판의 폭 재배분 정책 — **템플릿 파일을 따로 두지 않고** 임시 사본을 런타임에
+# 고친다 (사본을 뜨면 갈라진다: 나중에 주소·계좌·약관 URL을 고칠 때 고객 제출용만 낡는다.
+#  `mail_cli.py`·`build_common.py`·`v_dn_revenue`가 같은 이유로 하나를 공유한다).
+#
+# **품목명 폭(A:C)을 표준판 A:D와 같게 되돌리고, 그만큼을 아래 열에서 걷는다.**
+# D를 A:D에서 그냥 떼면 품목명 폭이 20% 좁아지는데, SECTORIEL 실측 200줄이
+# 406줄 → 505줄(+24%)로 늘어난다. CI/PL은 `fitToPage`가 없어 늘어난 만큼 그대로 쪽수가
+# 되므로 **같은 봉투에 든 수출신고용과 고객 제출용의 쪽수가 갈린다** (2026-09-02 실측).
+#
+# 폭 숫자를 여기 박지 않는 이유: Excel COM의 `ColumnWidth`와 파일에 저장되는 width는
+# 열 패딩(실측 0.83자)만큼 다르다 — 파일에서 읽은 값을 COM으로 그대로 쓰면 열마다
+# 0.83자씩 넓어져 인쇄 폭이 넘친다 (2026-09-02 실측: 합계 108.8 → 111.3).
+# 그래서 `apply_hs_layout()`이 **시트의 실제 폭을 재서** 계산한다.
+#
+# 걷는 양이 11자 남짓이라 **한두 열에서 몰아 걷으면 그 열이 깨진다** (2026-09-02 실측:
+# I만 쓰면 `PO Date`가 `######`가 되고, PL에서 H·I만 쓰면 'Gross Weight'·'Measurement'
+# 헤더가 잘렸다). 그래서 여러 열에 고루 나눈다.
+# 어느 열이 얼마나 내줄지는 `apply_hs_layout()`이 **각 열을 제 내용에 맞춰 재서** 정한다
+# (헤더가 긴 열이 먼저 잘리는 것을 막는다 — 실측: 'Quantity'→'Quantit',
+#  'Measurement'→'Measurem'). 여기서는 '건드려도 되는 열'만 정한다 — 아이템 격자
+# 오른쪽 블록 전부다. A~C는 품목명, D는 HS 열이라 대상이 아니다.
+CI_HS_WIDTH_DONORS: Final[tuple[str, ...]] = ('E', 'F', 'G', 'H', 'I')
+PL_HS_WIDTH_DONORS: Final[tuple[str, ...]] = ('E', 'F', 'G', 'H', 'I')
+
 # === Order Confirmation 설정 ===
 OC_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "order_confirmation.xlsx"
 OC_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_oc"

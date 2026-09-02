@@ -1,3 +1,41 @@
+# SECTORIEL 라인별 HS CODE — CI/PL 고객 제출용 (2026-09-02) — 완료
+
+사용자 요청: SECTORIEL이 자기네 수입통관 HS CODE를 CI/PL **라인마다** 넣어달라 요청.
+기존 문서는 수출용으로 그대로 두고 고객 제출용을 따로. 결정 4건:
+2장 생성 / SR도 액추에이터(85013100) / D열 신설 / 미매칭은 빈칸+경고.
+
+- [x] `hs_code.py` — 판정 사다리(운임 → 모델번호 → 품목텍스트 → OS 제품군 → 미매칭) +
+      고객 코드표 8종. 순수 모듈(COM 없음)
+- [x] `config.py` — `HS_LINE_CUSTOMERS`, `CI/PL_HS_WIDTH_DONORS`
+- [x] `excel_helpers.py` — `ITEM_NAME_MERGED_COLS_HS`('ABC')와 `apply_hs_layout()`.
+      병합 열 선택은 헬퍼가 하고 호출부는 `hs_column=` 불리언만 넘긴다
+- [x] `ci_generator.py`/`pl_generator.py` — `_hs_code` 열이 있으면 D열에 쓰고 HS 판으로 배치
+- [x] `document_service.py` — `_enrich_from_so_lines`에 `OS name` 추가, `_generate_hs_line_copy()`
+- [x] `result.py` — `extra_files`, `create_ci.py`/`create_pl.py` — 두 번째 파일·경고 표시
+- [x] 테스트 — `tests/test_hs_code.py` 72건(실데이터 기반), `test_doc_layout.py` 보강.
+      전체 **882 passed, 2 skipped**
+- [x] 실물 검증 — `DNO-2026-0091`(33줄)·`DNO-2026-0141`(FEDEX 포함) CI/PL 2장씩 생성,
+      PNG/PDF 눈검사 후 검증 파일 삭제
+- [x] CLAUDE.md Business Rules + Key Files, docs/TEMPLATE_MAPPINGS.md
+
+## 리뷰 — 계획에서 바뀐 것 3가지 (실측이 뒤집음)
+
+1. **템플릿 파일 2개를 만들지 않았다.** 사본은 갈라진다(주소·계좌를 고치면 고객용만 낡음).
+   `prepare_template()`이 뜬 **임시 사본**을 런타임에 고치는 방식으로 바꿔 템플릿은 하나로 유지.
+   이미지·drawing·머리글·printerSettings가 전부 원본 그대로 따라온다.
+2. **품목명 폭을 좁히지 않았다.** A:D → A:C로 그냥 떼면 SECTORIEL 200줄이 406 → 505줄(+24%)로
+   늘어 **같은 봉투의 두 장이 쪽수가 갈린다**. C를 되돌리고 모자란 폭은 인쇄 배율로 흡수.
+   결과: 36행 높이 합 1090.05pt로 **표준판과 완전히 동일**.
+3. **규칙 순서를 바꿨다.** `OS name`은 운임 줄에서 이미 거짓말한 필드(3줄이 Noah NA/SA로 찍힘)라
+   품목텍스트 뒤로 뺐다. 실데이터 200줄 결과는 두 순서가 동일 — 공짜로 얻는 안전장치.
+
+폭 관련해서는 **추측한 숫자가 세 번 연속 틀렸다**(COM ColumnWidth vs 저장 width의 패딩 0.83자,
+병합 칸의 열별 패딩, 헤더가 긴 열의 실제 여유). 결국 전부 **Excel에게 재게 해서** 해결했다 —
+`autofit_merged_rows`가 보조 열로 행 높이를 재는 것과 같은 방침.
+
+미매칭 2종(전기모터 980737/980739, 스템커버 980800)은 고객 코드를 받으면
+`hs_code.SPARE_HS_BY_MODEL`에 한 줄씩 추가하면 된다.
+
 # 거래명세표 PO No. 옆 호선명(SO Remarks) 병기 (2026-08-25) — 완료
 
 사용자 요청: 거래명세표 하단 PO No. 옆에 `SO_국내.Remarks`(호선 이름)를 표시.
