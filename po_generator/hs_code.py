@@ -1,9 +1,11 @@
 """
-Sectoriel 라인별 HS CODE 판정
-==============================
+CI/PL 라인별 HS CODE
+=====================
 
-거래처 SECTORIEL이 **자기네 수입통관에 쓰는 HS CODE**를 CI/PL 라인마다 찍어달라고
-요청해서(2026-09-02) 만든 모듈이다. 기존 CI/PL은 문서 단위 HS 하나(`I12`)만 갖는다.
+CI/PL은 HS CODE를 **라인마다** 찍는다 (거래처 불문 — 2026-09-04 양식 통일).
+거래처 고유 코드를 따로 받지 않은 문서는 우리 수출신고 코드(`config.DEFAULT_HS_CODE`)를
+물품 줄에 일괄로 넣는다 — `default_hs_result()`. 아래 판정 사다리는 **자기네 수입통관
+코드를 요구한 거래처**(SECTORIEL, 2026-09-02)용이다.
 
 **왜 별도 모듈인가.** 판정은 순수 계산이라 Excel COM 없이 전수 테스트할 수 있어야 한다
 (`dn_recorder`와 `dn_writer`를 가른 것과 같은 이유). 생성기는 결과 열을 쓰기만 한다.
@@ -208,7 +210,23 @@ OS_NAME_COLUMN = 'OS name'
 HS_COLUMN = '_hs_code'
 
 
-def enrich_hs_codes(items_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+def default_hs_result(item_name: object, code: str) -> HsResult:
+    """거래처 고유 코드를 따로 받지 않은 문서 — 우리 수출신고 코드를 일괄로 쓴다
+
+    **운임 줄은 여기서도 비운다.** 물품이 아니라 HS가 애초에 없는 줄인데 기본값을
+    깔면 운송비 청구 라인에 밸브 부품 세번이 찍힌다 (거래처 판정표에서 운임을 가장
+    먼저 걸러내는 것과 같은 이유).
+    """
+    if NON_GOODS_PATTERN.search(_norm_text(item_name)):
+        return HsResult(code='', rule='운임·수수료(HS 없음)')
+    return HsResult(code=code, rule='수출신고 기본값')
+
+
+def enrich_hs_codes(
+    items_df: pd.DataFrame,
+    *,
+    default_code: str | None = None,
+) -> tuple[pd.DataFrame, list[str]]:
     """아이템 DataFrame에 `_hs_code` 열을 붙이고 미매칭 품목명을 돌려준다
 
     생성기는 이 열이 있으면 D열에 쓴다. **열이 행과 함께 다니므로** 생성기가
@@ -216,6 +234,8 @@ def enrich_hs_codes(items_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
 
     Args:
         items_df: DN 아이템 (Model number·OS name이 보강된 상태)
+        default_code: 주면 거래처 판정표 대신 이 코드를 물품 줄에 일괄로 넣는다
+            (우리 수출신고 코드). 안 주면 모듈 docstring의 판정 사다리를 탄다
 
     Returns:
         (`_hs_code` 열이 추가된 사본, 사람이 코드를 정해야 하는 품목명 목록)
@@ -225,11 +245,14 @@ def enrich_hs_codes(items_df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     unmatched: list[str] = []
 
     for _, item in enriched.iterrows():
-        result = resolve_hs_code(
-            os_name=item.get(OS_NAME_COLUMN, ''),
-            model_number=get_value(item, 'model', ''),
-            item_name=get_value(item, 'item_name', ''),
-        )
+        if default_code is not None:
+            result = default_hs_result(get_value(item, 'item_name', ''), default_code)
+        else:
+            result = resolve_hs_code(
+                os_name=item.get(OS_NAME_COLUMN, ''),
+                model_number=get_value(item, 'model', ''),
+                item_name=get_value(item, 'item_name', ''),
+            )
         codes.append(result.code)
         if result.unmatched:
             label = to_text(get_value(item, 'item_name', '')) or '(품목명 없음)'

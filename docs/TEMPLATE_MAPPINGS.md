@@ -91,24 +91,30 @@ F(단가)·H(세액)는 본문 기준으로는 과폭이지만 상단 공급자 
 
 > PI와 동일한 셀 구조이나, 데이터 소스가 DN_해외이며 아래 차이점이 있습니다.
 
-### 라인별 HS CODE 판 (SECTORIEL 전용, CI·PL 공통)
+### 라인별 HS CODE (모든 CI·PL 공통)
 
-`config.HS_LINE_CUSTOMERS`에 걸리는 거래처는 **같은 템플릿으로 한 장을 더** 만든다
-(`CI-HS_*` / `PL-HS_*`). 템플릿 파일은 하나뿐이고, `excel_helpers.apply_hs_layout()`이
-`prepare_template()`이 뜬 **임시 사본**에서 아래를 바꾼다:
+HS CODE는 문서당 하나가 아니라 **라인마다** 찍는다 (2026-09-04 양식 통일).
+템플릿 파일은 하나뿐이고, `excel_helpers.apply_hs_layout()`이 `prepare_template()`이
+뜬 **임시 사본**에서 아래를 바꾼다:
 
-| 위치 | 표준판 | 라인별 HS 판 |
-|------|--------|--------------|
+| 위치 | 템플릿 원본 | 생성 결과 |
+|------|-------------|-----------|
 | 품목명 병합 (헤더~Total 행) | `A:D` | **`A:C`** (D를 HS 열로 내줌) |
 | `D18` | 품목명 병합 안 | **`HS CODE`** (E18 서식 상속) |
 | `D20`~ | 품목명 병합 안 | **HS 코드** (텍스트 서식 `@`, 가운데 정렬) |
 | `H12`/`I12` | `HS CODE: ` / `8481.90.0000` | **비움** (문서 단위 HS가 라인별과 충돌) |
-| C 열 폭 | — | D가 가져간 만큼 되돌림 (**품목명 폭 = 표준판 A:D**) |
-| E~I 열 폭 | — | 각 열 내용에 맞춰 축소(자동 맞춤)해 여유만 회수 |
-| 인쇄 배율 | 없음 | **`FitToPagesWide = 1`** (모자란 폭을 배율로 흡수) |
+| C 열 폭 | — | D가 가져간 만큼 되돌림 (**품목명 폭 = 원래 A:D**) |
+| D 열 폭 | — | 그 문서에 실릴 **가장 긴 코드**로 자동 맞춤 |
+| E~I 열 폭 | — | **손대지 않는다** |
+| 인쇄 배율 | 없음 | **`FitToPagesWide = 1`** (초과분 흡수, 실측 89%) |
 
 값은 `hs_code.enrich_hs_codes()`가 붙인 `_hs_code` **열**에서 온다 — 생성기가 Model
 number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
+
+- 거래처 고유 코드를 받지 않은 문서 → `config.DEFAULT_HS_CODE`(`8481.90.0000`)를 일괄
+- `config.HS_LINE_CUSTOMERS`(SECTORIEL) → **한 장을 더** 만든다 (`CI-HS_*`/`PL-HS_*`).
+  양식은 완전히 같고 D열 값만 고객 코드로 바뀐다
+- 어느 쪽이든 **운임 줄은 빈칸** (물품이 아니라 HS가 없다)
 
 ### PI와의 차이점
 
@@ -140,7 +146,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | G16 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
 | I4 | Invoice date | 선적일 | DN_해외.dispatch_date |
 | I5 | Payment Terms | 결제 조건 | Customer_해외.Payment terms |
-| I12 | HS CODE | 관세 코드 | — |
+| I12 | HS CODE | **비움** (라인별 D열로 이동) | — |
 | I16 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
 
 ### Shipping Mark 영역
@@ -170,8 +176,8 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | H | Currency |
 | I | SUM(Amount) |
 
-### Model number / Model code 보강 로직
-- `DocumentService._enrich_with_model_number()` — SO_해외에서 **SO_ID + Line item 복합키**로 Model number 및 Model code (AX Project number) 조회
+### SO 라인 보강 로직 (Model number / Model code / OS name)
+- `DocumentService._enrich_from_so_lines()` — SO_해외에서 **SO_ID + Line item 복합키**로 Model number·Model code(AX Project number)·OS name 조회
 - DN에 여러 SO_ID가 섞여 있어도 모든 아이템을 매칭
 - 품목명: `"{Model number} {Item name}"` (Model number 없으면 Item name만)
 - 아이템을 Model number 오름차순으로 정렬
@@ -196,7 +202,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 **데이터 소스**: DN_해외 + Customer_해외 + SO_해외 (Model number/Model code 보강) + Weight 시트
 
 > CI와 동일한 헤더 구조이나, 아이템 열이 다릅니다 (단가/금액 대신 Weight/CBM).
-> 라인별 HS CODE 판(SECTORIEL)도 CI와 **같은 규칙**으로 만들어진다 — 위 CI 절의 표 참조.
+> 라인별 HS CODE도 CI와 **같은 규칙**으로 만들어진다 — 위 CI 절의 표 참조.
 > (두 문서는 늘 같이 첨부되므로 규칙이 갈리면 안 된다.)
 
 ### 고정 필드 (Header)
@@ -209,7 +215,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | G4 | Invoice No | DN_ID | DN_해외.DN_ID |
 | G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
 | I4 | Invoice date | 선적일 | DN_해외.dispatch_date |
-| I12 | HS CODE | 관세 코드 | — |
+| I12 | HS CODE | **비움** (라인별 D열로 이동) | — |
 | G16 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
 | I16 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
 | B14 | From | 출발지 | 고정값 "INCHEON, KOREA" |

@@ -28,6 +28,7 @@ from po_generator.config import (
     FI_TEMPLATE_FILE,
     PL_TEMPLATE_FILE,
     OC_TEMPLATE_FILE,
+    DEFAULT_HS_CODE,
 )
 from po_generator.utils import (
     get_value,
@@ -526,6 +527,9 @@ class DocumentService:
 
         # SO_해외에서 Model number 보강
         items_df = self._enrich_from_so_lines(order_data)
+        # 라인별 HS는 이제 모든 CI/PL 공통 양식이다 — 거래처 고유 코드를 받지 않은
+        # 문서는 우리 수출신고 코드를 물품 줄에 일괄로 넣는다 (운임 줄은 빈칸)
+        base_items_df, _ = enrich_hs_codes(items_df, default_code=DEFAULT_HS_CODE)
 
         # 출력 디렉토리 생성
         CI_OUTPUT_DIR.mkdir(exist_ok=True)
@@ -545,8 +549,8 @@ class DocumentService:
             create_ci_xlwings(
                 template_path=CI_TEMPLATE_FILE,
                 output_path=output_file,
-                order_data=items_df.iloc[0],
-                items_df=items_df,
+                order_data=base_items_df.iloc[0],
+                items_df=base_items_df,
             )
             logger.info(f"CI 생성 완료: {output_file}")
 
@@ -795,6 +799,8 @@ class DocumentService:
         # SO_해외에서 Model number/Model code 보강
         items_df = self._enrich_from_so_lines(order_data)
         items_df = self._enrich_with_weight(items_df)
+        # CI와 같은 양식 — 라인별 HS, 거래처 고유 코드가 없으면 수출신고 기본값
+        base_items_df, _ = enrich_hs_codes(items_df, default_code=DEFAULT_HS_CODE)
 
         PL_OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -811,8 +817,8 @@ class DocumentService:
             create_pl_xlwings(
                 template_path=PL_TEMPLATE_FILE,
                 output_path=output_file,
-                order_data=items_df.iloc[0],
-                items_df=items_df,
+                order_data=base_items_df.iloc[0],
+                items_df=base_items_df,
             )
             logger.info(f"PL 생성 완료: {output_file}")
 

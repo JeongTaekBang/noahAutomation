@@ -19,7 +19,7 @@ from pathlib import Path
 import pandas as pd
 import xlwings as xw
 
-from po_generator.config import CI_HS_WIDTH_DONORS, CI_TEMPLATE_FILE
+from po_generator.config import CI_TEMPLATE_FILE
 from po_generator.hs_code import HS_COLUMN
 from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
@@ -56,10 +56,10 @@ ITEM_START_ROW = 20
 
 # 아이템 열 (E=Customer PO, F=Qty, G=Unit Price, H=Currency, I=Amount)
 COL_ITEM_NAME = 'A'
-# 라인별 HS CODE 판에서만 쓰는 열. 표준판에서는 D가 품목명 병합(A:D) 안이라
-# 여기에 쓰지 않는다 — `apply_hs_layout()`이 병합을 A:C로 줄여 D를 열어 준 뒤에만 쓴다.
+# HS CODE 열. 템플릿에서는 D가 품목명 병합(A:D) 안이라, `apply_hs_layout()`이
+# 병합을 A:C로 줄여 D를 열어 준 뒤에만 쓴다.
 COL_HS_CODE = 'D'
-# 템플릿에 박힌 문서 단위 HS(밸브 부품 코드). 라인별 판에서는 비운다 —
+# 템플릿에 박힌 문서 단위 HS. 라인별로 옮겼으므로 비운다 —
 # 한 장이 서로 다른 두 HS를 주장하면 통관에서 어느 쪽을 믿을지 알 수 없다.
 CELLS_DOC_HS = ('H12', 'I12')
 COL_CUSTOMER_PO = 'E'
@@ -231,7 +231,7 @@ def _fill_items(
     template_item_count = total_row - ITEM_START_ROW
     logger.debug(f"템플릿 아이템 수: {template_item_count}, 실제 아이템 수: {num_items}")
 
-    # 라인별 HS 판이면 임시 사본의 아이템 격자에 D열을 만들어 낸다.
+    # 임시 사본의 아이템 격자에 D열(HS CODE)을 만들어 낸다 — CI/PL 공통 양식.
     # 행을 지우거나 삽입하기 전에 해야 Total 행이 아직 템플릿 좌표에 있다.
     if HS_COLUMN in items_df.columns:
         apply_hs_layout(
@@ -239,7 +239,9 @@ def _fill_items(
             header_row=ITEM_START_ROW - 2,
             first_item_row=ITEM_START_ROW,
             last_row=total_row,
-            width_donors=CI_HS_WIDTH_DONORS,
+            sample_code=max(
+                (to_text(c) for c in items_df[HS_COLUMN]), key=len, default='',
+            ),
             doc_hs_cells=CELLS_DOC_HS,
         )
 

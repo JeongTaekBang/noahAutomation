@@ -470,7 +470,7 @@ def apply_hs_layout(
     header_row: int,
     first_item_row: int,
     last_row: int,
-    width_donors: tuple[str, ...],
+    sample_code: str = '',
     doc_hs_cells: tuple[str, ...] = (),
 ) -> None:
     """아이템 격자에 HS CODE 열(D)을 만들어 낸다 — **임시 사본 위에서**
@@ -493,7 +493,8 @@ def apply_hs_layout(
         header_row: 열 이름 행 (Description/PO No./Quantity...)
         first_item_row: 첫 아이템 행
         last_row: 아이템 격자의 마지막 행 (Total 행)
-        width_donors: D 폭을 되돌리며 그만큼을 내줄 열들 (Σ(A..I) 불변)
+        sample_code: D 폭을 잴 때 쓸 표본 — 이 문서에 실릴 것 중 **가장 긴 코드**를
+            넘긴다 (표기 길이가 문서마다 다르다). 비우면 8자리로 잰다
         doc_hs_cells: 비울 문서 단위 HS 셀. 라인별 코드와 한 장에 같이 남으면
             **문서가 서로 다른 두 HS를 주장한다** (템플릿 기본값은 밸브 부품 코드)
     """
@@ -526,11 +527,12 @@ def apply_hs_layout(
     item_cells.api.Font.Size = ws.range(f'A{first_item_row}').api.Font.Size
 
     # 3-1. D 폭은 **Excel에게 재게 한다** — 템플릿의 원래 D 폭(약 7자)으로는 굵은 헤더
-    #      'HS CODE'와 8자리 코드가 둘 다 잘린다 (2026-09-02 실측: 'IS COD', '3535290').
-    #      폰트 폭을 코드로 추정하지 않고, 8자리 표본을 넣어 자동 맞춤을 시킨 뒤 치운다
-    #      (표의 코드는 전부 8자리 — `tests/test_hs_code.py`가 감시).
+    #      'HS CODE'와 코드가 둘 다 잘린다 (2026-09-02 실측: 'IS COD', '3535290').
+    #      폰트 폭을 코드로 추정하지 않고, 실제로 실릴 것 중 가장 긴 코드를 표본으로
+    #      넣어 자동 맞춤을 시킨 뒤 치운다. 표기가 문서마다 다르다 —
+    #      수출신고 기본값은 10자리 점 구분(`8481.90.0000`), SECTORIEL은 8자리.
     probe = ws.range(f'{col}{first_item_row}')
-    probe.value = '0' * 8
+    probe.value = sample_code or '0' * 8
     ws.range(f'{col}:{col}').api.EntireColumn.AutoFit()
     probe.value = ''
     ws.range(f'{col}1').column_width = ws.range(f'{col}1').column_width + HS_COLUMN_PAD
@@ -552,26 +554,26 @@ def apply_hs_layout(
     ws.range(f'{grow_col}1').column_width = grow_chars + name_delta
     needed = name_delta + (ws.range(f'{col}1').column_width - hs_width_before)
 
-    # 기부 몫을 어떻게 나눌지도 **추측하지 않는다.** 폭에 비례해 걷으면 헤더가 긴 열이
-    # 먼저 잘린다 (실측: CI 'Quantity' → 'Quantit', PL 'Measurement' → 'Measurem',
-    # 'Gross Weight' 2줄 클립). 각 열을 제 내용에 맞춰 재게 해서 **진짜 여유만** 걷는다.
-    before = {c: ws.range(f'{c}1').column_width for c in width_donors}
-    for letter in width_donors:
-        ws.range(f'{letter}:{letter}').api.EntireColumn.AutoFit()
-    freed = sum(before[c] - ws.range(f'{c}1').column_width for c in width_donors)
-
-    # 그래도 모자란다 — 실측 여유는 3~5자인데 필요한 건 12자 남짓이다. 오른쪽 블록은
-    # 헤더가 길어(`Gross Weight`·`Measurement`·`Payment terms:`) 짜낼 것이 없다.
-    # **모자란 만큼은 인쇄 배율로 흡수한다**: 열 폭을 건드리지 않으므로 줄바꿈과 행 높이가
-    # 표준판과 완전히 같고(= 같은 봉투의 두 장이 줄 단위로 일치), 폭만 한 페이지에 맞춰
-    # 줄어든다. 품목명을 좁히는 대안은 200줄이 406 → 505줄로 늘어 쪽수가 갈린다.
+    # **늘어난 폭은 인쇄 배율로 흡수한다 — 기존 열은 한 칸도 건드리지 않는다.**
+    #
+    # 오른쪽 블록에서 여유를 걷어 보려 했으나 두 번 다 사고가 났다 (2026-09-02·04 실측):
+    #   - 폭에 비례해 걷으면 헤더가 긴 열이 먼저 잘린다
+    #     ('Quantity'→'Quantit', 'Measurement'→'Measurem', 'Gross Weight' 2줄 클립)
+    #   - 열마다 자동 맞춤을 시키면, 그 시점엔 아직 아이템 값을 쓰기 전이라 `PO No.` 열이
+    #     헤더 글자 기준으로 줄어 긴 고객 PO(`WGDBS26015`)가 잘린다. 반대로 위 헤더
+    #     블록의 `G16`(복수 PO 콤마 결합)은 G를 89자까지 부풀린다
+    # 어차피 짜낼 수 있는 건 3~5자인데 필요한 건 12자 남짓이라, 걷어 봐야 배율이 91% →
+    # 88%로 바뀌는 정도다. 위험만 크고 얻는 게 없다.
+    #
+    # 배율로 흡수하면 열 폭이 그대로라 **줄바꿈·행 높이가 표준 서식과 완전히 같고**,
+    # SECTORIEL의 두 장(수출신고용/고객 제출용)도 줄 단위로 일치한다.
     ws.api.PageSetup.Zoom = False
     ws.api.PageSetup.FitToPagesWide = 1
     ws.api.PageSetup.FitToPagesTall = False
 
     logger.debug(
-        f"폭 재배분: {grow_col} +{name_delta:.2f}자, {col} +{needed - name_delta:.2f}자, "
-        f"기부 열 {list(width_donors)}에서 {freed:.2f}자 회수 → 나머지는 인쇄 배율로 흡수"
+        f"폭 조정: {grow_col} +{name_delta:.2f}자, {col} +{needed - name_delta:.2f}자 "
+        f"→ 초과분은 인쇄 배율로 흡수"
     )
 
     # 5. 문서 단위 HS 비우기

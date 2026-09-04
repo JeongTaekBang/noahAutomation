@@ -176,32 +176,28 @@ class TestGeneratorsUseSharedHelper:
         assert 'layout_item_rows(' in source, f"{module_name}: layout_item_rows 미사용"
 
 
-class TestHsWidthDonors:
-    """라인별 HS 판의 폭 재배분 정책
+class TestHsLayoutKeepsExistingColumns:
+    """HS 열은 기존 열을 건드리지 않고 넣는다
 
-    D를 A:D에서 그냥 떼면 품목명 폭이 20% 좁아져 SECTORIEL 실측 200줄이
-    406 → 505줄로 늘어난다. CI/PL은 `fitToPage`가 없어 그대로 쪽수가 되므로,
-    같은 봉투에 든 수출신고용과 고객 제출용의 쪽수가 갈린다 (2026-09-02 실측).
-    그래서 D 폭은 품목명 칸에 되돌리고 그만큼을 아래 열에서 걷는다.
-
-    (실제 폭 계산은 시트를 재야 해서 COM이 필요하다 — 여기서는 정책만 지킨다.)
+    오른쪽 블록에서 폭을 걷어 보려다 두 번 사고가 났다 (2026-09-02·04 실측):
+    헤더가 긴 열이 잘리고('Quantity'→'Quantit'), 값을 쓰기 전에 자동 맞춤을 돌려
+    `PO No.` 열이 줄어 긴 고객 PO가 잘렸다. 지금은 초과분을 인쇄 배율로 흡수한다.
     """
 
-    @pytest.mark.parametrize('donors_name', ['CI_HS_WIDTH_DONORS', 'PL_HS_WIDTH_DONORS'])
-    def test_기부_열은_인쇄영역_안의_실제_열이다(self, donors_name):
+    def test_기부_열_설정이_남아_있지_않다(self):
+        """폭을 걷는 정책 자체를 없앴다 — 상수가 남아 있으면 되살아난다"""
         from po_generator import config
 
-        donors = getattr(config, donors_name)
-        assert donors, f"{donors_name}: 기부 열이 없으면 인쇄 폭이 넘친다"
-        assert all(col in 'ABCDEFGHI' for col in donors), donors
+        for name in ('CI_HS_WIDTH_DONORS', 'PL_HS_WIDTH_DONORS'):
+            assert not hasattr(config, name), f"{name}: 폭 걷기 정책은 제거됐다"
 
-    @pytest.mark.parametrize('donors_name', ['CI_HS_WIDTH_DONORS', 'PL_HS_WIDTH_DONORS'])
-    def test_품목명_열과_HS_열은_기부하지_않는다(self, donors_name):
-        """A:C에서 걷으면 품목명이 다시 좁아지고, D에서 걷으면 HS 열이 사라진다"""
-        from po_generator import config
+    def test_레이아웃_헬퍼가_기부_열을_받지_않는다(self):
+        import inspect
 
-        forbidden = set(ITEM_NAME_MERGED_COLS_HS) | {HS_COLUMN_LETTER}
-        assert not (set(getattr(config, donors_name)) & forbidden)
+        from po_generator.excel_helpers import apply_hs_layout
+
+        params = inspect.signature(apply_hs_layout).parameters
+        assert 'width_donors' not in params
 
 
 class TestGeneratorsDoNotHardcodeColumns:

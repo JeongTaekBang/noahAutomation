@@ -1,3 +1,40 @@
+# CI/PL 양식 통일 — 라인별 HS CODE를 모든 거래처로 (2026-09-04) — 완료
+
+사용자 지시: "다른 업체 CI/PL도 Sectoriel처럼 header 비우고 HS code가 line item쪽에
+표시되도록. 대신 다른 업체는 기본 셋팅이 8481.90.0000으로." → 양식 갈래를 하나로.
+
+- [x] `config.DEFAULT_HS_CODE = '8481.90.0000'` (헤더에 박혀 있던 값 그대로)
+- [x] `hs_code.default_hs_result()` + `enrich_hs_codes(default_code=...)` —
+      **운임 줄은 기본값도 넣지 않는다** (물품이 아니라 HS가 없다)
+- [x] `document_service` — CI/PL 기본 문서도 항상 `_hs_code`를 붙여 생성
+- [x] `apply_hs_layout(sample_code=...)` — D 폭을 그 문서의 **가장 긴 코드**로 잰다
+      (기본값은 10자리 점 구분 12자, SECTORIEL은 8자)
+- [x] 폭 걷기(`*_HS_WIDTH_DONORS`) **제거** — 아래 리뷰 참조
+- [x] 테스트 `TestDefaultCode` 4건, `TestHsLayoutKeepsExistingColumns` 2건.
+      전체 **884 passed, 2 skipped**
+- [x] 실물 검증 — WATERGATES(비대상) CI/PL과 SECTORIEL CI 2장 생성, PNG 눈검사 후 삭제
+- [x] CLAUDE.md / docs/TEMPLATE_MAPPINGS.md 반영
+
+## 리뷰 — 폭 걷기를 결국 없앤 이유
+
+D열(약 12자)을 만들려면 어딘가에서 폭을 빼야 하는데, 오른쪽 블록에서 걷으려다
+**두 번 다 사고가 났다**:
+
+1. 폭에 비례해 걷기 → 헤더가 긴 열이 먼저 잘림
+   (`Quantity`→`Quantit`, `Measurement`→`Measurem`, `Gross Weight` 2줄 클립)
+2. 열마다 자동 맞춤 → **값을 쓰기 전에 도는 게 문제**였다. `PO No.` 열이 헤더 글자
+   기준으로 줄어 긴 고객 PO(`WGDBS26015`)가 잘렸다. 반대로 위 헤더의 `G16`은 복수 PO를
+   콤마로 이어 붙이므로 자동 맞춤이 **G를 89자로 부풀려** 인쇄 배율이 폭주했다
+
+짜낼 수 있는 건 3~5자인데 필요한 건 12자였다 — 걷어 봐야 배율이 91% → 88%로 바뀌는
+정도였고 위험만 컸다. 지금은 **기존 열을 한 칸도 안 건드리고** 초과분을 인쇄 배율
+(`FitToPagesWide=1`, 실측 89%)로 흡수한다. 열 폭이 그대로라 줄바꿈·행 높이가 원래
+서식과 완전히 같은 것이 덤이다.
+
+**남은 것(이번 변경과 무관, 기존부터)**: CI의 `PO No.`(E열, 11.83자)는 고객 PO가 11자를
+넘으면 잘린다 — WATERGATES `WGDBS260155` 실측. E 폭도 내용도 이번에 안 건드렸으므로
+기존 산출물과 동일하다. 고치려면 또 폭을 걷어야 해서 별건으로 남긴다.
+
 # SECTORIEL 라인별 HS CODE — CI/PL 고객 제출용 (2026-09-02) — 완료
 
 사용자 요청: SECTORIEL이 자기네 수입통관 HS CODE를 CI/PL **라인마다** 넣어달라 요청.

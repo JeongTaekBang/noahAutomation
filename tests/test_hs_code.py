@@ -1,6 +1,10 @@
 """
-Sectoriel 라인별 HS CODE 판정 테스트 (Excel 없이)
-=================================================
+CI/PL 라인별 HS CODE 테스트 (Excel 없이)
+========================================
+
+두 경로를 다 지킨다 — 거래처 고유 코드를 받지 않은 문서의 **기본값 일괄**
+(`TestDefaultCode`)과, 고객 코드표가 있는 거래처의 **판정 사다리**(나머지).
+어느 쪽이든 운임 줄은 비운다.
 
 품목명·모델번호는 **2026년 SECTORIEL 실출고 데이터에서 그대로 가져왔다**
 (DN 200줄 / 스페어 12줄). 가공한 예시로 테스트하면 프랑스어 표기나 OS name 오염
@@ -16,6 +20,7 @@ from po_generator.hs_code import (
     HS_HEATER_LARGE,
     HS_HEATER_SMALL,
     HS_COLUMN,
+    default_hs_result,
     enrich_hs_codes,
     resolve_hs_code,
 )
@@ -160,6 +165,41 @@ class TestEnrichHsCodes:
     def test_원본을_건드리지_않는다(self):
         enrich_hs_codes(self.FRAME)
         assert HS_COLUMN not in self.FRAME.columns
+
+
+class TestDefaultCode:
+    """거래처 고유 코드를 받지 않은 문서 — 우리 수출신고 코드를 일괄로 (양식 통일)"""
+
+    DEFAULT = '8481.90.0000'
+
+    def test_물품_줄은_기본값을_받는다(self):
+        result = default_hs_result('NA15 150Nm 20s. 230V50HZ', self.DEFAULT)
+        assert result.code == self.DEFAULT
+        assert not result.unmatched
+
+    def test_운임_줄은_기본값도_넣지_않는다(self):
+        """물품이 아니라 HS가 애초에 없다 — 운송비에 밸브 부품 세번이 찍히면 안 된다"""
+        result = default_hs_result('FEDEX COST', self.DEFAULT)
+        assert result.code == ''
+        assert not result.unmatched
+
+    def test_기본값_경로는_거래처_판정표를_타지_않는다(self):
+        """보드·액추에이터 구분 없이 전부 기본값 — 그 구분은 고객 코드표가 있을 때만"""
+        frame = pd.DataFrame([
+            {'Item': 'NA15 150Nm 20s. 230V50HZ', 'Model number': '023130', 'OS name': 'Noah NA'},
+            {'Item': 'CIRCUIT LED BOARD SA05/09 230VAC', 'Model number': '980748',
+             'OS name': 'Electric Spares'},
+            {'Item': 'FEDEX COST', 'Model number': None, 'OS name': 'Noah NA'},
+        ])
+        enriched, unmatched = enrich_hs_codes(frame, default_code=self.DEFAULT)
+        assert list(enriched[HS_COLUMN]) == [self.DEFAULT, self.DEFAULT, '']
+        assert unmatched == [], "기본값 경로에는 '확인 필요'가 생기지 않는다"
+
+    def test_설정값이_템플릿에_있던_코드_그대로다(self):
+        """헤더에서 라인으로 옮긴 것이지 값을 바꾼 게 아니다"""
+        from po_generator.config import DEFAULT_HS_CODE
+
+        assert DEFAULT_HS_CODE == '8481.90.0000'
 
 
 class TestActuatorCorpus:
