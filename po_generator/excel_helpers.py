@@ -13,6 +13,7 @@ Excel 헬퍼 함수 모듈
 - batch_read_column: 열의 값을 한 번에 읽기 (성능 최적화)
 - delete_rows_range / insert_copied_rows: 연속 행을 한 번에 삭제/삽입 (성능 최적화)
 - layout_item_rows: 아이템 행 마무리 손질 = 병합 보장 + 행 높이 교정 (문서 5종 공통 진입점)
+- assert_hs_template: CI/PL 템플릿에 HS CODE 열이 있는지 확인 (구 양식 혼입 차단)
 - layout_address_rows: 헤더 주소 블록 줄바꿈 + 행 높이 확보 (OC·FI 공통)
 """
 
@@ -458,129 +459,33 @@ def _item_name_cols(hs_column: bool) -> str:
     return ITEM_NAME_MERGED_COLS_HS if hs_column else ITEM_NAME_MERGED_COLS
 
 
+# HS CODE가 실리는 열. 품목명 병합에서 떨어져 나온 자리다 —
+# **양식은 템플릿 파일이 소유하고**(CI/PL 템플릿의 D18이 'HS CODE'),
+# 여기서는 병합 열 불변식을 세우는 데만 쓴다 (`tests/test_doc_layout.py`).
 HS_COLUMN_LETTER: str = 'D'
+
+
 HS_HEADER_TEXT: str = 'HS CODE'
-# 자동 맞춤은 딱 맞게 재서 글자가 테두리에 닿는다 — 좌우 여유를 조금 준다
-HS_COLUMN_PAD: float = 1.0
 
 
-def apply_hs_layout(
-    ws: xw.Sheet,
-    *,
-    header_row: int,
-    first_item_row: int,
-    last_row: int,
-    sample_code: str = '',
-    doc_hs_cells: tuple[str, ...] = (),
-) -> None:
-    """아이템 격자에 HS CODE 열(D)을 만들어 낸다 — **임시 사본 위에서**
+def assert_hs_template(ws: xw.Sheet, header_row: int) -> None:
+    """템플릿에 HS CODE 열이 있는지 확인 (CI/PL 값 쓰기 전)
 
-    **왜 템플릿 파일을 따로 두지 않나.** 사본은 갈라진다 — 나중에 은행 계좌·주소·약관
-    URL을 고치면 고객 제출용 템플릿만 낡은 채로 남고, 그걸 막을 장치가 없다. 그래서
-    `prepare_template()`이 이미 떠 놓은 임시 사본을 고친다. 원본 xlsx는 손대지 않으므로
-    이미지·drawing·머리글·printerSettings가 전부 그대로 따라온다 (openpyxl로 다시 쓰면
-    머리글이 사라진다 — 실측 경고 `Cannot parse header or footer`).
+    양식은 템플릿 파일이 소유한다 — 품목명이 A:C로 병합돼 있고 D가 HS 열이다.
+    구 양식(A:D 병합)이 섞여 들어오면 D에 쓴 코드가 **병합 셀에 삼켜져 조용히 사라진다**.
+    COM 읽기 한 번으로 막는다.
 
-    **값을 채우기 전에, 행을 지우거나 삽입하기 전에** 부른다 — 그 시점에만 Total 행이
-    템플릿 좌표에 있다. 이후 복사·삽입되는 행은 첫 아이템 행의 A:C를 물려받고,
-    `layout_item_rows(hs_column=True)`가 한 번 더 보장한다.
-
-    아이템 격자에는 세로 괘선이 없어서(실측: 전 셀 left/right = None) D를 노출해도
-    빈 칸이 뚫려 보이지 않는다 — 가로선은 각 행이 이미 갖고 있다.
-
-    Args:
-        ws: xlwings Sheet
-        header_row: 열 이름 행 (Description/PO No./Quantity...)
-        first_item_row: 첫 아이템 행
-        last_row: 아이템 격자의 마지막 행 (Total 행)
-        sample_code: D 폭을 잴 때 쓸 표본 — 이 문서에 실릴 것 중 **가장 긴 코드**를
-            넘긴다 (표기 길이가 문서마다 다르다). 비우면 8자리로 잰다
-        doc_hs_cells: 비울 문서 단위 HS 셀. 라인별 코드와 한 장에 같이 남으면
-            **문서가 서로 다른 두 HS를 주장한다** (템플릿 기본값은 밸브 부품 코드)
+    Raises:
+        ValueError: 헤더 행의 HS 열에 'HS CODE'가 없을 때
     """
-    col = HS_COLUMN_LETTER
-    std_cols, hs_cols = ITEM_NAME_MERGED_COLS, ITEM_NAME_MERGED_COLS_HS
+    actual = ws.range(f'{HS_COLUMN_LETTER}{header_row}').value
+    if str(actual or '').strip().upper() != HS_HEADER_TEXT:
+        raise ValueError(
+            f"템플릿에 HS CODE 열이 없습니다 "
+            f"({HS_COLUMN_LETTER}{header_row} = {actual!r}) — "
+            f"templates/Old/의 구 양식으로 되돌아간 것이 아닌지 확인하세요"
+        )
 
-    # 표준판의 품목명 칸이 실제로 몇 pt인지 먼저 재 둔다 (병합을 풀기 전에)
-    target_pt = ws.range(f'{std_cols[0]}{first_item_row}:{std_cols[-1]}{first_item_row}').api.Width
-    hs_width_before = ws.range(f'{col}1').column_width
-
-    # 1. 품목명 병합 A:D → A:C (헤더·카테고리·아이템·Total 행이 한 덩어리라 2회로 끝난다)
-    span = f'{std_cols[0]}{header_row}:{std_cols[-1]}{last_row}'
-    ws.range(span).api.UnMerge()
-    ws.range(f'{hs_cols[0]}{header_row}:{hs_cols[-1]}{last_row}').api.Merge(True)
-
-    # 2. 헤더 칸 — 병합을 풀면 A의 서식을 물려받지 않으므로 옆 헤더(E)에서 가져온다
-    neighbor = ws.range(f'E{header_row}')
-    header_cell = ws.range(f'{col}{header_row}')
-    header_cell.value = HS_HEADER_TEXT
-    header_cell.api.Font.Bold = neighbor.api.Font.Bold
-    header_cell.api.Font.Size = neighbor.api.Font.Size
-    header_cell.api.HorizontalAlignment = XlConstants.xlCenter
-
-    # 3. 아이템 칸 — 텍스트 서식을 **쓰기 전에** 걸어야 '85013100'이 숫자로 변환돼
-    #    우측 정렬되는 것을 막는다. 세로 가운데는 품목명이 2~3줄로 접힌 행에서 필요하다.
-    item_cells = ws.range(f'{col}{first_item_row}:{col}{last_row}')
-    item_cells.api.NumberFormat = '@'
-    item_cells.api.HorizontalAlignment = XlConstants.xlCenter
-    item_cells.api.VerticalAlignment = XlConstants.xlCenter
-    item_cells.api.Font.Size = ws.range(f'A{first_item_row}').api.Font.Size
-
-    # 3-1. D 폭은 **Excel에게 재게 한다** — 템플릿의 원래 D 폭(약 7자)으로는 굵은 헤더
-    #      'HS CODE'와 코드가 둘 다 잘린다 (2026-09-02 실측: 'IS COD', '3535290').
-    #      폰트 폭을 코드로 추정하지 않고, 실제로 실릴 것 중 가장 긴 코드를 표본으로
-    #      넣어 자동 맞춤을 시킨 뒤 치운다. 표기가 문서마다 다르다 —
-    #      수출신고 기본값은 10자리 점 구분(`8481.90.0000`), SECTORIEL은 8자리.
-    probe = ws.range(f'{col}{first_item_row}')
-    probe.value = sample_code or '0' * 8
-    ws.range(f'{col}:{col}').api.EntireColumn.AutoFit()
-    probe.value = ''
-    ws.range(f'{col}1').column_width = ws.range(f'{col}1').column_width + HS_COLUMN_PAD
-
-    # 4. 열 폭 — **파일에 적힌 숫자를 그대로 쓰지 않고 시트를 재서 맞춘다.**
-    #    COM의 `ColumnWidth`(문자)와 저장되는 width는 열 패딩만큼 다르고(실측 0.83자),
-    #    병합 칸의 pt 폭은 걸친 열 수만큼 패딩이 더 붙는다 (A:D는 A:C보다 패딩 1개 더).
-    #    그래서 "A:C가 표준판 A:D와 같은 pt가 되도록" C를 키우고, 같은 문자 수를
-    #    기부 열에서 뺀다 — 모든 열이 같은 폰트라 문자 수 합이 보존되면 인쇄 폭도 보존된다.
-    name_cell = ws.range(f'{hs_cols[0]}{first_item_row}:{hs_cols[-1]}{first_item_row}')
-    grow_col = hs_cols[-1]
-    grow_chars = ws.range(f'{grow_col}1').column_width
-    grow_pt = ws.range(f'{grow_col}{first_item_row}').api.Width
-    if grow_pt <= 0 or grow_chars <= 0:
-        return
-
-    pt_per_char = grow_pt / grow_chars
-    name_delta = (target_pt - name_cell.api.Width) / pt_per_char
-    ws.range(f'{grow_col}1').column_width = grow_chars + name_delta
-    needed = name_delta + (ws.range(f'{col}1').column_width - hs_width_before)
-
-    # **늘어난 폭은 인쇄 배율로 흡수한다 — 기존 열은 한 칸도 건드리지 않는다.**
-    #
-    # 오른쪽 블록에서 여유를 걷어 보려 했으나 두 번 다 사고가 났다 (2026-09-02·04 실측):
-    #   - 폭에 비례해 걷으면 헤더가 긴 열이 먼저 잘린다
-    #     ('Quantity'→'Quantit', 'Measurement'→'Measurem', 'Gross Weight' 2줄 클립)
-    #   - 열마다 자동 맞춤을 시키면, 그 시점엔 아직 아이템 값을 쓰기 전이라 `PO No.` 열이
-    #     헤더 글자 기준으로 줄어 긴 고객 PO(`WGDBS26015`)가 잘린다. 반대로 위 헤더
-    #     블록의 `G16`(복수 PO 콤마 결합)은 G를 89자까지 부풀린다
-    # 어차피 짜낼 수 있는 건 3~5자인데 필요한 건 12자 남짓이라, 걷어 봐야 배율이 91% →
-    # 88%로 바뀌는 정도다. 위험만 크고 얻는 게 없다.
-    #
-    # 배율로 흡수하면 열 폭이 그대로라 **줄바꿈·행 높이가 표준 서식과 완전히 같고**,
-    # SECTORIEL의 두 장(수출신고용/고객 제출용)도 줄 단위로 일치한다.
-    ws.api.PageSetup.Zoom = False
-    ws.api.PageSetup.FitToPagesWide = 1
-    ws.api.PageSetup.FitToPagesTall = False
-
-    logger.debug(
-        f"폭 조정: {grow_col} +{name_delta:.2f}자, {col} +{needed - name_delta:.2f}자 "
-        f"→ 초과분은 인쇄 배율로 흡수"
-    )
-
-    # 5. 문서 단위 HS 비우기
-    for cell in doc_hs_cells:
-        ws.range(cell).value = ''
-
-    logger.debug(f"HS 열 배치 적용: {col}{header_row}~{col}{last_row}")
 
 # 아이템 그리드 내부 가로선 색 — 템플릿 상단 규칙선(#BBBBBB thin)과 같은 톤.
 # 검정 thin은 PDF로 나가면 0.96pt 실선이라(캘리브레이션 실측: hairline=0.12 /

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from po_generator.excel_helpers import (
     HS_COLUMN_LETTER,
+    assert_hs_template,
     ITEM_NAME_MERGED_COLS,
     ITEM_NAME_MERGED_COLS_HS,
     MIN_ITEM_ROW_HEIGHT,
@@ -176,28 +177,124 @@ class TestGeneratorsUseSharedHelper:
         assert 'layout_item_rows(' in source, f"{module_name}: layout_item_rows 미사용"
 
 
-class TestHsLayoutKeepsExistingColumns:
-    """HS 열은 기존 열을 건드리지 않고 넣는다
+class TestHsTemplateShape:
+    """**양식은 템플릿 파일이 소유한다** — 그 실물을 본다 (COM 없이 openpyxl로)
 
-    오른쪽 블록에서 폭을 걷어 보려다 두 번 사고가 났다 (2026-09-02·04 실측):
-    헤더가 긴 열이 잘리고('Quantity'→'Quantit'), 값을 쓰기 전에 자동 맞춤을 돌려
-    `PO No.` 열이 줄어 긴 고객 PO가 잘렸다. 지금은 초과분을 인쇄 배율로 흡수한다.
+    예전엔 생성할 때마다 `apply_hs_layout()`이 임시 사본을 고쳤다. 판이 둘(표준/고객용)일
+    때는 템플릿을 복제하면 갈라지니 그럴 만했는데, 양식이 하나로 통일되면서 근거가
+    사라져 템플릿에 구웠다 (2026-09-07). 그래서 이제 **템플릿이 어긋나면 산출물이 어긋난다**
+    — 여기서 직접 감시한다. 구 양식은 `templates/Old/`에 있어 기준값을 하드코딩하지 않아도 된다.
     """
 
-    def test_기부_열_설정이_남아_있지_않다(self):
-        """폭을 걷는 정책 자체를 없앴다 — 상수가 남아 있으면 되살아난다"""
-        from po_generator import config
+    TEMPLATES = Path(__file__).resolve().parent.parent / 'templates'
+    NAMES = ('commercial_invoice.xlsx', 'packing_list.xlsx')
+    HEADER_ROW, FIRST_ITEM_ROW = 18, 20
 
-        for name in ('CI_HS_WIDTH_DONORS', 'PL_HS_WIDTH_DONORS'):
-            assert not hasattr(config, name), f"{name}: 폭 걷기 정책은 제거됐다"
+    # 열 하나가 줄면 그 열 몫의 안쪽 여백이 사라져, A:C는 A:D보다 **저장된 폭 숫자가**
+    # 패딩 한 몫만큼 작다 (실측 0.83자 — `excel_helpers` 주석). 화면·인쇄 폭은 같다.
+    COLUMN_PADDING = 0.83
 
-    def test_레이아웃_헬퍼가_기부_열을_받지_않는다(self):
-        import inspect
+    @staticmethod
+    def _sheet(path):
+        from openpyxl import load_workbook
 
-        from po_generator.excel_helpers import apply_hs_layout
+        return load_workbook(path).worksheets[0]
 
-        params = inspect.signature(apply_hs_layout).parameters
-        assert 'width_donors' not in params
+    @classmethod
+    def _total_row(cls, ws):
+        """아이템 격자의 끝 — 그 아래 Shipping Mark 등은 병합 규칙이 다르다"""
+        for r in range(cls.FIRST_ITEM_ROW, cls.FIRST_ITEM_ROW + 30):
+            if str(ws.cell(r, 1).value or '').strip() == 'Total':
+                return r
+        raise AssertionError('Total 행을 찾지 못했다')
+
+    @pytest.fixture(params=NAMES)
+    def name(self, request):
+        if not (self.TEMPLATES / request.param).exists():
+            pytest.skip(f"템플릿 없음: {request.param}")
+        return request.param
+
+    def test_HS_열_머리글이_있다(self, name):
+        """생성기가 이걸 보고 구 양식 혼입을 막는다 (`assert_hs_template`)"""
+        ws = self._sheet(self.TEMPLATES / name)
+        assert ws[f'{HS_COLUMN_LETTER}{self.HEADER_ROW}'].value == 'HS CODE'
+
+    def test_품목명은_HS_열을_비켜_병합돼_있다(self, name):
+        """A:D로 남아 있으면 D에 쓴 코드가 병합 셀에 삼켜져 조용히 사라진다"""
+        ws = self._sheet(self.TEMPLATES / name)
+        grid = range(self.HEADER_ROW, self._total_row(ws) + 1)
+        merges = {
+            str(m) for m in ws.merged_cells.ranges
+            if m.min_col == 1 and m.min_row in grid
+        }
+        assert len(merges) == len(grid), f"{name}: 격자 행마다 병합이 있어야 한다 — {sorted(merges)}"
+        last = ITEM_NAME_MERGED_COLS_HS[-1]
+        assert all(m.split(':')[1].startswith(last) for m in merges), sorted(merges)[:5]
+
+    def test_문서_단위_HS는_비어_있다(self, name):
+        """라인별 코드와 한 장에 같이 남으면 문서가 두 HS를 주장한다"""
+        ws = self._sheet(self.TEMPLATES / name)
+        assert ws['H12'].value in (None, ''), ws['H12'].value
+        assert ws['I12'].value in (None, ''), ws['I12'].value
+
+    def test_인쇄는_한_페이지_폭에_맞춘다(self, name):
+        """D를 넣느라 늘어난 폭(약 12자)을 배율로 흡수한다 — 열 폭을 안 건드리려고"""
+        ws = self._sheet(self.TEMPLATES / name)
+        assert ws.sheet_properties.pageSetUpPr.fitToPage is True
+        assert ws.page_setup.fitToWidth in (1, '1', None), ws.page_setup.fitToWidth
+
+    # 구 양식의 품목명 폭(A:D) 실측 — D를 HS 열로 떼어내기 전 값.
+    # `templates/Old/`에 보관본이 있지만 그 폴더는 .gitignore 대상이라 다른 환경에는
+    # 없다. 기준이 사라지면 감시도 사라지므로 여기 적어 둔다.
+    OLD_ITEM_NAME_WIDTH = {'commercial_invoice.xlsx': 37.33, 'packing_list.xlsx': 36.66}
+
+    def test_품목명_폭이_구_양식보다_좁지_않다(self, name):
+        """좁히면 200줄이 406 → 505줄로 늘어 SECTORIEL 두 장의 쪽수가 갈린다 (실측)"""
+        ws = self._sheet(self.TEMPLATES / name)
+        now = sum(
+            getattr(ws.column_dimensions.get(c), 'width', 0) or 0
+            for c in ITEM_NAME_MERGED_COLS_HS
+        )
+        was = self.OLD_ITEM_NAME_WIDTH[name]
+        assert now >= was - self.COLUMN_PADDING, f"{name}: 품목명 폭 {was} -> {now}"
+
+    def test_구_양식_보관본이_있으면_구_양식_그대로다(self, name):
+        """`templates/Old/`가 새 양식으로 덮이면 되돌릴 곳이 없어진다 (있을 때만 확인)"""
+        old_path = self.TEMPLATES / 'Old' / name
+        if not old_path.exists():
+            pytest.skip(f"구 양식 보관본 없음 (.gitignore 대상): Old/{name}")
+        ws = self._sheet(old_path)
+        assert ws[f'{HS_COLUMN_LETTER}{self.HEADER_ROW}'].value != 'HS CODE'
+        assert ws['I12'].value, "구 양식은 문서 단위 HS를 갖고 있었다"
+        was = sum(
+            getattr(ws.column_dimensions.get(c), 'width', 0) or 0
+            for c in ITEM_NAME_MERGED_COLS
+        )
+        assert was == pytest.approx(self.OLD_ITEM_NAME_WIDTH[name], abs=0.01), (
+            f"{name}: 위 테스트의 기준값이 보관본과 다르다 — {was}"
+        )
+
+
+class TestAssertHsTemplate:
+    """구 양식 혼입 가드 — 값 하나만 읽으므로 스텁으로 충분하다"""
+
+    class _Sheet:
+        def __init__(self, value):
+            self._value = value
+
+        def range(self, _addr):
+            return type('R', (), {'value': self._value})()
+
+    def test_HS_머리글이_있으면_통과(self):
+        assert_hs_template(self._Sheet('HS CODE'), 18) is None
+
+    @pytest.mark.parametrize('value', [None, '', 'Description', '품목'])
+    def test_없으면_멈춘다(self, value):
+        with pytest.raises(ValueError, match='HS CODE'):
+            assert_hs_template(self._Sheet(value), 18)
+
+    def test_대소문자와_공백은_허용(self):
+        assert_hs_template(self._Sheet(' hs code '), 18) is None
 
 
 class TestGeneratorsDoNotHardcodeColumns:

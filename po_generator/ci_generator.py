@@ -24,7 +24,7 @@ from po_generator.hs_code import HS_COLUMN
 from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
     XlConstants,
-    apply_hs_layout,
+    assert_hs_template,
     xlwings_app_context,
     prepare_template,
     cleanup_temp_file,
@@ -56,12 +56,8 @@ ITEM_START_ROW = 20
 
 # 아이템 열 (E=Customer PO, F=Qty, G=Unit Price, H=Currency, I=Amount)
 COL_ITEM_NAME = 'A'
-# HS CODE 열. 템플릿에서는 D가 품목명 병합(A:D) 안이라, `apply_hs_layout()`이
-# 병합을 A:C로 줄여 D를 열어 준 뒤에만 쓴다.
+# HS CODE 열 — 템플릿의 품목명 병합이 A:C까지라 D가 비어 있다.
 COL_HS_CODE = 'D'
-# 템플릿에 박힌 문서 단위 HS. 라인별로 옮겼으므로 비운다 —
-# 한 장이 서로 다른 두 HS를 주장하면 통관에서 어느 쪽을 믿을지 알 수 없다.
-CELLS_DOC_HS = ('H12', 'I12')
 COL_CUSTOMER_PO = 'E'
 COL_QTY = 'F'
 COL_UNIT_PRICE = 'G'
@@ -89,10 +85,7 @@ def create_ci_xlwings(
         order_data: 주문 데이터 (첫 번째 아이템 또는 단일 아이템)
         items_df: 다중 아이템인 경우 전체 아이템 DataFrame
     """
-    hs_mode = items_df is not None and HS_COLUMN in items_df.columns
-    temp_template, temp_output = prepare_template(
-        template_path, "ci_hs" if hs_mode else "ci",
-    )
+    temp_template, temp_output = prepare_template(template_path, "ci")
 
     try:
         with xlwings_app_context() as app:
@@ -231,19 +224,9 @@ def _fill_items(
     template_item_count = total_row - ITEM_START_ROW
     logger.debug(f"템플릿 아이템 수: {template_item_count}, 실제 아이템 수: {num_items}")
 
-    # 임시 사본의 아이템 격자에 D열(HS CODE)을 만들어 낸다 — CI/PL 공통 양식.
-    # 행을 지우거나 삽입하기 전에 해야 Total 행이 아직 템플릿 좌표에 있다.
-    if HS_COLUMN in items_df.columns:
-        apply_hs_layout(
-            ws,
-            header_row=ITEM_START_ROW - 2,
-            first_item_row=ITEM_START_ROW,
-            last_row=total_row,
-            sample_code=max(
-                (to_text(c) for c in items_df[HS_COLUMN]), key=len, default='',
-            ),
-            doc_hs_cells=CELLS_DOC_HS,
-        )
+    # 양식(A:C 병합 + D열 HS CODE)은 템플릿 파일이 소유한다 — 여기서는 구 양식이
+    # 섞여 들어오지 않았는지만 본다. 구 양식이면 D에 쓴 코드가 병합 셀에 삼켜진다.
+    assert_hs_template(ws, ITEM_START_ROW - 2)
 
     if num_items < template_item_count:
         rows_to_delete = template_item_count - num_items
@@ -265,7 +248,10 @@ def _fill_items(
     # (복사·삽입한 행은 병합을 잃을 수 있고, 병합 칸은 autofit이 먹지 않는다.
     #  CI와 PL은 늘 같이 첨부되므로 같은 공용 헬퍼를 그대로 쓴다 — 규칙이 갈리면 안 된다)
     names = _fill_items_batch(ws, items_df)
-    layout_item_rows(ws, ITEM_START_ROW, names, hs_column=HS_COLUMN in items_df.columns)
+    # `hs_column`은 데이터가 아니라 **템플릿**을 따라간다 — CI/PL 템플릿은 항상 A:C다.
+    # 데이터에 `_hs_code`가 있는지로 정하면, 그 열이 빠진 경로에서 A:D로 재병합해
+    # HS 열을 통째로 삼킨다.
+    layout_item_rows(ws, ITEM_START_ROW, names, hs_column=True)
 
     _update_total_row(ws, num_items, order_data)
 
