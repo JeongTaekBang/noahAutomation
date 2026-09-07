@@ -5,10 +5,15 @@
 Streamlit UI 렌더링은 테스트하지 않음 — 순수 데이터 로직만.
 """
 
+import sqlite3
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
+import dashboard
 from dashboard import build_calendar_data, calc_coverage, calc_margin, enrich_dn, filt, fmt_krw
+from po_generator.db_schema import ensure_sync_log_tables
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -686,3 +691,86 @@ class TestCalcMargin:
         """빈 PO → 모두 원가 미확정"""
         result = calc_margin(so_for_margin, pd.DataFrame())
         assert (~result["has_cost"]).all()
+
+
+# ═══════════════════════════════════════════════════════════════
+# '확인 완료'(ack) 영속성
+# ═══════════════════════════════════════════════════════════════
+class TestAckPersistence:
+    """ack은 **원본 DB**에 남아야 한다 — 읽기용 스냅샷에 쓰면 조용히 증발한다.
+
+    `_db_snapshot()`은 원본이 갱신되거나 대시보드가 재시작되면 임시 사본을
+    `os.replace()`로 통째로 갈아치운다. 2026-07-31~09-07 사이 실제로
+    `_ack_so_change()`가 그 사본에 써서, 눌러도 다음 실행에 같은 목록이
+    되돌아왔다 (예외가 안 나 한 달간 발각되지 않음).
+    """
+
+    @pytest.fixture
+    def db(self, tmp_path, monkeypatch):
+        """_sync_runs / _sync_log 한 건씩 있는 실제 sqlite 파일 (= 원본 역할)"""
+        path = tmp_path / "noah_data.db"
+        conn = sqlite3.connect(str(path))
+        ensure_sync_log_tables(conn)
+        conn.execute(
+            "INSERT INTO _sync_runs (sync_id, started_at, dry_run) VALUES (1, '2026-09-01 10:00:00', 0)"
+        )
+        conn.execute(
+            "INSERT INTO _sync_log (id, sync_id, sheet_name, change_type, pk_json, pk_display, changes_json) "
+            "VALUES (1, 1, 'SO_국내', '수정', '[\"SOD-2026-0694\"]', 'SOD-2026-0694 | 1', "
+            "'{\"Sales Unit Price\": {\"old\": \"100\", \"new\": \"200\"}}')"
+        )
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(dashboard, "DB_FILE", path)
+        return path
+
+    def _acks(self, path: Path) -> list:
+        """path에 남은 ack 목록. 테이블 자체가 없으면 = 하나도 안 쓰인 것."""
+        conn = sqlite3.connect(str(path))
+        try:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='_so_change_ack'"
+            ).fetchone():
+                return []
+            return conn.execute("SELECT sync_log_id FROM _so_change_ack").fetchall()
+        finally:
+            conn.close()
+
+    def test_ack_lands_in_original_db(self, db):
+        """확인 완료 → 원본 파일 자체에 행이 남는다 (사본이 아니라)"""
+        assert dashboard._ack_so_change(1) is True
+        assert self._acks(db) == [(1,)]
+
+    def test_ack_survives_snapshot_rebuild(self, db, tmp_path):
+        """스냅샷을 다시 떠도 ack이 살아 있어야 한다 — 원래 증발하던 지점"""
+        assert dashboard._ack_so_change(1) is True
+
+        # _db_snapshot()이 하는 일과 동일: 원본에서 새 사본을 뜬다
+        copy = tmp_path / "snapshot.db"
+        src = sqlite3.connect(str(db))
+        try:
+            dst = sqlite3.connect(str(copy))
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+        finally:
+            src.close()
+
+        assert self._acks(copy) == [(1,)], "재복사된 스냅샷에 ack이 없다 = 원본에 안 쓰였다"
+
+    def test_ack_is_idempotent(self, db):
+        """같은 건을 두 번 눌러도 1행 (INSERT OR IGNORE)"""
+        assert dashboard._ack_so_change(1) is True
+        assert dashboard._ack_so_change(1) is True
+        assert self._acks(db) == [(1,)]
+
+    def test_ack_rejects_unknown_log_id(self, db):
+        """_sync_log에 없는 id는 FK로 거부 — 조용히 성공했다고 하면 안 된다"""
+        assert dashboard._ack_so_change(9999) is False
+        assert self._acks(db) == []
+
+    def test_ack_without_db_file(self, tmp_path, monkeypatch):
+        """DB 파일이 없으면 실패를 알린다 (빈 DB를 만들어 성공을 가장하지 않음)"""
+        monkeypatch.setattr(dashboard, "DB_FILE", tmp_path / "nope.db")
+        assert dashboard._ack_so_change(1) is False

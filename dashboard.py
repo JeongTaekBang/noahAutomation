@@ -149,6 +149,25 @@ def _conn():
         return sqlite3.connect(str(DB_FILE))
 
 
+def _write_conn():
+    """**쓰기 전용** — 스냅샷이 아니라 원본 DB를 연다.
+
+    읽기는 `_conn()`의 로컬 사본으로 충분하지만 쓰기는 절대 그러면 안 된다.
+    스냅샷은 `_db_snapshot()`이 `os.replace()`로 **같은 경로를 통째로 갈아치우는**
+    일회용 사본이라, 거기에 쓴 것은 다음 재복사(원본 갱신 = sync_db 실행, 또는
+    대시보드 재시작) 때 흔적 없이 사라진다.
+
+    2026-07-31 스냅샷 도입(e9bcf4d) 이후 '확인 완료'가 이 사본에 쓰이는 바람에
+    ack이 매번 증발했다 — 화면에서는 사라졌다가 다음 실행에 같은 목록이 그대로
+    돌아온다. **예외가 안 나므로 발각까지 한 달이 걸렸다.**
+
+    잠금은 쓰는 순간만 잡고 바로 놓는다 (sync_db.py와 같은 방식).
+    """
+    if not DB_FILE.exists():
+        return None
+    return sqlite3.connect(str(DB_FILE))
+
+
 # ═══════════════════════════════════════════════════════════════
 # 로더 에러 수집 — session_state 기반 (캐시 히트 시에도 유지)
 # ═══════════════════════════════════════════════════════════════
@@ -1166,8 +1185,12 @@ def load_so_unauth_changes() -> pd.DataFrame:
 
 
 def _ack_so_change(sync_log_id: int, note: str | None = None) -> bool:
-    """미확인 SO 변경을 ack 처리. 성공 True / 실패 False. 캐시 무효화는 호출자 책임."""
-    conn = _conn()
+    """미확인 SO 변경을 ack 처리. 성공 True / 실패 False. 캐시 무효화는 호출자 책임.
+
+    **대시보드에서 유일하게 DB에 쓰는 경로**라 `_conn()`(스냅샷)이 아니라
+    `_write_conn()`(원본)을 쓴다 — 이유는 `_write_conn` 독스트링 참조.
+    """
+    conn = _write_conn()
     if not conn:
         return False
     try:
@@ -1181,6 +1204,13 @@ def _ack_so_change(sync_log_id: int, note: str | None = None) -> bool:
             (sync_log_id, acked_at, acked_by, note),
         )
         conn.commit()
+        # WAL을 본체로 합친다 — 이 DB는 OneDrive로 공유되고 남들은 본체만 받는다
+        # (sync_db.checkpoint_wal()과 같은 이유). 덤으로 본체 mtime/size가 움직여
+        # `_db_snapshot`의 캐시 키가 무효화된다. 실패해도 commit은 이미 끝났다.
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error as e:
+            logger.warning("ack 후 WAL 체크포인트 실패 (id=%s): %s", sync_log_id, e)
         return True
     except Exception as e:
         logger.warning("SO 변경 ack 실패 (id=%s): %s", sync_log_id, e)
@@ -1627,6 +1657,8 @@ def _render_so_unauth_changes(market: str):
             with c2:
                 if st.button("✅ 확인 완료", key=f"ack_so_{log_id}", width='stretch'):
                     if _ack_so_change(log_id):
+                        # ack은 원본에 썼으므로 읽기용 스냅샷도 다시 떠야 반영된다
+                        _db_snapshot.clear()
                         load_so_unauth_changes.clear()
                         st.rerun()
                     else:
