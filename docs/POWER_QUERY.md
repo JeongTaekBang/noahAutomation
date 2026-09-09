@@ -539,7 +539,7 @@ in
 
 ### 목적
 - SO_국내 + SO_해외 통합
-- PO에서 원가 조인 → 마진/마진율 계산
+- PO에서 발주번호(PO_ID·NOAH O.C No.) + 원가 조인 → 마진/마진율 계산
 - DN에서 출고금액 조인 → 출고완료 여부, 미출고금액 계산
 - Cancelled·Hold 건 제외
 
@@ -553,6 +553,8 @@ in
 | Sales amount | 매출 외화 (해외만, 국내는 null) |
 | Sales amount KRW | 매출 (KRW) |
 | 구분 | 국내/해외 |
+| PO_ID | 발주 번호 (PO에서 조인, 분할 발주 시 콤마 연결) |
+| NOAH O.C No. | 공장 발주번호 (PO에서 조인, 분할 발주 시 콤마 연결) |
 | 원가_단가 | ICO Unit |
 | 원가 | Total ICO |
 | DN_ID | 출고 번호 (분할 출고 시 콤마 연결) |
@@ -567,6 +569,7 @@ in
 
 ### 용도
 - **마진율 정렬** → 수익성 낮은 건 파악
+- **PO_ID·NOAH O.C No.** → 이 주문 라인이 어느 발주로 나갔는지 역추적 (PO 시트·공장 문의)
 - **출고완료 = 미출고/공장 출고** → 미출고·미선적 현황
 - **미출고금액 합계** → 백로그 파악
 - **매출연월 그룹화** → 월별 매출 집계
@@ -605,15 +608,20 @@ let
     PO_국내_Raw = Excel.CurrentWorkbook(){[Name="PO_국내"]}[Content],
     PO_해외_Raw = Excel.CurrentWorkbook(){[Name="PO_해외"]}[Content],
 
-    PO_국내_Select = Table.SelectColumns(PO_국내_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
+    PO_국내_Select = Table.SelectColumns(PO_국내_Raw, {"SO_ID", "Line item", "PO_ID", "NOAH O.C No.", "ICO Unit", "Total ICO"}),
     PO_국내 = Table.ReplaceErrorValues(PO_국내_Select,
         List.Transform(Table.ColumnNames(PO_국내_Select), each {_, null})
     ),
-    PO_해외_Select = Table.SelectColumns(PO_해외_Raw, {"SO_ID", "Line item", "ICO Unit", "Total ICO"}),
+    PO_해외_Select = Table.SelectColumns(PO_해외_Raw, {"SO_ID", "Line item", "PO_ID", "NOAH O.C No.", "ICO Unit", "Total ICO"}),
     PO_해외 = Table.ReplaceErrorValues(PO_해외_Select,
         List.Transform(Table.ColumnNames(PO_해외_Select), each {_, null})
     ),
+    // PO_ID·NOAH O.C No.는 원가와 같은 행 집합에서 뽑는다 (Status 필터 없음) —
+    // 원가가 있는데 PO_ID가 비는 불일치를 막기 위함. 분할발주로 한 SO 라인에
+    // PO가 여럿이면 콤마로 연결(PO_현황과 동일 규칙), 공란은 List.RemoveNulls로 제거.
     PO_Combined = Table.Group(Table.Combine({PO_국내, PO_해외}), {"SO_ID", "Line item"}, {
+        {"PO_ID", each Text.Combine(List.Distinct(List.RemoveNulls([PO_ID])), ", "), type text},
+        {"NOAH O.C No.", each Text.Combine(List.Distinct(List.RemoveNulls([#"NOAH O.C No."])), ", "), type text},
         {"ICO Unit", each List.Average([ICO Unit]), type number},
         {"Total ICO", each List.Sum([Total ICO]), type number}
     }),
@@ -641,7 +649,7 @@ let
 
     // ========== SO에 원가 조인 (SO_ID + Line item) ==========
     WithCost = Table.NestedJoin(SO_Final, {"SO_ID", "Line item"}, PO_Combined, {"SO_ID", "Line item"}, "PO", JoinKind.LeftOuter),
-    WithCostExpanded = Table.ExpandTableColumn(WithCost, "PO", {"ICO Unit", "Total ICO"}, {"원가_단가", "원가"}),
+    WithCostExpanded = Table.ExpandTableColumn(WithCost, "PO", {"PO_ID", "NOAH O.C No.", "ICO Unit", "Total ICO"}, {"PO_ID", "NOAH O.C No.", "원가_단가", "원가"}),
 
     // ========== SO에 출고 조인 (SO_ID + Line item) - 출고일 포함 ==========
     WithShip = Table.NestedJoin(WithCostExpanded, {"SO_ID", "Line item"}, DN_Combined, {"SO_ID", "Line item"}, "DN", JoinKind.LeftOuter),
@@ -677,7 +685,7 @@ let
         {"마진", Currency.Type},
         {"미출고금액", Currency.Type}
     }),
-    #"다시 정렬한 열 수" = Table.ReorderColumns(Result,{"SO_ID", "PO receipt date", "Period", "AX Period", "AX Project number", "CS담당자", "Business registration number", "Customer name", "Customer PO", "Order type", "Opportunity", "Sector", "Industry code", "Model code", "Item name", "OS name", "Currency", "Line item", "Item qty", "Sales Unit Price", "Incoterms", "Requested delivery date", "EXW NOAH", "Expected delivery date", "영업 담당", "Remarks", "Sales amount KRW", "구분", "Sales amount", "원가_단가", "원가", "DN_ID", "출고수량", "출고금액", "출고일", "마진", "마진율", "출고완료", "매출연월", "미출고금액"})
+    #"다시 정렬한 열 수" = Table.ReorderColumns(Result,{"SO_ID", "PO receipt date", "Period", "AX Period", "AX Project number", "CS담당자", "Business registration number", "Customer name", "Customer PO", "Order type", "Opportunity", "Sector", "Industry code", "Model code", "Item name", "OS name", "Currency", "Line item", "Item qty", "Sales Unit Price", "Incoterms", "Requested delivery date", "EXW NOAH", "Expected delivery date", "영업 담당", "Remarks", "Sales amount KRW", "구분", "Sales amount", "PO_ID", "NOAH O.C No.", "원가_단가", "원가", "DN_ID", "출고수량", "출고금액", "출고일", "마진", "마진율", "출고완료", "매출연월", "미출고금액"})
 in
     #"다시 정렬한 열 수"
 ```
