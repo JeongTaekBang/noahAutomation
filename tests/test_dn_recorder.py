@@ -547,6 +547,67 @@ def test_수량이_다른_뒤_회차는_건너뛰지_않는다():
     assert qty_map(plan) == {1: 1}
 
 
+def test_균등_분할출고의_뒤_회차는_건너뛰지_않는다():
+    """40 = 20 + 20으로 나눠 나가면 뒤 회차가 앞 회차와 라인·수량까지 같다
+    (2026-09 SOD-2026-0868: 9/3 20개가 기록된 상태에서 9/11 20개가 '이미 입력됨(다른 출고일)'로
+    빠졌다). 9/3 기록은 9/3 출고의 것이다 — 공장 계산서 40개 중 DN엔 20개뿐이다."""
+    delivery = make_delivery([
+        {R.COL_SHIP_DATE: dt.datetime(2026, 9, 3), R.COL_INVOICE_AMOUNT: 3_511_520},
+        {R.COL_SHIP_DATE: dt.datetime(2026, 9, 11), R.COL_INVOICE_AMOUNT: 3_511_520},
+    ])
+    so = make_so([{'Line item': 1, 'Item qty': 40}])
+    po = make_po([
+        {'Item qty': 20, 'Total ICO': 3_511_520, 'Status': 'Invoiced P09'},
+        {'Item qty': 20, 'Total ICO': 3_511_520, 'Status': 'Invoiced P09'},
+    ])
+    dn = make_dn([{'Line item': 1, 'Qty': 20, '출고일': dt.datetime(2026, 9, 3)}])
+
+    plan = run(delivery, so, po, dn, period='P09')
+
+    assert [(l.ship_date, l.line_item, l.qty) for l in plan.lines] == [
+        (pd.Timestamp(2026, 9, 11), 1, 20)]
+    assert [r.reason for r in plan.skipped] == ['이미 입력됨']       # 9/3
+
+
+@pytest.mark.parametrize('later', [0, 1], ids=['last', 'middle'])
+def test_균등_분할출고가_달을_넘겨도_뒤_회차를_넣는다(later):
+    """이 주문의 원래 계획(9/3 + 10/6)대로 나갔다면 뒤 회차는 다음 달 출고리스트에 온다 —
+    거기엔 9/3 출고가 없어서 '그 기록은 다른 회차의 것'이라고 알려 주는 건 PO Status
+    (회차마다 `Invoiced P{XX}`)뿐이다. 중간 회차는 수량을 PO에서 그대로 가져와
+    잔량으로 걸러지는 것도 없다."""
+    delivery = make_delivery([
+        {R.COL_SHIP_DATE: dt.datetime(2026, 10, 6), R.COL_INVOICE_AMOUNT: 3_511_520}])
+    so = make_so([{'Line item': 1, 'Item qty': 20 * (2 + later)}])
+    po = make_po([
+        {'Item qty': 20, 'Total ICO': 3_511_520, 'Status': 'Invoiced P09'},
+        {'Item qty': 20, 'Total ICO': 3_511_520, 'Status': 'Invoiced P10'},
+    ] + [{'Item qty': 20, 'Total ICO': 3_511_520, 'Status': 'Confirmed'}] * later)
+    dn = make_dn([{'Line item': 1, 'Qty': 20, '출고일': dt.datetime(2026, 9, 3)}])
+
+    plan = run(delivery, so, po, dn, period='P10')
+
+    assert qty_map(plan) == {1: 20}
+
+
+def test_날짜만_다르게_적은_부분_출고는_여전히_건너뛴다():
+    """SO에는 대기 중인 회차가 남아 있어도(40 중 20) 공장 계산서는 20개뿐이고 그게 이미
+    DN에 있다 — 똑같이 생긴 9/2 기록은 이 출고의 것이다.
+    SO 잔량으로 가르면 '자리가 있다'로 보여 여기서 두 번 들어간다."""
+    delivery = make_delivery([
+        {R.COL_SHIP_DATE: dt.datetime(2026, 9, 3), R.COL_INVOICE_AMOUNT: 3_511_520}])
+    so = make_so([{'Line item': 1, 'Item qty': 40}])
+    po = make_po([
+        {'Item qty': 20, 'Total ICO': 3_511_520, 'Status': 'Invoiced P09'},
+        {'Item qty': 20, 'Total ICO': 3_511_520, 'Status': 'Confirmed'},
+    ])
+    dn = make_dn([{'Line item': 1, 'Qty': 20, '출고일': dt.datetime(2026, 9, 2)}])
+
+    plan = run(delivery, so, po, dn, period='P09')
+
+    assert not plan.lines
+    assert [r.reason for r in plan.skipped] == ['이미 입력됨(다른 출고일)']
+
+
 def test_일부만_기록돼_있으면_나머지를_넣는다():
     delivery = make_delivery([{}])
     so = make_so([{'Line item': 1, 'Item qty': 10}])

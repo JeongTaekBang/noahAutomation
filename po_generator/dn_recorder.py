@@ -189,9 +189,14 @@ def period_month(period: str) -> int:
     return month
 
 
+def invoiced_statuses(month: int) -> set[str]:
+    """이번 달까지 공장이 계산서를 끊은(= 출고된) PO Status 집합"""
+    return {f"Invoiced P{m:02d}" for m in range(1, month + 1)}
+
+
 def settled_statuses(month: int) -> set[str]:
     """'더 나갈 것이 없다'고 볼 수 있는 PO Status 집합"""
-    return {f"Invoiced P{m:02d}" for m in range(1, month + 1)} | {'Cancelled'}
+    return invoiced_statuses(month) | {'Cancelled'}
 
 
 # === 월합 세금계산서 거래처 ==================================================
@@ -282,6 +287,7 @@ def build_plan(
     month = period_month(period)
     status_col = po_df['Status'].astype(str).str.strip() if 'Status' in po_df else None
     invoiced_now = f"Invoiced {period}"
+    invoiced = invoiced_statuses(month)
     settled = settled_statuses(month)
 
     plan = Plan(period=period, delivery_file=delivery_file or Path())
@@ -421,9 +427,12 @@ def build_plan(
 
         # 출고리스트 날짜와 다른 날로 이미 기록해 둔 건 (사람이 실제 출고일을 알고 고쳐 적은 경우).
         # (SO_ID, 출고일) 키만 보면 못 걸러 지난 기간을 다시 돌릴 때 통째로 중복 입력된다
-        # (2026-03 SOD-2026-0156 실측: 출고리스트는 3/23인데 DN은 5/19로 기록돼 있다).
+        # (2026-03 SOD-2026-0156 실측: 출고리스트는 3/23인데 DN은 3/9로 기록돼 있다).
+        # 단, 똑같이 생긴 기록이 **다른 회차의 것**일 수 있다 — 균등 분할출고는 뒤 회차가
+        # 앞 회차와 라인·수량까지 같다. 공장 계산서가 DN보다 이 출고만큼 앞서 있으면 넣는다.
         recorded = _recorded_date(recorded_maps, so_id, qty_by_line)
-        if recorded:
+        if recorded and not _billed_beyond_dn(
+                po_rows, invoiced, shipped, so_id, qty_by_line):
             plan.skipped.append(Review(
                 so_id, ship_date, customer, '이미 입력됨(다른 출고일)',
                 f"라인·수량이 똑같은 출고가 {recorded}에 이미 기록돼 있습니다"))
@@ -837,6 +846,40 @@ def _recorded_date(maps: dict[str, dict[pd.Timestamp, dict[int, int]]],
         if recorded == qty_by_line:
             return f"{date:%Y-%m-%d}"
     return ''
+
+
+def _billed_beyond_dn(po_rows: pd.DataFrame, invoiced: set[str], shipped: ShipLog,
+                      so_id: str, qty_by_line: dict[int, int]) -> bool:
+    """공장 계산서가 DN 기록보다 이 출고만큼 앞서 있는가 — 그러면 아직 안 적힌 출고다
+
+    `_recorded_date`의 '똑같이 생긴 기록'은 그게 **이 출고의 것**일 때만 중복의 증거다.
+    균등 분할출고(40 = 20 + 20)는 뒤 회차가 앞 회차와 라인·수량까지 같아서, 앞 회차의
+    기록을 보고 뒤 회차를 통째로 건너뛴다 (2026-09 SOD-2026-0868: 9/3 20개가 기록된
+    상태에서 9/11 20개가 빠졌다).
+
+    어느 기록이 어느 회차의 것인지는 `PO_국내` Status가 안다 — 공장은 분할출고마다 행을
+    따로 두고 `Invoiced P{XX}`를 적는다. 이번 기간까지 계산서가 끊긴 수량에서 DN 수량을
+    빼고도 이 출고가 **라인마다** 다 들어가면 DN에 없는 출고가 있다는 뜻이다.
+    DN 수량은 실행 중 추가분까지 센다 — '있는가'가 아니라 '몫이 남았는가'라서, 같은
+    실행에서 같은 몫을 두 번 쓰면 안 된다.
+
+    SO 잔량으로 가르면 안 된다 — SO에는 아직 안 나간 회차까지 들어 있어서, 날짜만
+    다르게 적은 부분 출고(20개 출고·20개 대기)도 '자리가 있다'로 보여 두 번 들어간다.
+    PO에 따로 없는 라인(부속 — PO는 1라인에 합쳐 적는다)은 근거가 없어 건너뛰고,
+    판단할 라인이 하나도 없으면 False(= 기존대로 건너뜀)다.
+    """
+    rows = po_rows[po_rows['_status'].isin(invoiced)]
+    billed = (pd.to_numeric(rows['Item qty'], errors='coerce').fillna(0)
+              .groupby(rows['_line']).sum())
+    judged = False
+    for line_item, qty in qty_by_line.items():
+        if line_item not in billed.index:
+            continue
+        recorded = sum(q for _date, q in shipped.get((so_id, line_item), ()))
+        if billed[line_item] - recorded < qty:
+            return False
+        judged = True
+    return judged
 
 
 def _year_from_delivery(delivery: pd.DataFrame) -> int:
