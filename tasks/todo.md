@@ -1,3 +1,27 @@
+# Final Invoice 파일명에 NO-XXXX 표기 (2026-09-15) — 완료
+
+사용자 요청: "Final Invoice 파일명에 NO-XXXX도 표시해줄 수 있어? FI_DNO-XXXX-XXX_여기에."
+
+- [x] 실데이터 확인 — NO-XXXX = `DN_해외.RCK PO` (926행 공란 0, 조인 불필요).
+      DN당 NO 1개 146건 / 복수 31건(CLI가 발주번호별 분리) / Customer PO당 복수 NO 1건(5개)
+- [x] `DocumentService._fi_order_label` — DN 단위·분리·`--po` 세 경로가 한 규칙
+- [x] `tests/test_fi_filename.py` 8건 — 수정 전 코드에서 6건 실패 확인
+- [x] 실데이터 + 실제 Excel E2E 3모드 (출력은 `%TEMP%\fi_no_check`, 확인 후 삭제)
+- [x] docs/TEMPLATE_MAPPINGS.md, docs/CHANGELOG.md
+- [x] 전체 테스트 스위트 — **940 passed, 2 skipped**
+
+## 리뷰
+
+**사용자가 보는 것**: `FI_DNO-2026-0177_NO-0243_SULLIVAN_PROCESS_CONTROLS_LLC_260915.xlsx`.
+분리 생성은 `FI_DNO-2026-0020_NO-0009_WGDBS2601233_…` — 같은 Customer PO를 쓰는 발주번호끼리
+`_1`/`_2`로만 갈리던 것이 NO로 갈린다.
+
+**고른 것**: (1) NO는 조인이 아니라 문서에 실린 라인의 `RCK PO`에서 모은다 — 분리 생성이면
+필터된 라인의 값이라 저절로 하나다. (2) `--po` 모드도 같은 규칙(`FI_{Customer PO}_{NO}_…`) —
+요청 문구는 DN 모드였지만 "FI 파일명에 NO"라는 취지는 같다. (3) NO가 여럿이면 전부 `+`로 잇는다 —
+대표값으로 접으면 어느 발주 청구분인지 이름에서 사라진다. 실측 최장 경로 181자(한도 260;
+생성기는 임시 폴더에 저장 후 `shutil.move`라 Excel의 218자 제한은 최종 경로에 안 걸린다).
+
 # 동료 PC용 문서 메뉴 런처 (2026-09-14) — 완료
 
 사용자 요청: cli_dist 배포판에 create_po.bat처럼 **더블클릭 → [국내]/[해외] 메뉴만** 쓰는

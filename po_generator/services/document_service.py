@@ -599,6 +599,26 @@ class DocumentService:
         result.errors = errors
         return result
 
+    @staticmethod
+    def _fi_order_label(key: str, items: pd.DataFrame, customer_po: str = '') -> str:
+        """FI 파일명의 주문 라벨 — `{key}_{NO-XXXX}[_{Customer PO}]`
+
+        NO-XXXX는 `DN_해외.RCK PO`(RCK → NOAH 발주번호)로, 문서에 실린 라인에서 모은다.
+        발주번호별 분리 생성이면 하나, 발주번호(`--po`) 기준 통합이면 여럿일 수 있어
+        `+`로 잇는다 (2026-09 실측: Customer PO 232건 중 1건이 NO 5개).
+        RCK PO 컬럼이 없거나 전부 공란이면 NO를 붙이지 않는다.
+        """
+        parts = [key]
+        rck_po_col = resolve_column(items.columns, 'rck_po')
+        if rck_po_col:
+            nos = items[rck_po_col].dropna().astype(str).str.strip()
+            nos = sorted(set(nos[nos != '']))
+            if nos:
+                parts.append('+'.join(nos))
+        if customer_po:
+            parts.append(str(customer_po))
+        return '_'.join(parts)
+
     def generate_fi(self, dn_id: str, rck_po: str | None = None) -> DocumentResult:
         """Final Invoice 생성 (대금 청구용)
 
@@ -641,13 +661,10 @@ class DocumentService:
         # 출력 디렉토리 생성
         FI_OUTPUT_DIR.mkdir(exist_ok=True)
 
-        # 파일명 생성 (PO 분리 시 Customer PO 값을 라벨로 사용; 없으면 RCK PO로 폴백)
+        # 파일명 생성: FI_{DN_ID}_{NO-XXXX}_… — PO 분리 시엔 Customer PO까지 붙인다
         customer_name = order_data.get_value('customer_name', 'Unknown')
-        if rck_po:
-            po_label = order_data.get_value('customer_po', '') or rck_po
-            order_label = f"{dn_id}_{po_label}"
-        else:
-            order_label = dn_id
+        customer_po = order_data.get_value('customer_po', '') if rck_po else ''
+        order_label = self._fi_order_label(dn_id, order_data.all_items, customer_po)
         output_file = generate_output_filename("FI", order_label, customer_name, FI_OUTPUT_DIR)
 
         if not validate_output_path(output_file, FI_OUTPUT_DIR):
@@ -730,9 +747,10 @@ class DocumentService:
         # 출력 디렉토리 생성
         FI_OUTPUT_DIR.mkdir(exist_ok=True)
 
-        # 파일명 생성 (Customer PO 기준)
+        # 파일명 생성: FI_{Customer PO}_{NO-XXXX}_… (복수 DN 통합이라 NO가 여럿일 수 있다)
         customer_name = order_data.get_value('customer_name', 'Unknown')
-        output_file = generate_output_filename("FI", customer_po, customer_name, FI_OUTPUT_DIR)
+        order_label = self._fi_order_label(customer_po, order_data.all_items)
+        output_file = generate_output_filename("FI", order_label, customer_name, FI_OUTPUT_DIR)
 
         if not validate_output_path(output_file, FI_OUTPUT_DIR):
             return DocumentResult.file_error_result(

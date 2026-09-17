@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-09-15: Final Invoice 파일명에 NO-XXXX(RCK PO) 표기
+
+사용자 요청: FI 파일명의 DN 번호 바로 뒤에 NO 번호를 넣을 것.
+NO-XXXX는 `DN_해외.RCK PO`에 이미 들어 있다 (RCK → NOAH 발주번호, 926행 중 공란 0건 —
+`NO-0019-R1` 하나만 리비전 접미사). 조인 없이 **문서에 실린 라인에서** 모은다
+(`DocumentService._fi_order_label`).
+
+| 모드 | 이전 | 이후 |
+|---|---|---|
+| DN 단위 | `FI_{DN_ID}_{고객명}_{날짜}` | `FI_{DN_ID}_{NO}_{고객명}_{날짜}` |
+| 복수 RCK PO 분리 | `FI_{DN_ID}_{Customer PO}_…` | `FI_{DN_ID}_{NO}_{Customer PO}_…` |
+| 발주번호 기준(`--po`) | `FI_{Customer PO}_…` | `FI_{Customer PO}_{NO}_…` (여럿이면 `+`) |
+
+- **분리 생성의 이름 충돌이 풀렸다** — 발주번호 여럿이 같은 Customer PO를 쓰면 예전엔
+  같은 이름에 `_1`/`_2` 접미사만 붙었다 (실측 `DNO-2026-0020`: 9장 중 5장이 `WGDBS2601233`)
+- Customer PO가 빈 분리 건은 더 이상 RCK PO로 폴백하지 않는다 — NO가 이미 붙으므로 두 번 쓰지 않는다
+- `--po` 모드에도 같은 규칙을 적용했다 (요청은 DN 모드 기준). NO가 여럿인 Customer PO는
+  실측 232건 중 1건(`WGDBS2601233`, NO 5개)이고, 그때도 전체 경로 181자
+- RCK PO 컬럼이 없거나 전부 공란이면 NO 없이 예전 이름
+
+### 검증
+- `tests/test_fi_filename.py` 8건 — 진짜 `FinderService` 조회를 지나가게 하고(단일 아이템의
+  `items_df=None` 경로 포함) 데이터 로드와 Excel 생성만 대역. 수정 전 코드에서 6건 실패 확인
+  (나머지 2건은 컬럼 없음·Customer PO 공란 가드)
+- 실데이터 + 실제 Excel로 세 모드 생성 (출력만 임시 폴더): `DNO-2026-0177` 단일 /
+  `DNO-2026-0020` 분리 9장 / `--po WGDBS2601233`
+- 전체 **940 passed, 2 skipped**
+
+---
+
 ## 2026-09-14: 동료 PC용 콘솔 메뉴 — `noah_menu.bat` ([국내]/[해외] 문서 7종만)
 
 배포판(`cli_dist`)에 GUI와 별개의 **두 번째 진입점**을 넣었다. 바탕화면 아이콘

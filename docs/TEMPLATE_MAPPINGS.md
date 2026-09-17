@@ -278,8 +278,10 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 ### 발주번호(RCK PO) 자동 분리
 
 DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지하여 발주번호별로 별도 FI를 생성합니다.
-- 단일 RCK PO → 기존 동작 (1개 FI)
-- 복수 RCK PO → PO별 FI 생성, 파일명에 PO 포함 (`FI_{DN_ID}_{RCK_PO}_{고객명}_{날짜}.xlsx`)
+- 단일 RCK PO → 1개 FI (`FI_{DN_ID}_{RCK_PO}_{고객명}_{날짜}.xlsx`)
+- 복수 RCK PO → PO별 FI 생성 (`FI_{DN_ID}_{RCK_PO}_{Customer_PO}_{고객명}_{날짜}.xlsx`)
+- 발주번호 기준(`--po`) → 복수 DN 통합 1개 FI (`FI_{Customer_PO}_{RCK_PO}_{고객명}_{날짜}.xlsx` — RCK PO가 여럿이면 `+`로 연결)
+- 파일명의 RCK PO는 `DN_해외.RCK PO` 값(`NO-XXXX`)이다. 컬럼이 없거나 공란이면 생략
 - 각 FI의 Customer PO (C7), PO Date (C8) 등 헤더는 해당 PO 그룹의 데이터로 채워짐
 
 ### 동적 필드 (Item List - Row 17~)
