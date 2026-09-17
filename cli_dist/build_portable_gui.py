@@ -13,8 +13,10 @@ Usage:
       ├── 설치.bat        ← 더블클릭 (LocalAppData로 복사 + 바탕화면 바로가기)
       ├── README.txt
       └── app/            ← 본체
-          ├── NOAH 문서생성기.vbs   ← 평소 실행 (콘솔 없음)
-          ├── NOAH 문서생성기.bat   ← 문제 진단용 (콘솔 표시)
+          ├── NOAH 문서생성기.vbs   ← GUI 실행 (콘솔 없음)
+          ├── NOAH 문서생성기.bat   ← GUI 문제 진단용 (콘솔 표시)
+          ├── noah_menu.bat         ← 문서 메뉴 (국내/해외 7종만, 콘솔) — 바로가기 2번
+          ├── setup_data_path.py    ← 메뉴 첫 실행 때 데이터 파일을 찾아 ini에 적는다
           ├── 제거.bat              ← 설치 폴더 + 바탕화면 바로가기 삭제
           ├── BUILD_INFO.txt        ← 빌드 버전·구성 (GUI 타이틀·문의 대응용)
           ├── noah_gui.py, create_*.py, delivery_status.py
@@ -97,8 +99,11 @@ RUNTIME_PY_VERSION = re.search(r"cpython-([\d.]+)", RUNTIME_FILE).group(1)  # ty
 # === 배포에 포함할 앱 파일 ===
 # GUI가 실행하는 CLI는 전부 여기 있어야 한다. 빠지면 그 버튼만 배포판에서 조용히 실패하므로
 # verify()가 noah_gui.DOC_TYPES와 대조해 zip 만들기 전에 잡는다.
+# 문서 메뉴(noah_menu.bat)가 부르는 스크립트도 마찬가지 — tests/test_noah_menu.py가 대조한다.
 APP_FILES = (
     "noah_gui.py",
+    "noah_menu.bat",         # 진입점 2: 콘솔 메뉴 (국내/해외 문서만)
+    "setup_data_path.py",    # noah_menu.bat 첫 실행 — 데이터 파일 탐색 → ini
     "create_po.py",
     "create_ts.py",
     "create_pi.py",
@@ -160,13 +165,25 @@ TRIM_DIRS = (
 # 회사 PC는 바탕화면·문서가 전부 OneDrive로 리디렉션(KFM)되어 있어서,
 # 사용자가 압축을 어디에 풀든 그대로 두면 런타임 전체가 동기화된다.
 INSTALL_DIR_NAME = "NOAH_DocGen"  # 경로는 ASCII로 (batch에서 안전)
-SHORTCUT_NAME = "NOAH 문서 생성기.lnk"
+
+# 바탕화면 바로가기 {이름: app/ 안의 대상}. GUI와 콘솔 메뉴 — 둘 다 같은 CLI·같은 ini를 쓴다.
+# 메뉴 쪽은 .bat이 대상이다 — 바로가기로 실행하면 cmd가 작업 폴더(app/)에서 띄운다.
+SHORTCUTS = {
+    "NOAH 문서 생성기.lnk": "NOAH 문서생성기.vbs",
+    "NOAH 문서 생성기 (메뉴).lnk": "noah_menu.bat",
+}
 
 STEP_TOTAL = 7
 step = Stepper(STEP_TOTAL)
 
 
 # === 빌드 단계 (이 배포판 고유) =============================================
+
+def cli_scripts() -> tuple[str, ...]:
+    """--help 스모크 대상 — APP_FILES 중 파이썬 CLI (GUI 본체와 .bat 제외)"""
+    return tuple(name for name in APP_FILES
+                 if name.endswith(".py") and name != "noah_gui.py")
+
 
 def copy_app() -> None:
     step("앱 파일 복사")
@@ -211,8 +228,7 @@ import pythoncom
 from win32com.shell import shell, shellcon
 
 APP_DIR = Path(__file__).resolve().parent
-SHORTCUT_NAME = {SHORTCUT_NAME!r}
-TARGET = APP_DIR / "NOAH 문서생성기.vbs"
+SHORTCUTS = {SHORTCUTS!r}  # {{바로가기 이름: app/ 안의 대상}}
 
 
 def desktop() -> Path:
@@ -221,18 +237,20 @@ def desktop() -> Path:
 
 
 def create() -> None:
-    link = pythoncom.CoCreateInstance(
-        shell.CLSID_ShellLink, None, pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink)
-    link.SetPath(str(TARGET))
-    link.SetWorkingDirectory(str(APP_DIR))
-    link.QueryInterface(pythoncom.IID_IPersistFile).Save(str(desktop() / SHORTCUT_NAME), 0)
+    for name, target in SHORTCUTS.items():
+        link = pythoncom.CoCreateInstance(
+            shell.CLSID_ShellLink, None, pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink)
+        link.SetPath(str(APP_DIR / target))
+        link.SetWorkingDirectory(str(APP_DIR))
+        link.QueryInterface(pythoncom.IID_IPersistFile).Save(str(desktop() / name), 0)
 
 
 def remove() -> None:
-    try:
-        (desktop() / SHORTCUT_NAME).unlink()
-    except FileNotFoundError:
-        pass
+    for name in SHORTCUTS:
+        try:
+            (desktop() / name).unlink()
+        except FileNotFoundError:
+            pass
 
 
 if __name__ == "__main__":
@@ -242,7 +260,8 @@ if __name__ == "__main__":
     create() if sys.argv[1] == "create" else remove()
 ''')
 
-    # 평소 실행 — pythonw로 콘솔 없이
+    # GUI 실행 — pythonw로 콘솔 없이. (콘솔 메뉴 noah_menu.bat은 레포 파일을 그대로 담는다 —
+    # 동봉 python\\ 을 스스로 찾으므로 배포판용 런처를 따로 만들 필요가 없다)
     write_text(APP_DIR / "NOAH 문서생성기.vbs", '''Set sh = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
 appDir = fso.GetParentFolderName(WScript.ScriptFullName)
@@ -337,7 +356,9 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo  설치가 끝났습니다.
-echo  바탕화면의 [NOAH 문서 생성기] 아이콘으로 실행하세요.
+echo  바탕화면에 아이콘 2개가 생겼습니다:
+echo    [NOAH 문서 생성기]        창(GUI)
+echo    [NOAH 문서 생성기 (메뉴)]  번호를 골라 쓰는 콘솔 메뉴 (국내/해외 문서)
 echo.
 pause
 ''')
@@ -347,8 +368,14 @@ pause
 
 [설치]
   1. 이 폴더의 "설치.bat" 을 더블클릭하세요.
-  2. 바탕화면에 [NOAH 문서 생성기] 아이콘이 생깁니다.
-  3. 아이콘을 실행하면 처음 한 번 NOAH_SO_PO_DN.xlsx 위치를 묻습니다.
+  2. 바탕화면에 아이콘 2개가 생깁니다.
+       [NOAH 문서 생성기]         창(GUI) — 문서 7종 + 납기현황 + DN 출고기록
+       [NOAH 문서 생성기 (메뉴)]  콘솔 메뉴 — [국내]/[해외] 문서 7종만
+     둘 중 편한 쪽을 쓰면 됩니다. 같은 데이터 파일·같은 설정을 씁니다.
+  3. 처음 실행하면 한 번 NOAH_SO_PO_DN.xlsx 위치를 정합니다.
+       GUI  — 파일 선택 창
+       메뉴 — OneDrive에서 자동으로 찾아 보여주므로 Enter만 누르면 됩니다
+              (못 찾으면 경로를 붙여넣으세요. 나중에 바꾸려면 메뉴의 [P])
 
 [준비물]
   - Excel 데스크톱 (문서 생성에 Excel을 사용합니다)
@@ -382,11 +409,11 @@ pause
   프로그램과 설정이 삭제됩니다. 만든 문서와 NOAH_SO_PO_DN.xlsx는 삭제되지 않습니다.
 
 [문제가 생기면]
-  설치 폴더(%LOCALAPPDATA%\\{INSTALL_DIR_NAME})의
+  콘솔 메뉴는 오류가 창에 그대로 보입니다 — 그 내용을 담당자에게 전달해 주세요.
+  GUI는 설치 폴더(%LOCALAPPDATA%\\{INSTALL_DIR_NAME})의
   "NOAH 문서생성기.bat" 을 실행하면 검은 창에 오류 메시지가 표시됩니다.
-  그 내용을 담당자에게 전달해 주세요.
 ''')
-    print("  설치.bat / 제거.bat / README.txt / 런처 2종")
+    print("  설치.bat / 제거.bat / README.txt / GUI 런처 2종 (+ 레포의 noah_menu.bat)")
 
 
 def verify() -> None:
@@ -432,7 +459,7 @@ def verify() -> None:
 
     # CLI 전수 스모크 — 트리밍이 import를 깨지 않았다는 안전망.
     # --help는 argparse가 도움말을 찍고 0으로 끝나므로, 모듈 import 전체가 검증된다.
-    clis = [name for name in APP_FILES if name != "noah_gui.py"]
+    clis = cli_scripts()
     print(f"  [검증] CLI --help 스모크 ({len(clis)}종, ~30초)...")
     failures: list[str] = []
     for name in clis:

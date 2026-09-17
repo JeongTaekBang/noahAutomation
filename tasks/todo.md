@@ -1,3 +1,40 @@
+# 동료 PC용 문서 메뉴 런처 (2026-09-14) — 완료
+
+사용자 요청: cli_dist 배포판에 create_po.bat처럼 **더블클릭 → [국내]/[해외] 메뉴만** 쓰는
+bat 진입점을 만들 것. 데이터는 공유된 OneDrive 경로에서 알아서 찾게. GUI와는 별개.
+
+- [x] `setup_data_path.py` — 콘솔 마법사: 미설정이면 OneDrive 탐색 → 확인 → `noah_config.ini`
+      (GUI와 같은 ini, 탐색·검증·쓰기는 `noah_gui` 것을 재사용). `--print`(머리말용)·`--change`
+- [x] `noah_menu.bat` — 국내(PO·TS) / 해외(PI·FI·OC·CI·PL) + [P] 경로 변경 + [0] 종료.
+      Python은 동봉 `python\` → 없으면 `local_config.bat`. 인자를 주면 한 항목만 실행하고 복귀
+- [x] `create_po.bat` — 문서 7종 블록을 `noah_menu.bat`에 위임 (블록을 한 곳에만 둔다).
+      HEAD 블록과 글자 단위 대조: `goto menu`→`goto back` 치환과 CI/PL 순서 외 동일
+- [x] `cli_dist/build_portable_gui.py` — APP_FILES 추가, `SHORTCUTS` 2개, README/설치 안내, 스모크는 .py만
+- [x] `tests/test_noah_menu.py` 21건 — 배포 목록 대조, 금지 스크립트, 위임, CRLF/UTF-8, 마법사 흐름
+- [x] 검증: 전체 **930 passed, 2 skipped**. stub + 환경변수 프리셋으로 bat 15개 경로 argv 확인
+- [x] CLAUDE.md / docs/CHANGELOG.md / tasks/lessons.md 반영
+- [x] 실제 빌드(v2026.09.14+0a1a0c9.dirty, 47MB) + 빌드 폴더에서 동봉 python으로 첫 실행 재현 —
+      사본 2개를 최근 수정 순으로 보여주고 Enter로 진짜(9/14)를 확정, ini 기록, config가 그 경로를 읽음
+
+## 리뷰
+
+**동료가 보는 것**: 설치 후 바탕화면 아이콘 2개. [NOAH 문서 생성기 (메뉴)]를 누르면 첫 실행에
+"찾은 파일: …\NOAH_SO_PO_DN.xlsx — Enter"가 뜨고, 이후로는 바로 [국내]/[해외] 메뉴다.
+머리말에 데이터 파일 경로가 늘 보이고, 틀리면 [P]로 바꾼다.
+
+**설계에서 고른 것**: (1) 별도 zip을 만들지 않았다 — 런타임 100MB를 두 번 담을 이유가 없고
+같은 `noah_config.ini`를 쓰는 편이 GUI와 어긋나지 않는다. (2) 문서 블록을 복사하지 않고
+`create_po.bat`이 위임하게 했다 — 2026-08-07 교훈(옵션을 한쪽에만 넣음)의 재발 경로를 없앴다.
+(3) 첫 실행에 Enter 한 번은 남겼다 — OneDrive에 낡은 사본이 있으면 BFS가 그걸 먼저 잡을 수
+있어서, 어느 파일인지 사람이 한 번은 봐야 한다.
+
+**실측에서 잡은 것**: 첫 빌드 폴더 실행에서 자동 탐색이 `OneDrive - Rotork plc\문서\NOAH_SO_PO_DN.xlsx`
+(2026-08-07자 낡은 사본)를 먼저 잡았다. 그래서 첫 결과만 쓰지 않고 **찾은 것을 전부 최근 수정 순으로**
+보여주고 번호로 고르게 바꿨다 (`noah_gui.find_data_files`). 그 사본은 사용자가 정리할 일이다.
+
+**한계**: `find_data_files`는 3초 타임아웃·깊이 5의 BFS라 OneDrive 트리가 크면 못 찾을 수 있다
+— 그때는 경로를 붙여넣는다(폴더만 붙여넣어도 된다). 이건 GUI 마법사와 같은 한계다.
+
 # DN 균등 분할출고 뒤 회차 누락 수정 (2026-09-11) — 완료
 
 사용자 보고: `SOD-2026-0868`(ND-0877) — Line item 1이 공장 분할출고로 `PO_국내`에 한 행 더

@@ -2,6 +2,10 @@
 chcp 65001 >nul
 title NOAH PO Generator
 
+REM 문서 7종([국내]/[해외])의 입력·실행 블록은 noah_menu.bat 에 있다 — 여기서는
+REM `call noah_menu.bat <키>` 로 위임한다. 동료 PC 배포판도 같은 파일을 쓰므로
+REM 문서 옵션을 더할 때는 noah_menu.bat 한 곳만 고치면 두 메뉴에 같이 반영된다.
+
 REM 사용자별 설정 파일 로드 (local_config.bat)
 if exist "%~dp0local_config.bat" (
     call "%~dp0local_config.bat"
@@ -76,30 +80,7 @@ pause
 goto menu
 
 :create_po
-echo.
-echo ----------------------------------------
-echo   발주서 생성
-echo ----------------------------------------
-echo.
-
-:input
-set /p ORDER_NO="RCK Order No. 입력 (예: ND-0005): "
-
-if "%ORDER_NO%"=="" (
-    echo [오류] Order No.를 입력하세요.
-    goto input
-)
-
-echo.
-echo 발주서 생성 중...
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_po.py" %ORDER_NO%
-
-echo.
-echo ----------------------------------------
-set /p CONTINUE="다른 발주서를 생성하시겠습니까? (Y/N): "
-if /i "%CONTINUE%"=="Y" goto input
+call "%~dp0noah_menu.bat" po
 goto menu
 
 :delivery_status
@@ -161,323 +142,27 @@ pause
 goto menu
 
 :create_ts
-echo.
-echo ----------------------------------------
-echo   거래명세표 생성 (국내 전용)
-echo ----------------------------------------
-echo.
-echo   [1] 단건 거래명세표 (DN 1건)
-echo   [2] 월합 거래명세표 (여러 DN을 한 장으로)
-echo   [3] 하루치 묶음 발송 (날짜로 골라 거래처별 메일 1통)
-echo   [4] 묶음 발송 (DN 목록 붙여넣기 - 거래처별 메일 1통)
-echo   [0] 메뉴로 돌아가기
-echo.
-echo   [2]는 '문서'를 한 장으로 합치고, [3][4]는 문서는 DN별 1장 그대로 두고
-echo   '메일'만 거래처별 한 통(첨부 여러 개)으로 묶습니다.
-echo.
-
-set /p TS_MODE="선택: "
-
-if "%TS_MODE%"=="1" goto ts_single
-if "%TS_MODE%"=="2" goto ts_merge
-if "%TS_MODE%"=="3" goto ts_batch
-if "%TS_MODE%"=="4" goto ts_one_mail
-if "%TS_MODE%"=="0" goto menu
-echo [오류] 올바른 번호를 입력하세요.
-pause
-goto create_ts
-
-:ts_single
-echo.
-echo   - 납품: DN_ID (예: DND-2026-0001)
-echo   - 선수금: 선수금_ID (예: ADV_2026-0001)
-echo.
-
-:ts_input
-set /p TS_DOC_ID="ID 입력: "
-
-if "%TS_DOC_ID%"=="" (
-    echo [오류] ID를 입력하세요.
-    goto ts_input
-)
-
-echo.
-echo 거래명세표 생성 중...
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_ts.py" %TS_DOC_ID%
-
-echo.
-echo ----------------------------------------
-set /p TS_CONTINUE="다른 거래명세표를 생성하시겠습니까? (Y/N): "
-if /i "%TS_CONTINUE%"=="Y" goto ts_input
-goto menu
-
-:ts_merge
-echo.
-echo ----------------------------------------
-echo   월합 거래명세표 (여러 DN을 한 장으로)
-echo ----------------------------------------
-echo.
-echo   DN_ID 목록을 세로로 붙여넣기 하세요.
-echo   (빈 줄 입력하면 생성 시작)
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_ts.py" --interactive --merge
-
-echo.
-pause
-goto menu
-
-:ts_batch
-echo.
-echo ----------------------------------------
-echo   하루치 묶음 발송 (문서는 DN별 1장, 메일은 거래처별 1통)
-echo ----------------------------------------
-echo.
-echo   그날 출고분을 자동으로 찾아 거래처별로 묶어 보냅니다.
-echo   (예: 8/6 씨앤케이 8건 - 문서 8장, 메일 1통에 첨부 8개)
-echo.
-echo   거래처를 지정하면 발송 전 y/N을 한 번 묻고,
-echo   비워 두면 그날 전체를 거래처별로 나눠 확인 없이 메일 초안을 띄웁니다.
-echo   (초안까지만 열립니다 - 보내기는 메일 창에서 직접)
-echo.
-
-set "TS_DATE="
-set /p TS_DATE="출고일 (예: 2026-08-06 또는 8/6): "
-if not defined TS_DATE goto ts_batch_no_date
-
-REM 거래처명에 '(주)'가 흔하다 — if 괄호블록 안에서 전개되면 괄호 짝이 깨져 배치가 죽으므로
-REM 납기현황(:delivery_status)과 같은 방식으로 'if not defined' + 라벨 분기를 쓴다.
-set "TS_CUSTOMER="
-set /p TS_CUSTOMER="거래처 (Enter=그날 전체): "
-
-echo.
-echo 거래명세표 생성 중...
-echo.
-
-if not defined TS_CUSTOMER goto ts_batch_all
-
-"%PYTHON_PATH%" "%~dp0create_ts.py" --date "%TS_DATE%" --customer "%TS_CUSTOMER%"
-goto ts_batch_done
-
-:ts_batch_all
-REM 거래처를 안 고른 경우는 거래처마다 y/N을 묻게 되므로(그날 5곳이면 5번) 확인을 건너뛴다.
-REM --mail은 '초안 열기'까지다 — 자동 발송(--send)이 아니라 보내기는 사람이 누른다.
-"%PYTHON_PATH%" "%~dp0create_ts.py" --date "%TS_DATE%" --mail
-
-:ts_batch_done
-echo.
-pause
-goto menu
-
-:ts_batch_no_date
-echo [오류] 출고일을 입력하세요.
-pause
-goto ts_batch
-
-:ts_one_mail
-echo.
-echo ----------------------------------------
-echo   묶음 발송 (문서는 DN별 1장, 메일은 거래처별 1통)
-echo ----------------------------------------
-echo.
-echo   DN_ID 목록을 세로로 붙여넣기 하세요.
-echo   (빈 줄 입력하면 생성 시작)
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_ts.py" --interactive --one-mail
-
-echo.
-pause
+call "%~dp0noah_menu.bat" ts
 goto menu
 
 :create_pi
-echo.
-echo ----------------------------------------
-echo   Proforma Invoice 생성 (해외)
-echo ----------------------------------------
-echo.
-echo   SO_ID 입력 (예: SOO-2026-0001)
-echo.
-
-:pi_input
-set /p PI_SO_ID="SO_ID 입력: "
-
-if "%PI_SO_ID%"=="" (
-    echo [오류] SO_ID를 입력하세요.
-    goto pi_input
-)
-
-echo.
-echo Proforma Invoice 생성 중...
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_pi.py" %PI_SO_ID%
-
-echo.
-echo ----------------------------------------
-set /p PI_CONTINUE="다른 Proforma Invoice를 생성하시겠습니까? (Y/N): "
-if /i "%PI_CONTINUE%"=="Y" goto pi_input
+call "%~dp0noah_menu.bat" pi
 goto menu
 
 :create_fi
-echo.
-echo ----------------------------------------
-echo   Final Invoice 생성 (대금 청구)
-echo ----------------------------------------
-echo.
-echo   [1] DN_ID 기준 생성
-echo   [2] 발주번호 기준 생성 (복수 DN 통합)
-echo   [0] 메뉴로 돌아가기
-echo.
-
-set /p FI_MODE="선택: "
-
-if "%FI_MODE%"=="1" goto fi_by_dn
-if "%FI_MODE%"=="2" goto fi_by_po
-if "%FI_MODE%"=="0" goto menu
-echo [오류] 올바른 번호를 입력하세요.
-pause
-goto create_fi
-
-:fi_by_dn
-echo.
-echo   DN_ID 입력 (예: DNO-2026-0001)
-echo.
-
-:fi_dn_input
-set /p FI_DN_ID="DN_ID 입력: "
-
-if "%FI_DN_ID%"=="" (
-    echo [오류] DN_ID를 입력하세요.
-    goto fi_dn_input
-)
-
-echo.
-echo Final Invoice 생성 중...
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_fi.py" %FI_DN_ID%
-
-echo.
-echo ----------------------------------------
-set /p FI_DN_CONT="다른 Final Invoice를 생성하시겠습니까? (Y/N): "
-if /i "%FI_DN_CONT%"=="Y" goto fi_dn_input
-goto menu
-
-:fi_by_po
-echo.
-echo   발주번호 입력 (예: 26KPO00144)
-echo   (빈 입력 시 사용 가능한 PO 목록 표시)
-echo.
-
-:fi_po_input
-set /p FI_RCK_PO="RCK PO 입력: "
-
-if "%FI_RCK_PO%"=="" (
-    "%PYTHON_PATH%" "%~dp0create_fi.py" --po
-    echo.
-    goto fi_po_input
-)
-
-echo.
-echo Final Invoice 생성 중 (RCK PO: %FI_RCK_PO%)...
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_fi.py" --po %FI_RCK_PO%
-
-echo.
-echo ----------------------------------------
-set /p FI_PO_CONT="다른 발주번호로 생성하시겠습니까? (Y/N): "
-if /i "%FI_PO_CONT%"=="Y" goto fi_po_input
+call "%~dp0noah_menu.bat" fi
 goto menu
 
 :create_oc
-echo.
-echo ----------------------------------------
-echo   Order Confirmation 생성 (해외)
-echo ----------------------------------------
-echo.
-echo   SO_ID 입력 (예: SOO-2026-0001)
-echo.
-
-:oc_input
-set /p OC_SO_ID="SO_ID 입력: "
-
-if "%OC_SO_ID%"=="" (
-    echo [오류] SO_ID를 입력하세요.
-    goto oc_input
-)
-
-echo.
-echo Order Confirmation 생성 중...
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_oc.py" %OC_SO_ID%
-
-echo.
-echo ----------------------------------------
-set /p OC_CONTINUE="다른 Order Confirmation을 생성하시겠습니까? (Y/N): "
-if /i "%OC_CONTINUE%"=="Y" goto oc_input
-goto menu
-
-:create_pl
-echo.
-echo ----------------------------------------
-echo   Packing List 생성 (해외)
-echo ----------------------------------------
-echo.
-echo   DN_ID 입력 (예: DNO-2026-0001)
-echo.
-
-:pl_input
-set /p PL_DN_ID="DN_ID 입력: "
-
-if "%PL_DN_ID%"=="" (
-    echo [오류] DN_ID를 입력하세요.
-    goto pl_input
-)
-
-echo.
-echo Packing List 생성 중...
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_pl.py" %PL_DN_ID%
-
-echo.
-echo ----------------------------------------
-set /p PL_CONTINUE="다른 Packing List를 생성하시겠습니까? (Y/N): "
-if /i "%PL_CONTINUE%"=="Y" goto pl_input
+call "%~dp0noah_menu.bat" oc
 goto menu
 
 :create_ci
-echo.
-echo ----------------------------------------
-echo   Commercial Invoice 생성 (해외)
-echo ----------------------------------------
-echo.
-echo   DN_ID 입력 (예: DNO-2026-0001)
-echo.
+call "%~dp0noah_menu.bat" ci
+goto menu
 
-:ci_input
-set /p CI_DN_ID="DN_ID 입력: "
-
-if "%CI_DN_ID%"=="" (
-    echo [오류] DN_ID를 입력하세요.
-    goto ci_input
-)
-
-echo.
-echo Commercial Invoice 생성 중...
-echo.
-
-"%PYTHON_PATH%" "%~dp0create_ci.py" %CI_DN_ID%
-
-echo.
-echo ----------------------------------------
-set /p CI_CONTINUE="다른 Commercial Invoice를 생성하시겠습니까? (Y/N): "
-if /i "%CI_CONTINUE%"=="Y" goto ci_input
+:create_pl
+call "%~dp0noah_menu.bat" pl
 goto menu
 
 :sync_db

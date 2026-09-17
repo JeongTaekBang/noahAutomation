@@ -73,9 +73,12 @@ python reconcile_ind.py P03 -v            # 상세 로그
 streamlit run dashboard.py                # Streamlit 대시보드
 python dashboard_dist/build_portable_dashboard.py  # 배포 zip → dashboard_dist/NOAH_대시보드_배포.zip
 
-# GUI (문서 7종 + 납기현황) / 사내 배포판 빌드
+# GUI (문서 7종 + 납기현황) / 콘솔 메뉴 / 사내 배포판 빌드
 python noah_gui.py                        # tkinter GUI (개발 PC에서도 그대로 실행)
-python cli_dist/build_portable_gui.py     # 배포 zip 빌드 → cli_dist/NOAH_문서생성기_배포.zip
+noah_menu.bat                             # 콘솔 메뉴 — [국내]/[해외] 문서 7종만 (동료 PC용 진입점, 개발 PC에서도 실행)
+noah_menu.bat ts                          # 한 항목만 실행하고 복귀 (create_po.bat이 이렇게 위임한다)
+python setup_data_path.py --print         # 메뉴가 쓰는 데이터 파일 경로 (--change 로 다시 지정)
+python cli_dist/build_portable_gui.py     # 배포 zip 빌드 → cli_dist/NOAH_문서생성기_배포.zip (GUI + 콘솔 메뉴 동봉)
 
 # Tests
 pytest                                    # All tests
@@ -150,10 +153,11 @@ Reconciliation layer:
 | `po_generator/validators.py` | Required field checks, ICO Unit > 0, delivery date validation |
 | `po_generator/services/document_service.py` | Orchestrator: find → validate → generate → save |
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
-| `create_po.bat` | **대화형 메뉴 런처 (이름과 달리 PO 전용이 아니다)** — 문서 7종 + DB Sync·마감·대사·대시보드·납기현황을 번호로 고르는 메뉴다. 거래명세표처럼 **하위 메뉴가 있는 항목도 있다**(단건/월합/하루치 묶음/목록 묶음). CLI에 옵션을 추가하면 여기와 `noah_gui.py`에도 넣어야 사용자 눈에 보인다 — `create_ts.py`만 고치고 "CLI에 반영했다"고 한 적이 있다 (2026-08-07, `tasks/lessons.md`) |
+| `create_po.bat` | **대화형 메뉴 런처 (이름과 달리 PO 전용이 아니다)** — 문서 7종 + DB Sync·마감·대사·대시보드·납기현황을 번호로 고르는 메뉴다. **문서 7종의 입력·실행 블록은 여기 없고 `noah_menu.bat`에 있다** — `call noah_menu.bat <키>`로 위임한다 (2026-09-14). CLI에 옵션을 추가하면 `noah_menu.bat`과 `noah_gui.py`에도 넣어야 사용자 눈에 보인다 — `create_ts.py`만 고치고 "CLI에 반영했다"고 한 적이 있다 (2026-08-07, `tasks/lessons.md`) |
+| `noah_menu.bat` + `setup_data_path.py` | **동료 PC용 콘솔 메뉴** — [국내] PO·TS / [해외] PI·FI·OC·CI·PL **만** (DB·마감·대사·DN 쓰기·납기현황은 없다 — `tests/test_noah_menu.py`가 금지 목록으로 감시). 거래명세표·FI의 하위 메뉴까지 포함해 **문서 블록의 유일한 소유자**이고 `create_po.bat`이 `call noah_menu.bat ts`처럼 위임한다 — 블록이 두 메뉴에 있으면 옵션을 한쪽에만 넣는 실수가 반복된다. Python은 동봉 `python\`(배포판) → `local_config.bat`(개발 PC) 순. 데이터 파일은 첫 실행에 `setup_data_path.py`가 OneDrive에서 찾아 **최근 수정 순으로 전부** 보여주고 번호/Enter로 확정 → GUI와 **같은** `noah_config.ini`에 기록 (첫 BFS 결과만 쓰면 낡은 사본이 잡힌다 — 2026-09-14 실측 `문서\`의 8/7자 사본) (탐색·검증·쓰기는 `noah_gui`의 함수를 그대로 쓴다 — 규칙이 갈리면 두 진입점이 다른 파일을 본다). `--print`는 메뉴를 그릴 때마다 불리므로 tkinter(`noah_gui`, 0.6초)를 임포트하지 않는다. **`set /p` 메뉴는 파이프로 검증이 안 된다** — 환경변수로 답을 미리 넣고(`set /p`는 빈 입력이면 변수를 그대로 둔다) stdin을 NUL로 주면 분기가 재현된다 |
 | `noah_gui.py` | tkinter GUI — 문서 7종 + 납기현황. 기존 `create_*.py`·`delivery_status.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함. **DOC_TYPES에 항목을 추가하면 `build_portable_gui.APP_FILES`에도 넣어야 한다** — 안 그러면 배포판에서 그 버튼만 조용히 실패한다 (빌드 `verify()`와 `tests/test_noah_gui.py`가 대조) |
 | `build_common.py` | 배포판 빌드 공통부 — 런타임 내려받기·핀 3자 대조·트리밍·BUILD_INFO·zip. 문서생성기와 대시보드 두 빌더가 공유한다 (복사하면 갈라지고, 그 갈라짐은 "한쪽만 낡은 pandas로 나간다"로 늦게 드러난다 — `mail_cli.py`와 같은 이유). **최상위는 상수·함수 정의만** |
-| `cli_dist/build_portable_gui.py` | 문서생성기 배포판 — `build_common` 위에 이 배포판만의 것을 얹는다: `APP_FILES`(담을 것) · 런처/설치 스크립트 · `verify()`(`DOC_TYPES` 대조 + CLI 전수 `--help` 스모크). **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드하며, 예외는 `build_common`을 찾는 sys.path 한 줄뿐) |
+| `cli_dist/build_portable_gui.py` | 문서생성기 배포판 — `build_common` 위에 이 배포판만의 것을 얹는다: `APP_FILES`(담을 것 — `noah_menu.bat`·`setup_data_path.py` 포함) · 런처/설치 스크립트 · `SHORTCUTS`(바탕화면 바로가기 2개: GUI `.vbs` + 콘솔 메뉴 `.bat`) · `verify()`(`DOC_TYPES` 대조 + `cli_scripts()` 전수 `--help` 스모크 — `.py`만, `.bat`에 `--help`를 주면 메뉴가 뜨고 멈춘다). **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드하며, 예외는 `build_common`을 찾는 sys.path 한 줄뿐) |
 | `dashboard_dist/build_portable_dashboard.py` | 대시보드 배포판 — `dashboard.py`를 **무수정으로** 담고 `po_generator/`·`sql/`을 동봉한다. 예전 `build_dist.py`는 import를 문자열 치환해 standalone 파일을 만들었는데, import 한 줄이 바뀌자 패턴이 안 맞아 빌드가 죽었고 배포본이 4개월 낡았다 — 그래서 재작성을 아예 없앴다. `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다(import만으로는 트리밍 사고를 못 잡는다). pyarrow는 flight/parquet/dataset/substrait를 잘라내되 `arrow_compute`는 남긴다 (streamlit이 로드한다 — 실측) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
 | `po_generator/hs_code.py` | SECTORIEL 라인별 HS CODE 판정 — 규칙 사다리(운임 → 모델번호 → 품목텍스트 → OS 제품군 → 미매칭)와 고객 제공 코드표. **COM 없는 순수 판정**이라 실데이터 전수로 테스트한다(`dn_recorder`/`dn_writer`를 가른 것과 같은 이유). 결과는 `_hs_code` **열**로 items_df에 붙는다 — 생성기가 Model number로 재정렬하므로 리스트로 넘기면 코드가 남의 품목에 붙는다(8자리 숫자라 눈으로 안 보인다). 새 스페어 코드는 `SPARE_HS_BY_MODEL`에 한 줄 |

@@ -277,36 +277,48 @@ LOCK_HINT = (
 )
 
 
-def find_data_file(timeout: float = SEARCH_TIMEOUT_SEC) -> Path | None:
-    """OneDrive 폴더에서 NOAH_SO_PO_DN.xlsx 탐색
+def find_data_files(timeout: float = SEARCH_TIMEOUT_SEC, limit: int | None = None) -> list[Path]:
+    """OneDrive 폴더에서 NOAH_SO_PO_DN.xlsx 탐색 — 찾은 순서(얕은 곳부터)대로
 
     시간·깊이 제한이 핵심이다. 회사 PC의 OneDrive 트리를 제한 없이 훑으면
-    분 단위로 멈춘다. 못 찾으면 곧바로 파일 선택 대화상자로 넘긴다.
+    분 단위로 멈춘다. limit에 닿거나 시간이 다하면 그때까지 찾은 것을 준다.
+
+    사본이 여럿일 수 있다 — 실측(2026-09-14)으로 `문서\`에 낡은 사본이 하나 더 있어
+    첫 번째 것만 돌려주면 그쪽이 잡혔다. 고르는 건 호출부 몫이다.
     """
     deadline = time.monotonic() + timeout
     target = DATA_FILE_NAME.lower()
+    found: list[Path] = []
 
     try:
         home = Path.home()
         roots = [d for d in home.iterdir()
                  if d.is_dir() and d.name.lower().startswith("onedrive")]
     except (PermissionError, OSError):
-        return None
+        return found
 
     queue: deque[tuple[Path, int]] = deque((r, 0) for r in roots)
     while queue:
         if time.monotonic() > deadline:
-            return None
+            break
         folder, depth = queue.popleft()
         try:
             for item in folder.iterdir():
                 if item.name.lower() == target and item.is_file():
-                    return item
+                    found.append(item)
+                    if limit is not None and len(found) >= limit:
+                        return found
                 if depth < SEARCH_MAX_DEPTH and item.is_dir():
                     queue.append((item, depth + 1))
         except (PermissionError, OSError):
             continue
-    return None
+    return found
+
+
+def find_data_file(timeout: float = SEARCH_TIMEOUT_SEC) -> Path | None:
+    """첫 번째로 찾은 데이터 파일 (GUI 마법사용 — 대화상자에서 사람이 다시 확인한다)"""
+    found = find_data_files(timeout, limit=1)
+    return found[0] if found else None
 
 
 # === 자식 프로세스 ==========================================================
