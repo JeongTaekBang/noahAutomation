@@ -438,6 +438,11 @@ def build_summary(rows: pd.DataFrame) -> pd.DataFrame:
     **비고만으로 구분이 안 될 때만** 품목명을 덧붙인다. 비고가 이미 호선별로 갈려 있으면
     (세진밸브 `H2734`/`H2735`…) 품목은 잡음이고, 피엠에스(두 행 모두 `묘도 GS`)·
     티에스엔텍(비고 없음)처럼 겹칠 때만 품목이 단서가 된다.
+
+    행 순서는 **접수가 빠른 주문부터**다 — 고객은 자기 발주 순서로 표를 대조한다.
+    정렬키를 주문 단위로 잡아 나뉜 행이 떨어지지 않게 하고, 주문 안에서만 출고 예정일 순
+    (`처리중`은 그 주문의 끝)으로 둔다. 예전엔 출고 예정일이 1순위라 나뉜 주문 10건 중
+    7건의 행이 다른 주문 사이로 흩어졌다 (2026-09-17 실측).
     """
     if rows.empty:
         return pd.DataFrame(columns=list(SUMMARY_COLUMNS))
@@ -454,7 +459,15 @@ def build_summary(rows: pd.DataFrame) -> pd.DataFrame:
     work['_req_key'] = [format_date(v) for v in work['Requested delivery date']]
 
     records = []
-    for _so_id, so_group in work.groupby('_so_id', sort=False):
+    for so_id, so_group in work.groupby('_so_id', sort=False):
+        # 주문 단위 정렬키 — 이 주문에서 나뉜 행이 전부 같은 키를 가져야 표에서 붙어 있다.
+        # 접수일은 가장 이른 라인의 날짜: 나중에 붙은 라인(SOD-2026-0921의 `(2)` 라인, 9/03)이
+        # 제 날짜로 정렬되면 그 사이에 접수된 다른 주문이 끼어든다. 모르는 날짜는 맨 뒤로.
+        # (Series.map이 아니라 순회 — map은 None을 NaT로 바꿔 `is not None`을 통과시킨다)
+        received = [d for d in (as_date(v) for v in so_group['PO receipt date']) if d is not None]
+        sort_received = min(received) if received else pd.Timestamp.max
+        sort_po = _clean_text(so_group.iloc[0]['Customer PO'])
+
         # 요청납기·공장출고일 **둘 중 하나라도** 다르면 다른 행이다
         date_groups = list(so_group.groupby(['_req_key', '_exw_key'], sort=False))
         # Remarks가 라인마다 갈리는 주문이 있다 — 행마다 첫 비어있지 않은 값을 쓴다
@@ -483,14 +496,17 @@ def build_summary(rows: pd.DataFrame) -> pd.DataFrame:
                 COL_EXW: exw_key,
                 'Sales 금액': float(group['_미출고금액'].sum()),
                 'PO receipt date': format_date(first['PO receipt date']),
+                '_sort_received': sort_received,
+                '_sort_po': sort_po,
+                '_sort_so': so_id,
                 '_sort_exw': first['_sort_exw'],
             })
 
     summary = pd.DataFrame(records)
-    # 납기 확정 건을 앞에, '처리중'을 뒤에 — 회신 받는 쪽이 먼저 보고 싶은 순서.
-    # 같은 주문이 나뉜 행들은 요청납기 순으로 붙어 보이게 한다.
+    # 주문 사이: 접수일 → 같은 날이면 고객 발주번호 → 한 발주가 여러 SO(호선별)면 SO끼리.
+    # 주문 안: 출고 예정일('처리중'은 끝) → 요청납기.
     summary = summary.sort_values(
-        ['_sort_exw', 'PO receipt date', 'Customer PO', 'Requested delivery date'],
+        ['_sort_received', '_sort_po', '_sort_so', '_sort_exw', 'Requested delivery date'],
     ).reset_index(drop=True)
     return summary[list(SUMMARY_COLUMNS)]
 

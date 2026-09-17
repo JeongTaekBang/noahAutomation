@@ -471,15 +471,6 @@ class TestSummary:
         assert summary.loc[0, '수량'] == 6
         assert summary.loc[0, 'Sales 금액'] == 600000
 
-    def test_납기_확정건이_처리중보다_앞에_온다(self):
-        so = make_so([
-            {'SO_ID': 'SOD-1', 'EXW NOAH': dt.time(0, 0)},
-            {'SO_ID': 'SOD-2', 'EXW NOAH': dt.datetime(2026, 9, 14)},
-            {'SO_ID': 'SOD-3', 'EXW NOAH': dt.datetime(2026, 8, 31)},
-        ])
-        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
-        assert summary[ds.COL_EXW].tolist() == ['2026-08-31', '2026-09-14', ds.DATE_TBD_LABEL]
-
     def test_요약합과_상세합이_같다(self):
         """그룹핑이 금액을 흘리거나 중복 집계하면 안 된다
 
@@ -516,6 +507,83 @@ class TestSummary:
         summary = ds.build_summary(empty)
         assert summary.empty
         assert '수량' in summary.columns
+
+
+class TestSummaryOrder:
+    """행 순서 — 접수가 빠른 주문부터, 한 주문의 행은 붙여서
+
+    고객은 자기 발주 순서로 회신 표를 대조한다. 예전엔 공장 출고 예정일 순이라
+    납기가 나뉜 주문의 행이 표 여기저기로 흩어졌다 (2026-09-17 실측: 나뉜 주문 10건 중 7건).
+    """
+
+    def test_접수가_빠른_주문이_앞에_온다(self):
+        """출고 예정일과 처리중 여부는 주문 사이의 순서를 바꾸지 않는다
+
+        발주번호 알파벳 순(A·B·C)과도, 출고 예정일 순(A·C·B)과도 다른 답이 나오게 짰다.
+        """
+        so = make_so([
+            {'SO_ID': 'SOD-1', 'Customer PO': 'PO-A',
+             'PO receipt date': dt.datetime(2026, 7, 1), 'EXW NOAH': dt.datetime(2026, 8, 31)},
+            {'SO_ID': 'SOD-2', 'Customer PO': 'PO-B',
+             'PO receipt date': dt.datetime(2026, 3, 2), 'EXW NOAH': dt.time(0, 0)},
+            {'SO_ID': 'SOD-3', 'Customer PO': 'PO-C',
+             'PO receipt date': dt.datetime(2026, 5, 4), 'EXW NOAH': dt.datetime(2026, 12, 1)},
+        ])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert summary['Customer PO'].tolist() == ['PO-B', 'PO-C', 'PO-A']
+
+    def test_나뉜_주문의_행은_떨어지지_않는다(self):
+        """먼저 접수된 주문의 뒤 납기가 다음 주문보다 늦어도 제 주문 옆에 붙는다
+
+        출고 예정일 순으로는 A 8/10 → B 9/30 → A 12/01로 찢어졌다.
+        """
+        so = make_so([
+            {'SO_ID': 'SOD-A', 'Line item': 1, 'Customer PO': 'PO-A',
+             'PO receipt date': dt.datetime(2026, 3, 2), 'EXW NOAH': dt.datetime(2026, 8, 10)},
+            {'SO_ID': 'SOD-A', 'Line item': 2, 'Customer PO': 'PO-A',
+             'PO receipt date': dt.datetime(2026, 3, 2), 'EXW NOAH': dt.datetime(2026, 12, 1)},
+            {'SO_ID': 'SOD-B', 'Line item': 1, 'Customer PO': 'PO-B',
+             'PO receipt date': dt.datetime(2026, 6, 1), 'EXW NOAH': dt.datetime(2026, 9, 30)},
+        ])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert list(zip(summary['Customer PO'], summary[ds.COL_EXW])) == [
+            ('PO-A', '2026-08-10'), ('PO-A', '2026-12-01'), ('PO-B', '2026-09-30'),
+        ]
+
+    def test_주문_안에서_접수일이_갈려도_찢어지지_않는다(self):
+        """주문의 접수일은 가장 이른 라인의 날짜다
+
+        `SOD-2026-0921`은 5라인이 8/31, 나중에 붙은 3라인(`INCO-260622-674(2)`)이 9/03 접수다.
+        행마다 제 접수일로 정렬하면 그 사이(9/01)에 접수된 다른 주문이 끼어든다.
+        """
+        so = make_so([
+            {'SO_ID': 'SOD-A', 'Line item': 1, 'Customer PO': 'PO-A',
+             'PO receipt date': dt.datetime(2026, 8, 31), 'EXW NOAH': dt.datetime(2026, 11, 11)},
+            {'SO_ID': 'SOD-A', 'Line item': 2, 'Customer PO': 'PO-A(2)',
+             'PO receipt date': dt.datetime(2026, 9, 3), 'EXW NOAH': dt.datetime(2026, 12, 2)},
+            {'SO_ID': 'SOD-B', 'Line item': 1, 'Customer PO': 'PO-B',
+             'PO receipt date': dt.datetime(2026, 9, 1), 'EXW NOAH': dt.datetime(2026, 10, 7)},
+        ])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert summary['Customer PO'].tolist() == ['PO-A', 'PO-A(2)', 'PO-B']
+
+    def test_같은_날_접수면_발주번호_순(self):
+        """고객 눈에 보이는 번호로 가른다 — SO_ID(등록 순)는 본문에 없다"""
+        so = make_so([
+            {'SO_ID': 'SOD-1', 'Customer PO': '10238'},
+            {'SO_ID': 'SOD-2', 'Customer PO': '10234'},
+        ])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert summary['Customer PO'].tolist() == ['10234', '10238']
+
+    def test_접수일이_비면_맨_뒤(self):
+        """모르는 날짜를 가장 먼저 접수된 주문으로 올리면 안 된다 (문자열로 정렬하면 ''가 맨 앞)"""
+        so = make_so([
+            {'SO_ID': 'SOD-1', 'Customer PO': 'PO-X', 'PO receipt date': None},
+            {'SO_ID': 'SOD-2', 'Customer PO': 'PO-Y', 'PO receipt date': dt.datetime(2026, 9, 1)},
+        ])
+        summary = ds.build_summary(ds.attach_ship_status(so, EMPTY_DN))
+        assert summary['Customer PO'].tolist() == ['PO-Y', 'PO-X']
 
 
 class TestDetail:
