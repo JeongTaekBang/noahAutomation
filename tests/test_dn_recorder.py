@@ -40,6 +40,7 @@ def make_delivery(rows: list[dict]) -> pd.DataFrame:
         R.COL_INVOICE_AMOUNT: 800_000,
         R.COL_CUSTOMER: '엔이에스',
         R.COL_RCK_ORDER: 'ND-0100',
+        R.COL_JOB_NO: 'L260100',
         'AMOUNT': 800_000,
     }, rows)
     df[R.COL_SHIP_DATE] = pd.to_datetime(df[R.COL_SHIP_DATE])
@@ -64,6 +65,8 @@ def make_po(rows: list[dict]) -> pd.DataFrame:
     return _frame({
         'PO_ID': 'ND-0100',
         'SO_ID': SO_A,
+        # 대개 주문 전체가 O.C No. 하나다 (986 SO 중 973) — 그러면 JOB NO로는 라인을 못 가른다
+        'NOAH O.C No.': 'L260100',
         'Line item': 1,
         'Item name': 'NOS100-M',
         'Item qty': 10,
@@ -410,6 +413,113 @@ def test_배정이_갈리면_확인필요로_뺀다():
 
     assert not plan.lines
     assert {r.reason for r in plan.reviews} == {'같은 SO 여러 날 출고'}
+
+
+def _same_price_two_lines():
+    """단가가 같은 두 라인이 한 달에 하루씩 나간 모양 (2026-09 SOD-2026-0401:
+    NOS185 1대 2,560,000원 × 2라인, 9/2 L1 · 9/21 L2)"""
+    delivery = make_delivery([
+        {R.COL_SHIP_DATE: dt.datetime(2026, 8, 4), R.COL_INVOICE_AMOUNT: 400_000},
+        {R.COL_SHIP_DATE: dt.datetime(2026, 8, 21), R.COL_INVOICE_AMOUNT: 400_000},
+    ])
+    so = make_so([{'Line item': 1, 'Item qty': 1}, {'Line item': 2, 'Item qty': 1}])
+    po = make_po([
+        {'Line item': 1, 'Item qty': 1, 'Total ICO': 400_000},
+        {'Line item': 2, 'Item qty': 1, 'Total ICO': 400_000},
+    ])
+    return delivery, so, po
+
+
+def test_배정이_갈려도_이미_기록된_날짜가_해를_정하면_나머지를_넣는다():
+    """금액만으로는 갈리지만 앞 날짜가 이미 DN에 있으면 그 기록과 맞는 해는 하나뿐이다.
+    매일 돌리는 게 정상 사용이라 앞 출고는 대개 이미 기록돼 있다."""
+    delivery, so, po = _same_price_two_lines()
+    dn = make_dn([{'Line item': 1, 'Qty': 1, '출고일': dt.datetime(2026, 8, 4)}])
+
+    plan = run(delivery, so, po, dn)
+
+    assert not plan.reviews
+    assert [(l.ship_date, l.line_item, l.qty) for l in plan.lines] == [
+        (pd.Timestamp(2026, 8, 21), 2, 1)]
+    assert [r.reason for r in plan.skipped] == ['이미 입력됨']
+
+
+def test_기록이_어느_해와도_안_맞으면_여전히_확인필요():
+    """기록과 맞는 해가 없다고 '나눌 방법이 없다'(= 단가 정정)로 새면 안 된다 —
+    그러면 뒤 날짜가 정정 행으로 조용히 건너뛰어진다"""
+    delivery, so, po = _same_price_two_lines()
+    dn = make_dn([{'Line item': 1, 'Qty': 5, '출고일': dt.datetime(2026, 8, 4)}])
+
+    plan = run(delivery, so, po, dn)
+
+    assert not plan.lines
+    assert [r.reason for r in plan.reviews] == ['같은 SO 여러 날 출고']
+    assert '단가 정정 행' not in {r.reason for r in plan.skipped}
+
+
+def _oc_per_line(jobs: tuple[str, str], amounts=(400_000, 400_000)):
+    """라인마다 O.C No.가 따로 있는 주문 — 출고리스트 JOB NO가 곧 PO 행을 가리킨다
+    (2026-09 SOD-2026-0401: L260604 = L1, L260605 = L2)"""
+    delivery = make_delivery([
+        {R.COL_SHIP_DATE: dt.datetime(2026, 8, 4), R.COL_INVOICE_AMOUNT: amounts[0],
+         R.COL_JOB_NO: jobs[0]},
+        {R.COL_SHIP_DATE: dt.datetime(2026, 8, 21), R.COL_INVOICE_AMOUNT: amounts[1],
+         R.COL_JOB_NO: jobs[1]},
+    ])
+    so = make_so([{'Line item': 1, 'Item qty': 1}, {'Line item': 2, 'Item qty': 1}])
+    po = make_po([
+        {'Line item': 1, 'Item qty': 1, 'Total ICO': amounts[0], 'NOAH O.C No.': 'L260604'},
+        {'Line item': 2, 'Item qty': 1, 'Total ICO': amounts[1], 'NOAH O.C No.': 'L260605'},
+    ])
+    return delivery, so, po
+
+
+def test_JOB_NO가_라인을_가리키면_기록이_없어도_날짜별로_넣는다():
+    """금액이 같아도 출고리스트 JOB NO = PO `NOAH O.C No.`로 라인이 정해진다.
+    두 출고가 한 실행에 처음 들어와도(DN 기록 없음) 풀려야 한다"""
+    delivery, so, po = _oc_per_line(('L260604', 'L260605'))
+
+    plan = run(delivery, so, po, make_dn([]))
+
+    assert not plan.reviews
+    assert [(l.ship_date, l.line_item, l.qty) for l in plan.lines] == [
+        (pd.Timestamp(2026, 8, 4), 1, 1), (pd.Timestamp(2026, 8, 21), 2, 1)]
+
+
+def test_JOB_NO는_회차_접미사를_떼고_맞춘다():
+    """출고리스트는 회차마다 `-1R`, `-2R`을 붙인다 (`L260300-3R` ↔ PO `L260300`)"""
+    delivery, so, po = _oc_per_line(('L260605-1R', 'L260604-2R'))
+
+    plan = run(delivery, so, po, make_dn([]))
+
+    assert not plan.reviews
+    assert [(l.ship_date, l.line_item) for l in plan.lines] == [
+        (pd.Timestamp(2026, 8, 4), 2), (pd.Timestamp(2026, 8, 21), 1)]
+
+
+def test_JOB_NO가_PO와_짝이_안_맞으면_근거로_쓰지_않는다():
+    """오기(3~9월 698행 중 9행 — `SOD-2026-0264` 출고리스트 L260388 vs PO L260286)로
+    거르면 정답이 빠진다. 한 행이라도 짝이 없으면 그 SO에는 JOB NO를 안 쓴다"""
+    delivery, so, po = _oc_per_line(('L260604', 'L260699'))
+
+    plan = run(delivery, so, po, make_dn([]))
+
+    assert not plan.lines
+    assert [r.reason for r in plan.reviews] == ['같은 SO 여러 날 출고'] * 2
+    assert '여러 가지' in plan.reviews[0].detail       # 왜 못 풀었는지 적는다
+
+
+def test_JOB_NO와_금액이_어긋나면_확인필요로_뺀다():
+    """금액으로는 한 가지로 나뉘는데 JOB NO는 반대 라인을 가리킨다 — 어느 쪽이 틀렸는지는
+    사람이 본다 (실측 0건이지만 마스터에 쓰는 경로라 부딪치면 멈춘다)"""
+    delivery, so, po = _oc_per_line(('L260605', 'L260604'), amounts=(300_000, 500_000))
+
+    plan = run(delivery, so, po, make_dn([]))
+
+    assert not plan.lines
+    assert [r.reason for r in plan.reviews] == ['같은 SO 여러 날 출고'] * 2
+    assert 'JOB NO' in plan.reviews[0].detail
+    assert '단가 정정 행' not in {r.reason for r in plan.skipped}
 
 
 def test_같은_날_두_줄이면_한_출고로_합친다():

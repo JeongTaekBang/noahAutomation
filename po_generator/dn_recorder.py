@@ -23,9 +23,10 @@ PO 기준으로만 뽑으면 부속 라인이 통째로 빠진다 (2026-03~08 �
 자기검증 — 통과분만 자동 입력
 ------------------------------
     (a) Σ(PO Invoiced P{XX}의 Total ICO) == 출고리스트 계산서금액
-    (b) 출고리스트에 같은 SO_ID가 여러 날짜로 있지 않을 것
+    (b) 같은 SO_ID가 여러 날짜로 있으면 PO 행 금액이 날짜별 계산서금액에 한 가지로만
+        나뉠 것 (`_split_multi_date` — 금액과 JOB NO(= PO `NOAH O.C No.`)가 맞아야 하고,
+        그래도 갈리면 이미 기록된 날짜의 DN이 가른다)
 
-(b)는 PO 라인을 어느 날짜에 배분할지 알 방법이 없어 자동화가 불가능하다.
 하나라도 걸리면 `Review`로 빼고 사람에게 넘긴다 — 2026-03~08 561건 리플레이 기준
 자동 입력 549건 중 548건 정확(99.8%), 걸러낸 12건은 전부 진짜 확인 대상이었다(헛경보 0).
 
@@ -43,6 +44,7 @@ import re
 from dataclasses import dataclass, field
 from itertools import combinations
 from pathlib import Path
+from typing import Callable
 
 import pandas as pd
 
@@ -59,6 +61,7 @@ COL_SHIP_DATE = '납품완료'
 COL_INVOICE_AMOUNT = '계산서금액'
 COL_CUSTOMER = 'Customer'
 COL_RCK_ORDER = 'RCK ODER'
+COL_JOB_NO = 'JOB NO'       # 공장 발주번호 = PO_국내 `NOAH O.C No.` (+ 회차 접미사 `-1R`)
 
 # 금액 비교 허용 오차 (원) — reconcile_po.py와 같은 기준
 AMOUNT_TOLERANCE = 1.0
@@ -67,6 +70,7 @@ AMOUNT_TOLERANCE = 1.0
 MONTHLY_CLOSE_KEYWORDS = ('월합', '마감')
 
 _DN_ID_RE = re.compile(r'^DND-(\d{4})-(\d+)$')
+_OC_ROUND_RE = re.compile(r'-\d+R$', re.IGNORECASE)
 _PERIOD_RE = re.compile(r'^P(\d{1,2})$', re.IGNORECASE)
 
 
@@ -311,8 +315,9 @@ def build_plan(
     invoice_total = events.groupby(COL_SO_ID)['_invoice'].sum().to_dict()
 
     # 같은 SO가 여러 날 나갔으면 PO 행의 ICO 금액을 날짜별 계산서금액에 배정해 본다
-    splits, corrections = _split_multi_date(
-        events, po_by_so, invoiced_now, ship_dates)
+    splits, corrections, unresolved = _split_multi_date(
+        events, po_by_so, invoiced_now, ship_dates,
+        so_lines=so_lines, recorded=recorded_maps)
 
     year_hint = _year_from_delivery(delivery)
     dn_seq = next_dn_seq(dn_df, year_hint)
@@ -380,9 +385,9 @@ def build_plan(
                     '계산서금액이 음수인 행이 있습니다 — 출고/반품/재출고를 어떻게 '
                     '적을지는 사람이 정해야 합니다'
                     if negative else
-                    f"출고리스트에 {ship_dates[so_id]}개 날짜인데 PO 금액이 "
-                    "날짜별 계산서금액으로 안 나뉩니다 — 어느 라인이 어느 날 "
-                    "나갔는지 판단할 수 없습니다")
+                    f"출고리스트에 {ship_dates[so_id]}개 날짜인데 "
+                    + SPLIT_FAILURE_DETAIL.get(unresolved.get(so_id),
+                                               SPLIT_FAILURE_DETAIL['no_split']))
                 plan.reviews.append(Review(
                     so_id, ship_date, customer, reason, detail))
                 continue
@@ -494,19 +499,49 @@ def _delivery_events(delivery: pd.DataFrame) -> pd.DataFrame:
     같은 주문이 같은 날 두 줄로 적히는 경우가 있다(2026-05 SOD-2026-0467).
     행마다 돌면 같은 출고를 두 번 기록하므로 여기서 한 번 합친다.
     `dropna=False`여야 출고일이 빈 행도 남아 '출고일 없음'으로 걸린다.
+    `_jobs`는 그 출고에 적힌 JOB NO(`_oc_key`)의 집합 — 여러 날 출고의 라인 대조용이다.
     """
     amount = (pd.to_numeric(delivery.get(COL_INVOICE_AMOUNT), errors='coerce')
               if COL_INVOICE_AMOUNT in delivery.columns else 0)
     customer = (delivery[COL_CUSTOMER] if COL_CUSTOMER in delivery.columns else '')
+    jobs = (delivery[COL_JOB_NO].map(_oc_key) if COL_JOB_NO in delivery.columns else '')
     df = pd.DataFrame({
         COL_SO_ID: delivery[COL_SO_ID],
         COL_SHIP_DATE: delivery[COL_SHIP_DATE],
         '_invoice': amount,
         '_customer': customer,
+        '_job': jobs,
     })
     return (df.groupby([COL_SO_ID, COL_SHIP_DATE], dropna=False, sort=False)
-            .agg(_invoice=('_invoice', 'sum'), _customer=('_customer', 'first'))
+            .agg(_invoice=('_invoice', 'sum'), _customer=('_customer', 'first'),
+                 _jobs=('_job', lambda s: frozenset(j for j in s if j)))
             .reset_index())
+
+
+def _oc_key(value: object) -> str:
+    """JOB NO / `NOAH O.C No.`의 대조 키 — 회차 접미사를 뗀다 (`L260300-3R` → `L260300`)
+
+    출고리스트는 같은 공장 발주를 회차마다 `-1R`, `-2R`로 적고, PO에는 대개 접미사 없이
+    적는다. 양쪽 다 이 키로 바꿔 비교한다 (PO에 `L260137-1R`로 적힌 행도 있다).
+    """
+    if value is None or pd.isna(value):
+        return ''
+    return _OC_ROUND_RE.sub('', str(value).strip()).upper()
+
+
+# 여러 날 출고를 못 풀었을 때 '확인필요'에 적는 사유. **왜** 못 풀었는지가 보여야 사람이
+# 무엇을 볼지 안다 — "안 나뉩니다"만 적혀 있을 땐 뭐가 애매했는지 알 수 없었다 (2026-09
+# SOD-2026-0401: 실제로는 나눌 방법이 **두 가지**였다)
+SPLIT_FAILURE_DETAIL: dict[str, str] = {
+    'no_split': "PO 금액이 날짜별 계산서금액으로 안 나뉩니다 — 어느 라인이 어느 날 "
+                "나갔는지 판단할 수 없습니다",
+    'ambiguous': "금액으로 나누는 방법이 여러 가지입니다(금액이 같은 PO 행) — JOB NO·"
+                 "기존 DN 기록으로도 어느 라인이 어느 날 나갔는지 못 가립니다",
+    'conflict': "금액으로 나눈 결과가 출고리스트 JOB NO(= PO NOAH O.C No.) 또는 기존 DN "
+                "기록과 어긋납니다 — 어느 쪽이 맞는지 확인이 필요합니다",
+    'too_many': "PO 행이 많아 금액 배정을 끝까지 따져 보지 못했습니다 — 어느 라인이 "
+                "어느 날 나갔는지 판단할 수 없습니다",
+}
 
 
 def _split_multi_date(
@@ -514,18 +549,38 @@ def _split_multi_date(
     po_by_so: dict[str, pd.DataFrame],
     invoiced_now: str,
     ship_dates: dict[str, int],
+    *,
+    so_lines: dict[str, dict[int, tuple[str, int]]],
+    recorded: dict[str, dict[pd.Timestamp, dict[int, int]]],
 ) -> tuple[dict[str, dict[pd.Timestamp, dict[int, int]] | None],
-           dict[str, set[pd.Timestamp]]]:
+           dict[str, set[pd.Timestamp]],
+           dict[str, str]]:
     """여러 날 나간 SO를 푼다
 
+    Args:
+        so_lines: `_so_lines_by_order` — DN 기록과 대조할 때 SO에 없는 라인을 빼는 데 쓴다
+        recorded: `_shipment_maps` — **실행 전** DN 기록
+
     Returns:
-        (splits, corrections)
-        splits[so_id]     = {출고일: {라인: 수량}} — 날짜별로 갈랐을 때. 못 풀면 None
+        (splits, corrections, unresolved)
+        splits[so_id]      = {출고일: {라인: 수량}} — 날짜별로 갈랐을 때. 못 풀면 None
         corrections[so_id] = {정정 행의 날짜, ...} — 출고가 아니라 단가 정정인 행
+        unresolved[so_id]  = 못 푼 사유 (`SPLIT_FAILURE_DETAIL`의 키)
 
     `PO_국내`는 **분할출고마다 행을 따로 둔다** — 그래서 PO 행들의 `Total ICO`를
     날짜별 `계산서금액`에 정확히 나눠 담을 수 있다 (2026-03~07 실측 12건 중 10건 유일 배정,
     모호 0건).
+
+    금액 위에 근거 두 가지를 얹는다 (`_narrow`):
+
+    1. **JOB NO ↔ `NOAH O.C No.`** — 출고리스트가 그 출고에 직접 적은 공장 발주번호다.
+       대개 주문 전체가 O.C No. 하나라(986 SO 중 973) 라인을 못 가르지만, 라인마다 따로
+       있으면 그게 곧 라인이다 (2026-09 `SOD-2026-0401`: NOS185 1대 2,560,000원 × 2라인이라
+       금액으로는 두 가지로 나뉘는데, L260604 = L1 · L260605 = L2). 쓸 수 있으면 늘 걸어서
+       금액과 **교차검증**한다 — 둘이 부딪치면 사람 몫이다.
+    2. **이미 기록된 날짜의 DN** — 그래도 갈릴 때만. 매일 돌리므로 앞 출고는 대개 기록돼 있다.
+       풀린 건에는 걸지 않는다 — 사람이 부속 라인까지 적어 둔 기록이면 멀쩡한 배정이
+       '어긋남'으로 떨어진다.
 
     안 나뉘는 경우 중 하나는 **출고가 두 번이 아니라 단가를 정정한 것**이다.
     2026-05 `SOD-2026-0306`: 5/11 계산서 9,956,592 → 5/13에 `L260441-1R`로 103,616.
@@ -538,6 +593,7 @@ def _split_multi_date(
     """
     splits: dict[str, dict[pd.Timestamp, dict[int, int]] | None] = {}
     corrections: dict[str, set[pd.Timestamp]] = {}
+    unresolved: dict[str, str] = {}
 
     for so_id, count in ship_dates.items():
         if count <= 1:
@@ -547,10 +603,12 @@ def _split_multi_date(
             splits[so_id] = None
             continue
         rows = po_rows[po_rows['_status'] == invoiced_now]
+        oc_col = resolve_column(rows.columns, 'noah_oc_no')
         items = [
             (int(r['_line']),
              int(pd.to_numeric(r['Item qty'], errors='coerce') or 0),
-             float(pd.to_numeric(r.get('Total ICO'), errors='coerce') or 0.0))
+             float(pd.to_numeric(r.get('Total ICO'), errors='coerce') or 0.0),
+             _oc_key(r[oc_col]) if oc_col else '')
             for _, r in rows.iterrows()
         ]
         grp = (events[events[COL_SO_ID] == so_id]
@@ -559,23 +617,101 @@ def _split_multi_date(
         dates = [d.normalize() for d in grp[COL_SHIP_DATE]]
         targets = [float(v) for v in grp['_invoice']]
 
-        solution, why = _solve_split(items, targets)
+        solution, why = _solve_split(items, targets)           # 금액만
+        if why in ('ok', 'ambiguous'):
+            solution, why = _narrow(
+                items, targets, solution, why,
+                check=_job_constraint(items, list(grp['_jobs'])),
+                tiebreak=_recorded_constraint(
+                    dates, recorded.get(so_id, {}), so_lines.get(so_id, {})))
         if solution is not None:
             splits[so_id] = dict(zip(dates, solution))
             continue
 
-        # **나눌 방법이 아예 없을 때만** 단가 정정을 의심한다. 'ambiguous'는 출고가
-        # 여러 번인데 어느 쪽인지 모르는 것이라 한 건으로 뭉치면 안 된다.
+        # **금액으로 나눌 방법이 아예 없을 때만** 단가 정정을 의심한다. 'ambiguous'는 출고가
+        # 여러 번인데 어느 쪽인지 모르는 것이고, 'conflict'는 근거끼리 부딪친 것이다 —
+        # 둘 다 한 건으로 뭉치면 안 된다. (`_narrow`는 'no_split'을 내지 않는다.)
         splits[so_id] = None
+        unresolved[so_id] = why
         if why != 'no_split' or any(t < 0 for t in targets):
-            continue                        # 모호하거나 반품 — 사람 몫
+            continue                        # 모호·부딪침·반품 — 사람 몫
         ico_total = sum(i[2] for i in items)
         if abs(ico_total - sum(targets)) < AMOUNT_TOLERANCE:
-            del splits[so_id]
+            del splits[so_id], unresolved[so_id]
             corrections[so_id] = set(dates[1:])   # 첫 날이 실제 출고
             logger.debug("단가 정정으로 판단 — %s: 출고 %s, 정정 %s",
                          so_id, dates[0].date(), [d.date() for d in dates[1:]])
-    return splits, corrections
+    return splits, corrections, unresolved
+
+
+SplitRule = Callable[[list[list[tuple]]], bool]
+
+
+def _narrow(
+    items: list[tuple],
+    targets: list[float],
+    solution: list[dict[int, int]] | None,
+    why: str,
+    *,
+    check: SplitRule | None,
+    tiebreak: SplitRule | None,
+) -> tuple[list[dict[int, int]] | None, str]:
+    """금액만으로 나온 해(`solution`, `why`)에 근거를 얹는다
+
+    check    — 쓸 수 있으면 늘 건다 (금액과 교차검증)
+    tiebreak — 그래도 해가 갈릴 때만 건다
+
+    Returns:
+        (해, 'ok') 또는 (None, 사유) — 사유는 'ambiguous' | 'conflict' | 'too_many'.
+        근거를 걸었더니 남는 해가 없으면 'no_split'이 아니라 **'conflict'**다 — 금액으로는
+        나뉘는데 근거가 부딪친 것이라, 단가 정정 경로로 새면 뒤 날짜가 조용히 사라진다.
+    """
+    rules: list[SplitRule] = []
+    for rule, always in ((check, True), (tiebreak, False)):
+        if rule is None or not (always or why == 'ambiguous'):
+            continue
+        rules.append(rule)
+        solution, why = _solve_split(
+            items, targets,
+            accept=lambda groups, rs=tuple(rules): all(r(groups) for r in rs))
+    if why == 'ok':
+        return solution, 'ok'
+    return None, 'conflict' if why == 'no_split' else why
+
+
+def _job_constraint(items: list[tuple],
+                    jobs_by_date: list[frozenset[str]]) -> SplitRule | None:
+    """JOB NO ↔ `NOAH O.C No.` — 날짜마다 그날 적힌 JOB NO의 PO 행만 담을 수 있다
+
+    출고리스트 한 행은 공장 발주(O.C No.) 하나다 — 라인마다 O.C No.가 갈리는 SO의 출고
+    24행 실측에서 한 행이 여러 O.C No.에 걸친 경우는 없었다. 쓰지 않는 경우:
+
+    - O.C No.가 하나뿐 — 가를 게 없다 (대부분의 주문)
+    - JOB NO가 하나라도 PO와 짝이 없다 — 오기다 (3~9월 698행 중 9행, 예: `SOD-2026-0264`
+      출고리스트 L260388 vs PO L260286). 틀린 근거로 거르면 정답이 빠진다
+    """
+    ocs = {item[3] for item in items}
+    if len(ocs) < 2 or '' in ocs:
+        return None
+    if not all(jobs and jobs <= ocs for jobs in jobs_by_date):
+        return None
+    return lambda groups: all(
+        item[3] in jobs
+        for group, jobs in zip(groups, jobs_by_date) for item in group)
+
+
+def _recorded_constraint(dates: list[pd.Timestamp],
+                         recorded: dict[pd.Timestamp, dict[int, int]],
+                         so_lines: dict[int, tuple[str, int]]) -> SplitRule | None:
+    """이미 기록된 날짜는 그 DN과 라인·수량이 같아야 한다
+
+    DN은 SO 라인만 담으므로(`sales_only`) 해도 SO 라인으로 걸러 비교한다.
+    """
+    pinned = [(i, recorded[d]) for i, d in enumerate(dates) if d in recorded]
+    if not pinned:
+        return None
+    return lambda groups: all(
+        sales_only(_qty_map(groups[i]), so_lines) == rec for i, rec in pinned)
 
 
 # 배정 탐색 상한 — 조합 탐색이라 항목이 많으면 폭발한다. 넘으면 '못 풀었다'로
@@ -602,14 +738,19 @@ def split_by_amount(
 
 
 def _solve_split(
-    items: list[tuple[int, int, float]],
+    items: list[tuple],
     targets: list[float],
+    accept: SplitRule | None = None,
 ) -> tuple[list[dict[int, int]] | None, str]:
     """`split_by_amount` + **왜 못 했는지**
 
     사유를 구분해야 하는 이유: '나눌 방법이 아예 없다'는 출고가 한 번이었다는 뜻일 수
     있지만(단가 정정 행이 섞인 경우), '결과가 갈린다'는 출고가 여러 번인데 어느 쪽인지
     모른다는 뜻이다. 둘을 같이 취급하면 후자를 한 건으로 뭉쳐 버린다.
+
+    Args:
+        items: [(Line item, Item qty, Total ICO[, O.C 키]), ...]
+        accept: 해를 거르는 조건 — 날짜별 PO 행 묶음을 받는다. 통과한 해만 센다
 
     Returns:
         (해답 또는 None, 사유) — 사유는 'ok' | 'ambiguous' | 'no_split' | 'too_many'
@@ -622,6 +763,8 @@ def _solve_split(
     budget = [MAX_SPLIT_NODES]
     found: list[tuple[tuple, list[dict[int, int]]]] = []
     for groups in _search_split(items, targets, budget):
+        if accept is not None and not accept(groups):
+            continue
         result = [_qty_map(g) for g in groups]
         key = tuple(tuple(sorted(m.items())) for m in result)
         if key not in (k for k, _ in found):
@@ -656,9 +799,9 @@ def _search_split(items, targets, budget):
                 yield [[items[i] for i in pick]] + tail
 
 
-def _qty_map(group: list[tuple[int, int, float]]) -> dict[int, int]:
+def _qty_map(group: list[tuple]) -> dict[int, int]:
     out: dict[int, int] = {}
-    for line_item, qty, _ico in group:
+    for line_item, qty, *_rest in group:
         if qty:
             out[line_item] = out.get(line_item, 0) + qty
     return out
