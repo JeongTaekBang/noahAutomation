@@ -105,6 +105,25 @@ def test_po_generator_entrypoints_stay_light():
         )
 
 
+def test_integrity_does_not_pull_excel_libs():
+    """대시보드가 쓰는 `integrity`가 Excel 라이브러리를 **간접으로도** 끌지 않는가
+
+    integrity는 pandas를 쓰므로(배포판에 있다) 위 테스트의 무거운 목록에 넣을 수 없다.
+    대신 실제로 import해 보고 sys.modules를 본다 — 최상위 import만 보면 integrity가
+    부르는 config 너머로 openpyxl이 딸려오는 것을 못 잡는다.
+    """
+    import subprocess
+    import sys
+
+    probe = (
+        "import sys, po_generator.integrity; "
+        "print(','.join(m for m in ('openpyxl', 'xlwings', 'win32com') if m in sys.modules))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], cwd=PROJECT_ROOT,
+                         capture_output=True, text=True, check=True).stdout.strip()
+    assert not out, f"po_generator.integrity를 import하면 {out}가 딸려온다 — 대시보드 배포판에 없다"
+
+
 # === 재현성 / 유출 방지 =====================================================
 
 def test_requirements_pins_direct_deps():

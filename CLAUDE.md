@@ -48,6 +48,9 @@ python close_period.py --undo 2026-01     # Undo last close
 python close_period.py --list             # Snapshot history
 python close_period.py --status           # Current status
 
+# 데이터 정합성 검사 (DB 읽기 전용 — 0이어야 하는 것만)
+python check_data.py                      # 콘솔 요약, 문제가 있으면 generated_check/ 에 상세 xlsx (종료 코드 1)
+
 # PO 매입대사
 python reconcile_po.py P03                # 3월 대사 (대사결과 + AX_PO_매핑)
 python reconcile_po.py P03 -v             # 상세 로그
@@ -105,6 +108,7 @@ DB layer:
   sync_db.py → db_sync.py (Excel→SQLite, upsert+prune, FX 시트 언피벗) → db_schema.py (DDL + v_dn_revenue 뷰)
   close_period.py → snapshot.py (SnapshotEngine) → db_schema.py (snapshot tables)
   sql/order_book.sql (이벤트 기반), sql/order_book_snapshot.sql (snapshot-based)
+  check_data.py → integrity.py (CHECKS — 정합성 검사 8종) ← dashboard.py ('SO/DN 불일치' 카드가 같은 함수)
 
 Reconciliation layer:
   reconcile_po.py → 3-source merge (Delivery + Internal PO + GRN) → 대사결과 + AX_PO_매핑
@@ -128,12 +132,12 @@ Reconciliation layer:
 - **Result Pattern** (`services/result.py`): `DocumentResult` + `GenerationStatus` enum for structured operation outcomes. `history_saved` field tracks history persistence separately from generation success.
 - **Output File Safety** (`cli_common.py`): Generated files auto-suffix on collision (`_1`, `_2`, ...) to prevent silent overwrites. Raises `FileExistsError` if 100+ collisions.
 - **DB Sync Prune** (`db_sync.py`): Excel→SQLite sync includes prune step — rows deleted from Excel are also deleted from DB. Works even when sheet is completely empty. `--dry-run` connects to real DB and rollbacks for accurate diff simulation.
-- **`_row_seq` in PK — 자연키는 유일하지 않다** (`db_schema.py: SYNC_SHEETS`): PO·DN 시트는 같은 문서·같은 라인을 **여러 행으로 나눠 적는다**(분할발주/분할출고). 그래서 PO는 `(PO_ID, Line item, _row_seq)`, DN은 `(DN_ID, SO_ID, Line item, _row_seq)`가 PK다. `_row_seq`를 빼면 upsert가 뒤 행으로 앞 행을 덮어써 **매출·수량이 조용히 사라진다** (2026-07-30 실측: DN에서 18,656,000원 누락). 새 시트를 `SYNC_SHEETS`에 추가할 때 자연키 유일성을 실데이터로 확인할 것 — `SELECT COUNT(*)` vs `COUNT(DISTINCT 자연키)`.
+- **`_row_seq` in PK — 자연키는 유일하지 않다** (`db_schema.py: SYNC_SHEETS`): PO·DN 시트는 같은 문서·같은 라인을 **여러 행으로 나눠 적는다**(분할발주/분할출고). 그래서 PO는 `(PO_ID, Line item, _row_seq)`, DN은 `(DN_ID, SO_ID, Line item, _row_seq)`가 PK다. `_row_seq`를 빼면 upsert가 뒤 행으로 앞 행을 덮어써 **매출·수량이 조용히 사라진다** (2026-07-30 실측: DN에서 18,656,000원 누락). 새 시트를 `SYNC_SHEETS`에 추가할 때 자연키 유일성을 실데이터로 확인할 것 — `SELECT COUNT(*)` vs `COUNT(DISTINCT 자연키)`. **반대로 SO·PMT는 자연키가 곧 PK라**(`_row_seq` 없음) 엑셀에 같은 키가 두 줄이면 같은 덮어쓰기가 난다 — 그래서 `db_sync._duplicate_pks()`가 시트를 쓰기 전에 PK 중복을 찾고, 있으면 그 동기화를 **에러로 멈춘다**(전체 ROLLBACK → DB는 직전 그대로, 화면에 키와 엑셀 행 번호). 실측: `ADV_2026-0062`가 동기화 41회 동안 서로 다른 두 입금에 쓰여 한쪽이 DB에 없었다(9/22 해소). DB엔 이미 덮인 뒤라 `check_data`로는 못 잡는다 — 동기화 시점에만 보인다.
 - **PK Migration Logging** (`db_sync.py` + `sync_db.py`): PK 정의를 바꾸면 `migrate_pk_if_changed`가 기존 테이블을 `{table}_bak`으로 백업하고 재생성한다. 재적재는 전 행이 '신규'로 잡히므로 `SheetSyncResult.pk_migrated`를 보고 `_sync_log`에 **'재적재' 1건만** 남긴다 (수천 건의 가짜 '신규'가 변경 이력을 덮지 않게 — 재키잉 억제와 같은 취지).
 - **Dashboard Error Visibility** (`dashboard.py`): Loader failures collected in `session_state` and displayed as `st.warning()` banner, distinguishing "no data" from "query failure".
 - **Snapshot Engine** (`snapshot.py`): Monthly close → `ob_snapshot` freezes Ending, subsequent retroactive changes auto-detected as Variance. Sequential close enforced. `variance_amount`는 **환율 재평가분 + 소급 변경분 합산** (AX Order Book처럼 조정분 단일 컬럼).
 - **Single Source for DN Revenue** (`db_schema.py: v_dn_revenue`): 매출 귀속월·선적월 환율 재환산·환율차를 뷰 한 곳에서 정의. Order Book 계열 6개 소비처(sql 4종 + `snapshot.py` + `dashboard.py`)가 모두 이 뷰를 읽는다.
-- **`po_generator/__init__.py`는 비워 둔다**: 하위 모듈을 재export하면 `from po_generator.config import DB_FILE` 한 줄에도 패키지 `__init__`이 먼저 돌아 **pandas·openpyxl·xlwings(→COM)가 통째로 딸려온다**. 대시보드는 `config`·`db_schema`만 쓰고 둘 다 표준 라이브러리만 의존하므로, 비워 둔 덕에 배포판에서 Excel 라이브러리가 빠진다. `tests/test_dashboard_dist.py`가 이 세 파일의 최상위 import를 감시한다.
+- **`po_generator/__init__.py`는 비워 둔다**: 하위 모듈을 재export하면 `from po_generator.config import DB_FILE` 한 줄에도 패키지 `__init__`이 먼저 돌아 **pandas·openpyxl·xlwings(→COM)가 통째로 딸려온다**. 대시보드는 `config`·`db_schema`(표준 라이브러리만)와 `integrity`(+pandas)만 쓰므로, 비워 둔 덕에 배포판에서 Excel 라이브러리가 빠진다. `tests/test_dashboard_dist.py`가 앞의 세 파일의 최상위 import를 감시하고, `integrity`는 실제로 import해 `sys.modules`에 openpyxl·xlwings가 없는지 본다.
 - **OneDrive로 공유하는 SQLite는 원본을 열지 않는다** (`dashboard.py: _db_snapshot`): DB는 `journal_mode=wal`이라 최신 커밋이 `-wal` 사이드카에 먼저 들어가는데, OneDrive는 본체와 사이드카를 **각각 따로** 동기화한다. 원본을 직접 열면 (1) 커밋이 빠진 상태를 보거나 (2) 읽기 잠금 때문에 OneDrive가 파일을 교체 못 해 **"충돌된 사본"** 이 생긴다 — 둘 다 "사람마다 숫자가 다르다"로 뒤늦게 드러난다. 그래서 백업 API로 일관된 사본을 떠서 그것만 읽고, 캐시 키가 `(mtime, size)`라 원본이 갱신되면 자동으로 다시 뜬다. 발행 쪽은 `sync_db.py: checkpoint_wal()`이 `PRAGMA wal_checkpoint(TRUNCATE)`로 `-wal`을 비워 **단일 파일로 완결**시킨다. **단, 사본을 읽는 것은 읽기에 한한다 — 쓰기는 반드시 원본으로** (`dashboard.py: _write_conn`). 사본은 `os.replace()`로 **같은 경로를 통째로 갈아치우는** 일회용이라 거기 쓴 것은 다음 재복사(원본 갱신 또는 대시보드 재시작) 때 흔적 없이 사라진다 — 예외가 안 나므로 화면에서는 성공한 것처럼 보인다. 실제로 스냅샷 도입(2026-07-31) 직후부터 '확인 완료'(`_ack_so_change`)가 사본에 쓰이는 바람에 ack이 매번 증발했고, 눌러도 다음 실행에 같은 목록이 되돌아왔다 (2026-09-07 발각, 한 달간 조용히 유실). 쓰기 뒤에는 `wal_checkpoint(TRUNCATE)` + `_db_snapshot.clear()`로 사본을 다시 뜬다. `tests/test_dashboard.py: TestAckPersistence`가 감시.
 - **대사 요약과 상세는 총액이 같아야 한다** (`reconcile_po.py: _build_excel_vs_ax`): `요약` 시트는 Service를 **잔차**(GRN 총액 − 국내 − 해외)로 잡으므로 AX 합계가 정의상 **GRN 총액**이고, 한 AX PO가 국내/해외 양쪽 키에 걸리면 **국내 우선**으로 한 버킷에만 귀속시킨다. `Excel_vs_AX` 상세도 같은 우선순위로 GRN을 **AX PO당 1행에만** 붙여야 한다 — 예전엔 AX PO로 outer merge해서, 같은 AX PO가 Product와 Service 양쪽에 있으면 GRN 1건이 두 행에 복제돼 AX 합계가 부풀었다 (2026-08 실측 `P024792`: 두 시트 Diff 총액이 2,530,020 어긋남). **두 시트가 어긋나면 사용자는 어느 쪽을 믿을지 알 수 없다.** 덧붙여 **같은 AX PO가 두 분류에 걸리는 것 자체가 AX PO 오타 신호**라 경고로 남긴다 (그 오타의 짝은 어느 Product 키에도 안 잡혀 Service 잔차로 숨는데, `_all_product_ax` 가드는 PO 시트에 존재하는 번호만 보므로 **오타 번호는 그 가드에 안 걸린다**). `tests/test_reconcile_po.py`가 감시.
 
@@ -153,7 +157,7 @@ Reconciliation layer:
 | `po_generator/validators.py` | Required field checks, ICO Unit > 0, delivery date validation |
 | `po_generator/services/document_service.py` | Orchestrator: find → validate → generate → save |
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
-| `create_po.bat` | **대화형 메뉴 런처 (이름과 달리 PO 전용이 아니다)** — 문서 7종 + DB Sync·마감·대사·대시보드·납기현황을 번호로 고르는 메뉴다. **문서 7종의 입력·실행 블록은 여기 없고 `noah_menu.bat`에 있다** — `call noah_menu.bat <키>`로 위임한다 (2026-09-14). CLI에 옵션을 추가하면 `noah_menu.bat`과 `noah_gui.py`에도 넣어야 사용자 눈에 보인다 — `create_ts.py`만 고치고 "CLI에 반영했다"고 한 적이 있다 (2026-08-07, `tasks/lessons.md`) |
+| `create_po.bat` | **대화형 메뉴 런처 (이름과 달리 PO 전용이 아니다)** — 문서 7종 + DB Sync·마감·정합성 검사·대사·대시보드·납기현황을 번호로 고르는 메뉴다. **문서 7종의 입력·실행 블록은 여기 없고 `noah_menu.bat`에 있다** — `call noah_menu.bat <키>`로 위임한다 (2026-09-14). CLI에 옵션을 추가하면 `noah_menu.bat`과 `noah_gui.py`에도 넣어야 사용자 눈에 보인다 — `create_ts.py`만 고치고 "CLI에 반영했다"고 한 적이 있다 (2026-08-07, `tasks/lessons.md`) |
 | `noah_menu.bat` + `setup_data_path.py` | **동료 PC용 콘솔 메뉴** — [국내] PO·TS / [해외] PI·FI·OC·CI·PL **만** (DB·마감·대사·DN 쓰기·납기현황은 없다 — `tests/test_noah_menu.py`가 금지 목록으로 감시). 거래명세표·FI의 하위 메뉴까지 포함해 **문서 블록의 유일한 소유자**이고 `create_po.bat`이 `call noah_menu.bat ts`처럼 위임한다 — 블록이 두 메뉴에 있으면 옵션을 한쪽에만 넣는 실수가 반복된다. Python은 동봉 `python\`(배포판) → `local_config.bat`(개발 PC) 순. 데이터 파일은 첫 실행에 `setup_data_path.py`가 OneDrive에서 찾아 **최근 수정 순으로 전부** 보여주고 번호/Enter로 확정 → GUI와 **같은** `noah_config.ini`에 기록 (첫 BFS 결과만 쓰면 낡은 사본이 잡힌다 — 2026-09-14 실측 `문서\`의 8/7자 사본) (탐색·검증·쓰기는 `noah_gui`의 함수를 그대로 쓴다 — 규칙이 갈리면 두 진입점이 다른 파일을 본다). `--print`는 메뉴를 그릴 때마다 불리므로 tkinter(`noah_gui`, 0.6초)를 임포트하지 않는다. **`set /p` 메뉴는 파이프로 검증이 안 된다** — 환경변수로 답을 미리 넣고(`set /p`는 빈 입력이면 변수를 그대로 둔다) stdin을 NUL로 주면 분기가 재현된다 |
 | `noah_gui.py` | tkinter GUI — 문서 7종 + 납기현황. 기존 `create_*.py`·`delivery_status.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함. **DOC_TYPES에 항목을 추가하면 `build_portable_gui.APP_FILES`에도 넣어야 한다** — 안 그러면 배포판에서 그 버튼만 조용히 실패한다 (빌드 `verify()`와 `tests/test_noah_gui.py`가 대조) |
 | `build_common.py` | 배포판 빌드 공통부 — 런타임 내려받기·핀 3자 대조·트리밍·BUILD_INFO·zip. 문서생성기와 대시보드 두 빌더가 공유한다 (복사하면 갈라지고, 그 갈라짐은 "한쪽만 낡은 pandas로 나간다"로 늦게 드러난다 — `mail_cli.py`와 같은 이유). **최상위는 상수·함수 정의만** |
@@ -182,6 +186,7 @@ Reconciliation layer:
 | `reconcile_so.py` | SO 매출대사 — AX ERP 매출 vs NOAH DN 매출 비교 (국내=출고일, 해외=선적일 기준 월 필터 + FX 환율차이 자동 판별). 출력: `대사결과_SO_{period}.xlsx` (3시트: 대사/상세/범례) |
 | `create_dn.py` + `po_generator/dn_recorder.py` / `dn_writer.py` | DN 출고기록 자동 입력 — 공장 출고리스트를 읽어 `DN_국내`에 추가. **문서를 만드는 게 아니라 마스터 워크북에 써 넣는 유일한 기능**이라 미리보기 → y/N → 백업 → 쓰기 순서다. 계산(`dn_recorder`)과 쓰기(`dn_writer`)를 나눈 건 계산을 COM 없이 테스트하기 위함. 아래 Business Rules 참조 |
 | `delivery_status.py` | 거래처 납기현황 회신 — 사업자번호로 `SO_국내` 미출고 조회 → `generated_ds/납기현황_*.xlsx` (납기현황/상세 2시트) → 메일 발송. **출고 여부는 시트 `Status`가 아니라 `DN_국내` 출고수량으로 직접 계산** (아래 Business Rules 참조) |
+| `check_data.py` + `po_generator/integrity.py` | 데이터 정합성 검사 — **0이어야 하는 것만** 8종(과다출고·단가 불일치·SO에 없는 DN 라인·취소/보류 SO 라인의 DN·PO에 없는 SO·SO에 없는 PO·한 DN에 거래처 둘·환율 없는 외화 DN). 'PO에 없는 SO'는 **주문 단위**다 — PO는 부속·운임을 한 라인에 합쳐 적어 라인 단위로 보면 운임·부속 라인만 잔뜩 걸린다(실측 32라인). 검사 = `conn → 문제 행 DataFrame` 순수 함수 + 등록표 `CHECKS`이고, 대시보드 'SO/DN 불일치' 카드도 `integrity.so_dn_line_anomalies()`를 부른다 — **산식 사본 금지** (`tests/test_integrity.py`가 대시보드에 SQL이 다시 생기는지 감시). 작업 목록(세금계산서 미발행·PO 확정 지연 등)은 늘 몇 건씩 있어 넣지 않는다 — 섞으면 항상 빨갛다. 새 검사는 **실데이터에서 몇 건 걸리는지 먼저** 본다('DN 단가 0원'은 실측 12행이 전부 무상 라인이라 탈락). DB는 백업 API 메모리 사본으로 읽고, Excel이 마지막 동기화보다 새로우면 경고한다. 검사가 죽으면 0건이 아니라 `[실패]`. 상세 xlsx는 문제가 있을 때만 `generated_check/`. 메뉴는 `create_po.bat [V]`뿐 (동료 메뉴 금지 목록) |
 | `reconcile_ind.py` | Industry Code 대사 — (1) Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 → `ind_code_결과_{period}.xlsx`, (2) SO Sector vs 마스터 Category 교차 검증 → `sector_검증.xlsx`. `--sector-only`로 검증만 실행 가능 |
 
 ## Business Rules

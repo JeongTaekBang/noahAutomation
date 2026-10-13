@@ -154,6 +154,9 @@ DS_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_ds"
 DN_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_dn"
 DN_BACKUP_DIR: Final[Path] = DN_OUTPUT_DIR / "backup"
 
+# === 데이터 정합성 검사 (check_data.py) — 문제가 있을 때만 상세 xlsx가 나간다 ===
+CHECK_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_check"
+
 
 # === 시트 설정 (NOAH_SO_PO_DN.xlsx) ===
 # 국내 시트

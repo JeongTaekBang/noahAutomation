@@ -12,6 +12,8 @@ Excel→SQLite 동기화에서, 위치성 키 컬럼(Line item 등)을 비운 �
    뒤 행이 앞 행을 덮어써 매출·수량이 조용히 사라진다
 4. PK 마이그레이션 로그 — PK 정의를 바꿔 전 행을 재적재할 때 수천 건의 가짜 '신규'로
    변경 이력을 덮지 않는다
+5. 자연키 중복 차단 — SO·PMT는 자연키가 곧 PK다(_row_seq 없음). 같은 키가 두 행이면
+   뒤 행이 앞 행을 덮어써 한 줄이 DB에서 사라지므로 그 동기화는 통째로 멈춘다
 """
 
 import sqlite3
@@ -234,3 +236,69 @@ def test_normal_sync_still_logs_per_row(tmp_path):
                          db_path=db)
     rows = sqlite3.connect(db).execute('SELECT change_type FROM _sync_log').fetchall()
     assert [r[0] for r in rows] == ['신규', '신규']
+
+
+# ── 6. 자연키 중복 차단 (SO·PMT) ─────────────────────────────────────────
+
+def _write_sheet(path, sheet, rows):
+    pd.DataFrame(rows).to_excel(path, sheet_name=sheet, index=False)
+
+
+def _so_row(so_id, line, item='IQ3'):
+    return {'SO_ID': so_id, 'Line item': line, 'Item name': item, 'Customer name': 'ACME',
+            'Item qty': '1'}
+
+
+def test_duplicate_so_key_blocks_sync(tmp_path):
+    """SO 키가 겹치면 그 시트는 쓰지 않는다 — 뒤 행이 앞 행을 덮어써 한 줄이 사라지므로
+
+    실측: `SOD-2026-0432 | 1`(동기화 80회차)이 한 번에 두 번 기록됐다 — 엑셀에 같은 키가
+    두 줄이었다는 뜻이고, DB엔 그중 한 줄만 남았다.
+    """
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    _write_sheet(xlsx, 'SO_국내', [_so_row('SOD-1', '1'), _so_row('SOD-1', '2'),
+                                   _so_row('SOD-1', '1', item='ADAPTER')])
+    summary = SyncEngine(xlsx, db).sync_all(sheet_filter=['SO_국내'])
+    r = summary.results[0]
+    assert r.errors == 1 and summary.total_errors == 1
+    assert r.inserted == 0
+    text = '\n'.join(r.error_messages)
+    assert 'SOD-1 | 1' in text and '2, 4행' in text, text  # 엑셀 행 번호 (머리글 = 1행)
+
+
+def test_duplicate_key_leaves_db_as_it_was(tmp_path):
+    """막힌 동기화는 아무것도 바꾸지 않는다 — 앞서 들어간 데이터가 그대로 남는다"""
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    _write_sheet(xlsx, 'SO_국내', [_so_row('SOD-1', '1')])
+    SyncEngine(xlsx, db).sync_all(sheet_filter=['SO_국내'])
+    _write_sheet(xlsx, 'SO_국내', [_so_row('SOD-1', '1', item='바뀐 값'), _so_row('SOD-1', '1')])
+    assert SyncEngine(xlsx, db).sync_all(sheet_filter=['SO_국내']).total_errors == 1
+    rows = sqlite3.connect(db).execute('SELECT [Item name] FROM so_domestic').fetchall()
+    assert rows == [('IQ3',)]
+
+
+def test_duplicate_pmt_key_blocks_sync(tmp_path):
+    """실측: `ADV_2026-0062`가 동기화 41회 동안 서로 다른 두 입금(396,000 / 6,600,000)에 쓰였다"""
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    _write_sheet(xlsx, 'PMT_국내', [
+        {'선수금_ID': 'ADV_2026-0062', 'SO_ID': 'SOD-2026-0617', '입금액': '396000'},
+        {'선수금_ID': 'ADV_2026-0062', 'SO_ID': 'SOD-2026-0603', '입금액': '6600000'},
+    ])
+    r = SyncEngine(xlsx, db).sync_all(sheet_filter=['PMT_국내']).results[0]
+    assert r.errors == 1
+    assert 'ADV_2026-0062' in '\n'.join(r.error_messages)
+
+
+def test_line_item_number_format_is_the_same_key(tmp_path):
+    """'1'과 '1.0'은 같은 라인 — 대시보드가 CAST AS INTEGER로 읽으면 한 라인이 두 번 잡힌다"""
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    _write_sheet(xlsx, 'SO_국내', [_so_row('SOD-1', '1'), _so_row('SOD-1', '1.0')])
+    assert SyncEngine(xlsx, db).sync_all(sheet_filter=['SO_국내']).total_errors == 1
+
+
+def test_incomplete_key_rows_are_not_duplicates(tmp_path):
+    """키가 빈 행은 원래대로 '미완성 행'으로 보류 — 중복으로 막지 않는다"""
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    _write_sheet(xlsx, 'SO_국내', [_so_row('SOD-1', '1'), _so_row('SOD-1', ''), _so_row('SOD-1', '')])
+    r = SyncEngine(xlsx, db).sync_all(sheet_filter=['SO_국내']).results[0]
+    assert r.errors == 0 and r.inserted == 1 and r.skipped == 2

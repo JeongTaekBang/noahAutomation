@@ -85,9 +85,10 @@ RUNTIME_PY_VERSION = re.search(r"cpython-([\d.]+)", RUNTIME_FILE).group(1)  # ty
 
 # === 배포에 포함할 앱 파일 ===
 APP_FILES = ("dashboard.py",)
-# po_generator — dashboard.py가 config.DB_FILE과 db_schema 3개를 쓴다.
-#   패키지 __init__을 비워 둔 덕에 이 경로는 표준 라이브러리만 의존한다
-#   (openpyxl·xlwings가 딸려오지 않는다 — po_generator/__init__.py 주석 참조).
+# po_generator — dashboard.py가 config.DB_FILE, db_schema 3개, integrity(SO/DN 불일치 산식)를 쓴다.
+#   패키지 __init__을 비워 둔 덕에 config·db_schema는 표준 라이브러리만, integrity는 거기에
+#   pandas만 더 의존한다 (openpyxl·xlwings가 딸려오지 않는다 — po_generator/__init__.py 주석
+#   참조, tests/test_dashboard_dist.py가 감시).
 APP_DIRS = ("po_generator",)
 
 # 배포에서 반드시 빼야 하는 것

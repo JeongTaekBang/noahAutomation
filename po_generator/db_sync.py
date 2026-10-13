@@ -168,6 +168,29 @@ def _normalize_pk(pk: tuple) -> tuple:
     return tuple(out)
 
 
+def _duplicate_pks(df: pd.DataFrame, pk_cols: tuple[str, ...]) -> dict[tuple, list[int]]:
+    """PK가 겹치는 행 — {정규화 PK: [엑셀 행 번호, ...]} (머리글이 1행이라 데이터는 2행부터)
+
+    SO·PMT는 자연키가 곧 PK다(_row_seq 없음). 같은 키가 두 행이면 upsert가 뒤 행으로 앞 행을
+    **덮어써** 한 줄이 DB에서 조용히 사라진다 — PO·DN에 `_row_seq`를 붙인 것과 같은 사고다.
+    실측: `ADV_2026-0062`가 동기화 41회 동안 서로 다른 두 입금에 쓰여 한쪽이 DB에 없었고,
+    `SOD-2026-0432 | 1`도 한 번 그랬다.
+
+    비교는 `_normalize_pk` 기준이다 — '1'과 '1.0'은 같은 라인으로 본다(대시보드가
+    `CAST([Line item] AS INTEGER)`로 읽으면 한 라인이 두 번 잡힌다). 키가 빈 행은 보지
+    않는다 — 어차피 '미완성 행'으로 보류된다. `_row_seq`가 있는 시트는 구조상 겹칠 수 없다.
+    """
+    if not all(c in df.columns for c in pk_cols):
+        return {}
+    rows: dict[tuple, list[int]] = {}
+    for idx, values in zip(df.index, df[list(pk_cols)].itertuples(index=False)):
+        vals = [_sanitize_value(v) for v in values]
+        if any(v is None or (isinstance(v, str) and v.strip() == '') for v in vals):
+            continue
+        rows.setdefault(_normalize_pk(tuple(vals)), []).append(idx + 2)
+    return {pk: found for pk, found in rows.items() if len(found) > 1}
+
+
 def _prune_snapshot_columns(conn: sqlite3.Connection, table_name: str) -> list[str]:
     """삭제(prune) 스냅샷에 담을 컬럼 목록 — _sync_updated_at 제외 전체 DB 컬럼.
 
@@ -438,6 +461,23 @@ class SyncEngine:
             # 3. _row_seq 생성 (필요한 시트만)
             if config.needs_row_seq:
                 df = _add_row_seq(df, config.row_seq_group)
+
+            # 3-1. PK 중복이면 이 시트는 쓰지 않는다 — 에러로 올리면 sync_all이 전체를 되돌려
+            # DB는 직전 상태 그대로 남는다. 덮어쓴 채로 진행하면 한 줄이 흔적 없이 사라진다.
+            dups = _duplicate_pks(df, config.pk_columns)
+            if dups:
+                key_names = ', '.join(c for c in config.pk_columns if c != '_row_seq')
+                result.errors = len(dups)
+                result.error_messages.append(
+                    f"키({key_names})가 같은 행이 {len(dups)}건 있습니다 — 뒤 행이 앞 행을 "
+                    "덮어써 한 줄이 DB에서 사라지므로 동기화하지 않았습니다. 엑셀에서 키를 고친 뒤 "
+                    "다시 실행하세요."
+                )
+                for pk, excel_rows in dups.items():
+                    result.error_messages.append(
+                        f"{' | '.join(pk)} — 엑셀 {', '.join(map(str, excel_rows))}행")
+                logger.error("%s: 키 중복 %d건 → 동기화 중단", config.sheet_name, len(dups))
+                return result
 
             # 4. 컬럼 목록 구성
             columns = list(df.columns)

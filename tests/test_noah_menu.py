@@ -34,7 +34,7 @@ DOC_SCRIPTS = {"create_po.py", "create_ts.py", "create_pi.py", "create_fi.py",
 # 동료 PC 메뉴에 있으면 안 되는 것 — 마스터 워크북·DB를 건드리거나 운영자 전용
 FORBIDDEN_SCRIPTS = {"sync_db.py", "close_period.py", "create_dn.py", "reconcile_po.py",
                      "reconcile_so.py", "reconcile_ind.py", "dashboard.py",
-                     "delivery_status.py"}
+                     "delivery_status.py", "check_data.py"}
 
 
 def _load_build_module():

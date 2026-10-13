@@ -25,6 +25,7 @@ from po_generator.config import DB_FILE
 from po_generator.db_schema import (
     ensure_so_change_ack_table, get_sync_metadata, SYNC_LOG_CHANGE_TYPES,
 )
+from po_generator.integrity import so_dn_line_anomalies
 
 logger = logging.getLogger(__name__)
 
@@ -617,119 +618,22 @@ def load_po_exw_pending() -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def load_so_dn_anomalies() -> pd.DataFrame:
-    """SO ↔ DN 라인 단위 이상(불일치) 검출.
+    """SO ↔ DN 라인 단위 이상(과다출고 + 단가 불일치).
 
-    각 (SO_ID, Line item) 단위로 두 가지 무결성 체크:
-      • 과다출고: SUM(DN.Qty) > SO.[Item qty]
-      • 단가 불일치: SO.[Sales Unit Price] × SUM(DN.Qty) ≠ SUM(DN.[Total Sales])
-                    (abs ≥ 1 AND 상대 ≥ 0.1% — 반올림 노이즈 제거)
-    둘 중 하나라도 해당되는 라인만 반환. 부분납품(DN 누계 < SO 수량)은 정상.
-    원화/외화 비교는 각 통화 원본끼리 — FX 환산 노이즈 제거.
+    산식은 `integrity.so_dn_line_anomalies` 한 곳에 있다 — CLI 정합성 검사
+    (`check_data.py`)가 같은 함수를 부르므로 여기서 다시 쓰면 두 숫자가 갈린다.
     """
     conn = _conn()
     if not conn:
         return pd.DataFrame()
     try:
-        df = pd.read_sql_query("""
-            WITH so_lines AS (
-                SELECT SO_ID,
-                       CAST([Line item] AS INTEGER) AS line_item,
-                       CAST([Sales Unit Price] AS REAL) AS so_unit_price,
-                       CAST([Item qty] AS REAL)         AS so_qty,
-                       COALESCE([Customer name], '')    AS customer_name,
-                       COALESCE(Sector, '')             AS sector,
-                       COALESCE([OS name], '')          AS os_name,
-                       COALESCE([Item name], '')        AS item_name,
-                       COALESCE(Currency, 'KRW')        AS currency,
-                       '국내' AS market
-                FROM so_domestic
-                WHERE COALESCE(Status, '') != 'Cancelled'
-                UNION ALL
-                SELECT SO_ID,
-                       CAST([Line item] AS INTEGER),
-                       CAST([Sales Unit Price] AS REAL),
-                       CAST([Item qty] AS REAL),
-                       COALESCE([Customer name], ''),
-                       COALESCE(Sector, ''),
-                       COALESCE([OS name], ''),
-                       COALESCE([Item name], ''),
-                       COALESCE(Currency, 'USD'),
-                       '해외'
-                FROM so_export
-                WHERE COALESCE(Status, '') != 'Cancelled'
-            ),
-            dn_lines AS (
-                SELECT SO_ID,
-                       CAST([Line item] AS INTEGER) AS line_item,
-                       CAST(Qty AS REAL)            AS dn_qty,
-                       CAST([Unit Price] AS REAL)   AS dn_unit_price,
-                       CAST([Total Sales] AS REAL)  AS dn_amount,
-                       '국내' AS market
-                FROM dn_domestic
-                UNION ALL
-                SELECT SO_ID,
-                       CAST([Line item] AS INTEGER),
-                       CAST(Qty AS REAL),
-                       CAST([Unit Price] AS REAL),
-                       CAST([Total Sales] AS REAL),
-                       '해외'
-                FROM dn_export
-            )
-            SELECT s.SO_ID, s.line_item, s.market, s.customer_name, s.sector,
-                   s.os_name, s.item_name, s.currency,
-                   s.so_unit_price, s.so_qty,
-                   SUM(d.dn_qty)     AS dn_qty_total,
-                   SUM(d.dn_amount)  AS dn_amount_total,
-                   MIN(d.dn_unit_price) AS dn_unit_min,
-                   MAX(d.dn_unit_price) AS dn_unit_max,
-                   COUNT(*) AS dn_line_count
-            FROM so_lines s
-            INNER JOIN dn_lines d
-              ON d.SO_ID = s.SO_ID
-             AND d.line_item = s.line_item
-             AND d.market = s.market
-            GROUP BY s.SO_ID, s.line_item, s.market
-        """, conn)
+        return so_dn_line_anomalies(conn)
     except Exception as e:
         logger.warning("SO/DN anomaly 로드 실패: %s", e)
         _record_load_error("SO/DN Anomaly", e)
         return pd.DataFrame()
     finally:
         conn.close()
-
-    if df.empty:
-        return df
-
-    for c in ("so_unit_price", "so_qty", "dn_qty_total", "dn_amount_total",
-             "dn_unit_min", "dn_unit_max"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # 과다출고: SO 수량 입력된 라인에서 DN 누계 > SO qty (0.001 tolerance)
-    has_so_qty = df["so_qty"].notna() & (df["so_qty"] > 0)
-    over_qty = df["dn_qty_total"] - df["so_qty"]
-    df["over_delivered"] = has_so_qty & (over_qty > 0.001)
-    df["over_qty"] = over_qty.where(df["over_delivered"], 0)
-
-    # 단가 불일치: SO 단가 입력된 라인에서 (expected vs actual) 임계값 초과
-    has_so_unit = df["so_unit_price"].notna() & (df["so_unit_price"] > 0)
-    df["expected_amount"] = df["so_unit_price"] * df["dn_qty_total"]
-    df["diff"] = df["dn_amount_total"] - df["expected_amount"]
-    df["abs_diff"] = df["diff"].abs()
-    exp_abs = df["expected_amount"].abs()
-    df["rel_diff"] = df["abs_diff"] / exp_abs.where(exp_abs > 0)
-    df["price_mismatch"] = (
-        has_so_unit & (df["abs_diff"] >= 1) & (df["rel_diff"] >= 0.001)
-    )
-
-    # 하나라도 이상이 있는 라인만 → 과다출고 먼저, 그 다음 금액 차이 큰 순
-    result = df[df["over_delivered"] | df["price_mismatch"]].copy()
-    if result.empty:
-        return result
-    result["_sort"] = (
-        result["over_delivered"].astype(int) * 1e15
-        + result["abs_diff"].fillna(0)
-    )
-    return result.sort_values("_sort", ascending=False).drop(columns="_sort").reset_index(drop=True)
 
 
 @st.cache_data(ttl=300)

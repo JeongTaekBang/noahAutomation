@@ -40,6 +40,7 @@ echo   [데이터]
 echo   [8] DB Sync (Excel → SQLite)
 echo   [9] Order Book Close (월 마감)
 echo   [N] DN 출고기록 자동 입력 (출고리스트 → DN_국내)
+echo   [V] 데이터 정합성 검사 (단가 불일치·과다출고 등)
 echo.
 echo   [분석]
 echo   [D] 대시보드
@@ -67,6 +68,7 @@ if "%CHOICE%"=="7" goto create_pl
 if "%CHOICE%"=="8" goto sync_db
 if "%CHOICE%"=="9" goto close_period
 if /i "%CHOICE%"=="N" goto create_dn
+if /i "%CHOICE%"=="V" goto check_data
 if /i "%CHOICE%"=="D" goto dashboard
 if /i "%CHOICE%"=="R" goto reconcile
 if /i "%CHOICE%"=="S" goto reconcile_so
@@ -173,6 +175,22 @@ echo ----------------------------------------
 echo.
 
 "%PYTHON_PATH%" "%~dp0sync_db.py" --changes
+
+echo.
+pause
+goto menu
+
+:check_data
+echo.
+echo ----------------------------------------
+echo   데이터 정합성 검사
+echo ----------------------------------------
+echo.
+echo   DB에서 0건이어야 하는 것들을 확인합니다 (시트는 건드리지 않음).
+echo   Excel을 고친 뒤라면 먼저 [8] DB Sync를 실행하세요.
+echo.
+
+"%PYTHON_PATH%" "%~dp0check_data.py"
 
 echo.
 pause
