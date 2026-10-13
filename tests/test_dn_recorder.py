@@ -556,6 +556,82 @@ def test_앞_출고_때문에_뒤_출고가_사라지지_않는다():
     assert len(plan.lines) == 2
 
 
+# === 발주 하나가 SO 여러 개에 걸친 출고 =======================================
+
+SO_B = 'SOD-2026-0101'
+
+
+def _shared_po_case(invoice: float = 1_975_948, biz_b: str = BIZ_A):
+    """2026-10 ND-0912 모양 — SO 두 개를 발주 하나로 냈는데 출고리스트엔 앞 SO만 적혔다"""
+    delivery = make_delivery([{R.COL_INVOICE_AMOUNT: invoice}])
+    so = make_so([
+        {'Line item': 1, 'Item qty': 1, 'Item name': 'NA028 ALS PCU'},
+        {'SO_ID': SO_B, 'Line item': 2, 'Item qty': 1, 'Item name': 'NA100 ALS PCU',
+         'Business registration number': biz_b},
+    ])
+    po = make_po([
+        {'Line item': 1, 'Item qty': 1, 'Total ICO': 843_340},
+        {'SO_ID': SO_B, 'Line item': 2, 'Item qty': 1, 'Total ICO': 1_132_608},
+    ])
+    return delivery, so, po
+
+
+def test_발주가_SO_여러_개에_걸치면_SO별로_펴서_DN_하나로_넣는다():
+    """출고리스트 SO_ID 칸은 하나뿐이다 — RCK ODER(= PO_ID)로 나머지 SO를 찾는다"""
+    plan = run(*_shared_po_case(), make_dn([]))
+
+    assert not plan.reviews
+    assert [(l.so_id, l.line_item, l.qty) for l in plan.lines] == [
+        (SO_A, 1, 1), (SO_B, 2, 1)]
+    assert plan.dn_ids == ['DND-2026-0001']
+
+
+def test_발주를_SO별로_펴도_거래처가_다르면_DN을_나눈다():
+    """한 DN에 두 거래처가 실리면 거래명세표에 남의 품목이 찍힌다"""
+    plan = run(*_shared_po_case(biz_b='128-81-86310'), make_dn([]))
+
+    assert not plan.reviews
+    assert len(plan.dn_ids) == 2
+
+
+def test_발주_전체로도_금액이_안_맞으면_확인필요에_사정을_적는다():
+    plan = run(*_shared_po_case(invoice=1_900_000), make_dn([]))
+
+    assert not plan.lines
+    assert [r.reason for r in plan.reviews] == ['금액 불일치']
+    assert 'ND-0100' in plan.reviews[0].detail
+    assert SO_B in plan.reviews[0].detail
+
+
+def test_발주가_출고리스트에_여러_번_나오면_펴지_않는다():
+    """어느 날 어느 SO가 나갔는지 모른다 — SO_ID가 적힌 대로 각자 처리한다"""
+    delivery = make_delivery([
+        {R.COL_SHIP_DATE: dt.datetime(2026, 8, 4), R.COL_INVOICE_AMOUNT: 843_340},
+        {R.COL_SO_ID: SO_B, R.COL_SHIP_DATE: dt.datetime(2026, 8, 6),
+         R.COL_INVOICE_AMOUNT: 1_132_608},
+    ])
+    _, so, po = _shared_po_case()
+
+    plan = run(delivery, so, po, make_dn([]))
+
+    assert not plan.reviews
+    assert [(l.so_id, l.ship_date) for l in plan.lines] == [
+        (SO_A, pd.Timestamp(2026, 8, 4)), (SO_B, pd.Timestamp(2026, 8, 6))]
+    assert len(plan.dn_ids) == 2
+
+
+def test_펼친_출고도_다시_돌리면_건너뛴다():
+    dn = make_dn([
+        {'SO_ID': SO_A, 'Line item': 1, 'Qty': 1, '출고일': SHIP},
+        {'SO_ID': SO_B, 'Line item': 2, 'Qty': 1, '출고일': SHIP},
+    ])
+
+    plan = run(*_shared_po_case(), dn)
+
+    assert not plan.lines and not plan.reviews
+    assert {r.so_id for r in plan.skipped} == {SO_A, SO_B}
+
+
 # === 금액 배정 단위 테스트 ==================================================
 
 def test_split_by_amount_유일해를_찾는다():

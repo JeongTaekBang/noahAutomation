@@ -30,6 +30,12 @@ PO 기준으로만 뽑으면 부속 라인이 통째로 빠진다 (2026-03~08 �
 하나라도 걸리면 `Review`로 빼고 사람에게 넘긴다 — 2026-03~08 561건 리플레이 기준
 자동 입력 549건 중 548건 정확(99.8%), 걸러낸 12건은 전부 진짜 확인 대상이었다(헛경보 0).
 
+발주 하나에 SO 여러 개
+----------------------
+출고리스트 `SO_ID` 칸은 하나뿐이라, 발주(`RCK ODER`)가 SO 여러 개를 묶으면 앞 SO만 적힌다.
+그 출고는 이 발주의 이번 기간 계산서 행이 걸친 SO마다 펴서 DN_ID 하나에 담는다
+(`_expand_shared_po` — 금액 검증은 발주 단위로, 2026-10 `ND-0912`).
+
 멱등성
 ------
 `(SO_ID, 출고일)`이 이미 `DN_국내`에 있으면 건너뛴다. 같은 기간을 두 번 돌려도 중복 입력되지
@@ -41,7 +47,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import combinations
 from pathlib import Path
 from typing import Callable
@@ -311,6 +317,8 @@ def build_plan(
     # 출고 이벤트는 (SO_ID, 출고일) 단위 — 같은 주문·같은 날이 두 줄로 적히기도 한다
     # (2026-05 SOD-2026-0467 실측). 행마다 돌면 같은 출고를 두 번 기록하게 된다.
     events = _delivery_events(delivery)
+    # 출고리스트 SO_ID 칸은 하나뿐 — 발주가 SO 여러 개에 걸치면 SO별 출고로 편다
+    events, shared_notes = _expand_shared_po(events, po_by_so, invoiced_now)
     ship_dates = events.groupby(COL_SO_ID)[COL_SHIP_DATE].nunique().to_dict()
     invoice_total = events.groupby(COL_SO_ID)['_invoice'].sum().to_dict()
 
@@ -322,6 +330,7 @@ def build_plan(
     year_hint = _year_from_delivery(delivery)
     dn_seq = next_dn_seq(dn_df, year_hint)
     row_seq = next_row_seq(dn_df)
+    group_dn: dict[tuple[str, str], str] = {}     # (발주, 사업자번호) → DN_ID
 
     # 출고일 순 — 파일 순서가 이미 날짜순이지만 stable sort로 못 박는다
     ordered = events.sort_values(
@@ -447,8 +456,15 @@ def build_plan(
         biz_no = normalize_biz_no(meta.get('biz_no'))
         remarks = monthly.get(biz_no)
 
-        dn_id = format_dn_id(year_hint, dn_seq)
-        dn_seq += 1
+        # 한 발주를 SO별로 편 출고는 DN 하나로 — 단, 거래처가 같을 때만 (한 DN에 두
+        # 거래처가 실리면 거래명세표에 남의 품목이 찍힌다). 사업자번호를 모르면 묶지 않는다.
+        group = (row['_group'], biz_no) if row['_group'] and biz_no else None
+        dn_id = group_dn.get(group) if group else None
+        if dn_id is None:
+            dn_id = format_dn_id(year_hint, dn_seq)
+            dn_seq += 1
+            if group:
+                group_dn[group] = dn_id
         for line_item in sorted(qty_by_line):
             plan.lines.append(DnLine(
                 dn_id=dn_id,
@@ -468,6 +484,13 @@ def build_plan(
             shipped.setdefault((so_id, int(line_item)), []).append(
                 (ship_date.normalize(), int(qty_by_line[line_item])))
 
+    # 발주가 SO 여러 개에 걸쳤는데 못 편 출고는 그 사정을 사유에 붙인다 — 안 붙이면
+    # '금액 불일치'만 보고 SO 번호가 갈린 것을 사람이 다시 찾아내야 한다
+    for i, r in enumerate(plan.reviews):
+        note = (shared_notes.get((r.so_id, pd.Timestamp(r.ship_date).normalize()))
+                if r.ship_date is not None else None)
+        if note:
+            plan.reviews[i] = replace(r, detail=f"{r.detail} — {note}")
     return plan
 
 
@@ -500,22 +523,104 @@ def _delivery_events(delivery: pd.DataFrame) -> pd.DataFrame:
     행마다 돌면 같은 출고를 두 번 기록하므로 여기서 한 번 합친다.
     `dropna=False`여야 출고일이 빈 행도 남아 '출고일 없음'으로 걸린다.
     `_jobs`는 그 출고에 적힌 JOB NO(`_oc_key`)의 집합 — 여러 날 출고의 라인 대조용이다.
+    `_pos`는 `RCK ODER`(= `PO_ID`)의 집합 — 발주 하나가 SO 여러 개에 걸친 출고를 펴는 데 쓴다.
     """
     amount = (pd.to_numeric(delivery.get(COL_INVOICE_AMOUNT), errors='coerce')
               if COL_INVOICE_AMOUNT in delivery.columns else 0)
     customer = (delivery[COL_CUSTOMER] if COL_CUSTOMER in delivery.columns else '')
     jobs = (delivery[COL_JOB_NO].map(_oc_key) if COL_JOB_NO in delivery.columns else '')
+    orders = (delivery[COL_RCK_ORDER].map(lambda v: '' if pd.isna(v) else str(v).strip())
+              if COL_RCK_ORDER in delivery.columns else '')
     df = pd.DataFrame({
         COL_SO_ID: delivery[COL_SO_ID],
         COL_SHIP_DATE: delivery[COL_SHIP_DATE],
         '_invoice': amount,
         '_customer': customer,
         '_job': jobs,
+        '_po': orders,
     })
     return (df.groupby([COL_SO_ID, COL_SHIP_DATE], dropna=False, sort=False)
             .agg(_invoice=('_invoice', 'sum'), _customer=('_customer', 'first'),
-                 _jobs=('_job', lambda s: frozenset(j for j in s if j)))
+                 _jobs=('_job', lambda s: frozenset(j for j in s if j)),
+                 _pos=('_po', lambda s: frozenset(p for p in s if p)))
             .reset_index())
+
+
+def _expand_shared_po(
+    events: pd.DataFrame,
+    po_by_so: dict[str, pd.DataFrame],
+    invoiced_now: str,
+) -> tuple[pd.DataFrame, dict[tuple[str, pd.Timestamp], str]]:
+    """발주 하나가 SO 여러 개에 걸친 출고를 SO별 출고로 편다
+
+    출고리스트의 `SO_ID` 칸은 한 행에 하나뿐인데, 발주(`RCK ODER` = `PO_ID`) 하나가 SO
+    여러 개를 묶기도 한다 (2026-10 `ND-0912`: SOD-2026-0908 L1 + SOD-2026-0909 L2인데
+    출고리스트엔 0908만 적혔고, 계산서금액 1,975,948은 둘의 합이라 '금액 불일치'로 떴다).
+    그 출고를 이 발주의 이번 기간 계산서 행이 걸친 SO마다 하나씩으로 나누고, 금액은 SO별
+    ICO 합으로 준다. 자기검증(ICO 합 == 계산서금액)은 **발주 단위로** 그대로 건다.
+    나뉜 출고는 `_group`(= 발주번호)으로 묶여 DN_ID를 같이 쓴다 — 한 번에 나간 한 묶음이고,
+    사람도 같은 거래처 SO 둘을 DN 하나에 적어 왔다 (DND-2026-0395, DND-2026-0749).
+
+    `RCK ODER`를 믿는 근거: 2026-03~10 출고리스트 741행 전부가 `PO_ID`와 맞고, 적힌
+    `SO_ID`도 전부 그 발주 안에 있다. 틀리는 건 'SO가 하나뿐'이라는 칸의 모양이다.
+
+    확신이 없으면 펴지 않는다 — 기존 경로로 가서 사람에게 넘어가고, 왜 못 폈는지를
+    notes[(SO_ID, 출고일)]로 돌려준다.
+
+    Returns:
+        (펼친 events — `_group` 열 추가, notes)
+    """
+    billed: dict[str, dict[str, float]] = {}     # 발주 → {SO: 이번 기간 계산서 ICO}
+    pos_by_so: dict[str, set[str]] = {}          # SO → 이번 기간 계산서가 있는 발주들
+    for so_id, rows in po_by_so.items():
+        if 'PO_ID' not in rows.columns:
+            break
+        now = rows[rows['_status'] == invoiced_now]
+        ico = pd.to_numeric(now['Total ICO'], errors='coerce').fillna(0)
+        for po_id, amount in ico.groupby(now['PO_ID'].astype(str).str.strip()).sum().items():
+            billed.setdefault(po_id, {})[so_id] = float(amount)
+            pos_by_so.setdefault(so_id, set()).add(po_id)
+
+    po_count: dict[str, int] = {}
+    for pos in events['_pos']:
+        for po_id in pos:
+            po_count[po_id] = po_count.get(po_id, 0) + 1
+    listed = set(events[COL_SO_ID])
+
+    rows_out: list[dict] = []
+    notes: dict[tuple[str, pd.Timestamp], str] = {}
+    for _, ev in events.iterrows():
+        rec = {**ev.to_dict(), '_group': ''}
+        so_id = ev[COL_SO_ID]
+        po_id = next(iter(ev['_pos'])) if len(ev['_pos']) == 1 else ''
+        shares = billed.get(po_id, {})
+        if set(shares) <= {so_id}:
+            rows_out.append(rec)                  # 평소 — 이 SO 몫뿐이다
+            continue
+
+        others = sorted(set(shares) - {so_id})
+        total = sum(shares.values())
+        if po_count[po_id] > 1:
+            why = '이 발주가 출고리스트에 여러 번 나와 어느 날 어느 SO가 나갔는지 모릅니다'
+        elif listed & set(others):
+            why = f"{', '.join(sorted(listed & set(others)))}가 출고리스트에 따로 있습니다"
+        elif any(pos_by_so[s] != {po_id} for s in shares):
+            why = '다른 발주의 이번 기간 계산서가 걸린 SO가 있어 금액을 이 발주 몫으로 못 봅니다'
+        elif not abs(total - float(ev['_invoice'])) < AMOUNT_TOLERANCE:
+            why = (f"발주 전체의 ICO 합({total:,.0f})도 계산서금액"
+                   f"({float(ev['_invoice']):,.0f})과 다릅니다")
+        else:
+            for share_so in sorted(shares):
+                rows_out.append({**rec, COL_SO_ID: share_so,
+                                 '_invoice': shares[share_so], '_group': po_id})
+            logger.debug("발주 %s를 SO별로 폄: %s", po_id, sorted(shares))
+            continue
+
+        rows_out.append(rec)
+        if pd.notna(ev[COL_SHIP_DATE]):
+            notes[(so_id, ev[COL_SHIP_DATE].normalize())] = (
+                f"발주 {po_id}는 SO {', '.join(sorted(shares))}에 걸쳐 있는데 {why}")
+    return pd.DataFrame(rows_out, columns=[*events.columns, '_group']), notes
 
 
 def _oc_key(value: object) -> str:

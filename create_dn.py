@@ -207,7 +207,10 @@ def print_summary(plan: Plan) -> None:
         for dn_id in dn_ids:
             lines = [l for l in plan.lines if l.dn_id == dn_id]
             head = lines[0]
-            print(f"  {dn_id:<16}{head.so_id:<16}"
+            # 발주 하나를 SO별로 편 출고는 DN 하나에 SO가 여럿이다
+            more = len({l.so_id for l in lines}) - 1
+            so_label = f"{head.so_id}+{more}" if more else head.so_id
+            print(f"  {dn_id:<16}{so_label:<16}"
                   f"{head.ship_date:%Y-%m-%d}  {len(lines):>4}"
                   f"{sum(l.qty for l in lines):>7}  {head.customer_name}")
 
