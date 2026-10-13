@@ -14,6 +14,7 @@ CLI(`check_data.py`)가 같은 함수를 부른다. 여기서 지키고 싶은 �
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -409,6 +410,17 @@ class TestRunChecks:
         titles = [c.title for c in integrity.CHECKS]
         assert len(set(keys)) == len(keys) and len(set(titles)) == len(titles)
 
+    def test_guide_lists_every_check(self):
+        """운영 가이드의 '검사 목록' 표 = CHECKS — 검사를 더하고 문서를 빠뜨리면 여기서 걸린다
+
+        걸리면 무엇을 고치는지가 문서에만 있으면, 새 검사가 [문제]로 떴을 때 볼 데가 없다.
+        """
+        guide = Path(integrity.__file__).resolve().parent.parent / 'docs' / '정합성검사_가이드.md'
+        text = guide.read_text(encoding='utf-8')
+        section = text.split('\n## 검사 목록\n', 1)[1].split('\n## ', 1)[0]
+        documented = set(re.findall(r'^\| \*\*(.+?)\*\* \|', section, flags=re.M))
+        assert documented == {c.title for c in integrity.CHECKS}
+
 
 # ═══════════════════════════════════════════════════════════════
 # CLI (check_data.py)
@@ -436,30 +448,88 @@ class TestCli:
             conn.close()
         return build, excel, out, synced
 
-    def test_clean_exits_zero_without_file(self, env, capsys):
+    CLEAN = dict(so_dom=[so('SOD-1', 1)], po_dom=[po('ND-1', 'SOD-1', 1)],
+                 dn_dom=[dn('DND-1', 'SOD-1', 1, 3, 300)])
+    MISMATCH = dict(so_dom=[so('SOD-1', 1)], po_dom=[po('ND-1', 'SOD-1', 1)],
+                    dn_dom=[dn('DND-1', 'SOD-1', 1, 3, 360)])
+
+    @staticmethod
+    def _result(out):
+        return out / check_data.RESULT_FILE_NAME
+
+    @staticmethod
+    def _info(path):
+        """요약 시트 표 아래 정보 블록 {이름: 값}"""
+        from openpyxl import load_workbook
+        ws = load_workbook(path)['요약']
+        return {r[0]: r[1] for r in ws.iter_rows(values_only=True)
+                if r[0] in ('검사 시각', '데이터 기준', '주의')}
+
+    def test_clean_run_still_writes_result(self, env, capsys):
+        """정상이어도 결과 파일을 쓴다 — 안 쓰면 직전의 '문제' 파일이 최신처럼 남는다"""
         build, _, out, _ = env
-        build(so_dom=[so('SOD-1', 1)], po_dom=[po('ND-1', 'SOD-1', 1)],
-              dn_dom=[dn('DND-1', 'SOD-1', 1, 3, 300)])
+        build(**self.CLEAN)
         assert check_data.main() == 0
         text = capsys.readouterr().out
         assert '데이터 기준: 2026-10-13 10:00' in text
         assert '[주의]' not in text
-        assert not out.exists(), '문제가 없으면 파일을 만들지 않는다'
+        sheets = pd.read_excel(self._result(out), sheet_name=None)
+        assert list(sheets) == ['요약']
+        assert set(sheets['요약']['상태'].head(len(integrity.CHECKS))) == {'정상'}  # 표 아래는 정보 블록
 
     def test_findings_exit_one_and_write_detail(self, env, capsys):
         build, _, out, _ = env
-        build(so_dom=[so('SOD-1', 1)], po_dom=[po('ND-1', 'SOD-1', 1)],
-              dn_dom=[dn('DND-1', 'SOD-1', 1, 3, 360)])
+        build(**self.MISMATCH)
         assert check_data.main() == 1
-        text = capsys.readouterr().out
-        assert 'SOD-1' in text
-        files = list(out.glob('정합성검사_*.xlsx'))
-        assert len(files) == 1
-        sheets = pd.read_excel(files[0], sheet_name=None)
+        assert 'SOD-1' in capsys.readouterr().out
+        sheets = pd.read_excel(self._result(out), sheet_name=None)
         assert list(sheets)[0] == '요약'
         assert len(sheets) == 2  # 요약 + 걸린 검사 1장
         detail = next(df for name, df in sheets.items() if name != '요약')
         assert detail['SO_ID'].tolist() == ['SOD-1']
+
+    def test_rerun_after_fix_replaces_stale_result(self, env):
+        """사용자 보고(2026-10-13): 고치고 다시 돌렸는데 결과 파일이 그대로 '문제'였다
+
+        문제가 있을 때만 파일을 만들던 시절 — 정상 재실행이 파일을 안 써서 15:11의 결과가
+        최신처럼 남았다. 이제 같은 파일을 매번 덮어쓴다.
+        """
+        build, _, out, _ = env
+        build(**self.MISMATCH)
+        check_data.main()
+        assert len(pd.read_excel(self._result(out), sheet_name=None)) == 2
+
+        check_data.DB_FILE.unlink()
+        build(**self.CLEAN)  # 시트를 고치고 DB Sync 한 상태
+        assert check_data.main() == 0
+        sheets = pd.read_excel(self._result(out), sheet_name=None)
+        assert list(sheets) == ['요약'], '고친 뒤 결과에 지난 문제 시트가 남으면 안 된다'
+        assert list(out.iterdir()) == [self._result(out)], '파일은 하나 — 어느 게 최신인지 고르게 하지 않는다'
+
+    def test_result_says_when_and_on_which_data(self, env):
+        """덮어쓰는 파일이라 언제 결과인지 파일 안에 적는다 (인쇄 머리글은 화면에 안 보인다)"""
+        build, excel, out, synced = env
+        build(**self.CLEAN)
+        check_data.main()
+        info = self._info(self._result(out))
+        assert info['데이터 기준'].startswith('2026-10-13 10:00')
+        assert info['검사 시각'][:4] == str(datetime.now().year)
+        assert '주의' not in info
+
+        os.utime(excel, (synced.timestamp() + 3600,) * 2)
+        check_data.main()
+        assert '2026-10-13 11:00' in self._info(self._result(out))['주의']
+
+    def test_open_result_file_warns_and_keeps_exit_code(self, env, capsys, monkeypatch):
+        """Excel에 열려 있으면 덮어쓰지 못한다 — 조용히 넘기면 열린 창이 낡은 결과를 보여 준다"""
+        build, _, out, _ = env
+        build(**self.CLEAN)
+
+        def locked(*_a, **_k):
+            raise PermissionError(13, 'Permission denied')
+        monkeypatch.setattr(check_data, 'write_report', locked)
+        assert check_data.main() == 0
+        assert '열려 있어' in capsys.readouterr().out
 
     def test_excel_newer_than_sync_warns(self, env, capsys):
         """DB가 Excel보다 낡았으면 결과가 '이미 고친 것'을 보여줄 수 있다 — 먼저 알린다"""
@@ -478,7 +548,7 @@ class TestCli:
         conn.close()
         assert check_data.main() == 1
         assert '[실패]' in capsys.readouterr().out
-        sheets = pd.read_excel(next(out.glob('*.xlsx')), sheet_name=None)
+        sheets = pd.read_excel(self._result(out), sheet_name=None)
         assert '실패' in sheets['요약']['상태'].tolist()
 
     def test_missing_db_exits_one_without_creating_it(self, env, capsys):

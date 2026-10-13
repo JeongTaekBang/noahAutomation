@@ -49,7 +49,7 @@ python close_period.py --list             # Snapshot history
 python close_period.py --status           # Current status
 
 # 데이터 정합성 검사 (DB 읽기 전용 — 0이어야 하는 것만)
-python check_data.py                      # 콘솔 요약, 문제가 있으면 generated_check/ 에 상세 xlsx (종료 코드 1)
+python check_data.py                      # 콘솔 요약 + generated_check/정합성검사_결과.xlsx (매번 덮어씀, 문제 있으면 종료 코드 1)
 
 # PO 매입대사
 python reconcile_po.py P03                # 3월 대사 (대사결과 + AX_PO_매핑)
@@ -174,6 +174,7 @@ Reconciliation layer:
 | `docs/CHANGELOG.md` | 버전별 변경 이력 |
 | `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
 | `docs/매입대사_가이드.md` | 운영자 관점 시각 가이드 — 데이터 흐름·합계 블록 해석·월별 액션 |
+| `docs/정합성검사_가이드.md` | 정합성 검사 운영 가이드 — 언제 돌리나·결과 읽는 법·검사별 고치는 법·동기화 키 중복 에러·**일부러 안 보는 것(측정 후 제외/보류 후보)**. '검사 목록' 표 = `CHECKS` (`tests/test_integrity.py`가 대조 — 검사를 더하면 표에도 한 줄) |
 | `po_generator/snapshot.py` | SnapshotEngine — 월별 마감, Variance 추적 |
 | `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`), `_sync_runs` + `_sync_log` v2 (record당 1행 + JSON, actor/host/sync_id/snapshot 포함), `fx(currency, ym, rate)`, **`v_dn_revenue`(라인 매출 산식) + `v_dn_by_month`(인식 필터+월별 합산) 뷰 = DN 매출의 단일 정의**. 뷰는 `sync_db.py`가 매번 DROP+CREATE로 갱신. `SYNC_LOG_CHANGE_TYPES`·`KNOWN_SYNC_SHEETS`도 여기가 소유 |
 | `migrate_sync_log.py` | `sync_log.csv` → `_sync_log_legacy_v1` 전용 테이블 1회성 적재 (구 v1 형식; 운영 v2 `_sync_log`와 분리, 이후 `migrate_sync_log_v2.py`로 변환) |
@@ -186,7 +187,7 @@ Reconciliation layer:
 | `reconcile_so.py` | SO 매출대사 — AX ERP 매출 vs NOAH DN 매출 비교 (국내=출고일, 해외=선적일 기준 월 필터 + FX 환율차이 자동 판별). 출력: `대사결과_SO_{period}.xlsx` (3시트: 대사/상세/범례) |
 | `create_dn.py` + `po_generator/dn_recorder.py` / `dn_writer.py` | DN 출고기록 자동 입력 — 공장 출고리스트를 읽어 `DN_국내`에 추가. **문서를 만드는 게 아니라 마스터 워크북에 써 넣는 유일한 기능**이라 미리보기 → y/N → 백업 → 쓰기 순서다. 계산(`dn_recorder`)과 쓰기(`dn_writer`)를 나눈 건 계산을 COM 없이 테스트하기 위함. 아래 Business Rules 참조 |
 | `delivery_status.py` | 거래처 납기현황 회신 — 사업자번호로 `SO_국내` 미출고 조회 → `generated_ds/납기현황_*.xlsx` (납기현황/상세 2시트) → 메일 발송. **출고 여부는 시트 `Status`가 아니라 `DN_국내` 출고수량으로 직접 계산** (아래 Business Rules 참조) |
-| `check_data.py` + `po_generator/integrity.py` | 데이터 정합성 검사 — **0이어야 하는 것만** 8종(과다출고·단가 불일치·SO에 없는 DN 라인·취소/보류 SO 라인의 DN·PO에 없는 SO·SO에 없는 PO·한 DN에 거래처 둘·환율 없는 외화 DN). 'PO에 없는 SO'는 **주문 단위**다 — PO는 부속·운임을 한 라인에 합쳐 적어 라인 단위로 보면 운임·부속 라인만 잔뜩 걸린다(실측 32라인). 검사 = `conn → 문제 행 DataFrame` 순수 함수 + 등록표 `CHECKS`이고, 대시보드 'SO/DN 불일치' 카드도 `integrity.so_dn_line_anomalies()`를 부른다 — **산식 사본 금지** (`tests/test_integrity.py`가 대시보드에 SQL이 다시 생기는지 감시). 작업 목록(세금계산서 미발행·PO 확정 지연 등)은 늘 몇 건씩 있어 넣지 않는다 — 섞으면 항상 빨갛다. 새 검사는 **실데이터에서 몇 건 걸리는지 먼저** 본다('DN 단가 0원'은 실측 12행이 전부 무상 라인이라 탈락). DB는 백업 API 메모리 사본으로 읽고, Excel이 마지막 동기화보다 새로우면 경고한다. 검사가 죽으면 0건이 아니라 `[실패]`. 상세 xlsx는 문제가 있을 때만 `generated_check/`. 메뉴는 `create_po.bat [V]`뿐 (동료 메뉴 금지 목록) |
+| `check_data.py` + `po_generator/integrity.py` | 데이터 정합성 검사 — **0이어야 하는 것만** 8종(과다출고·단가 불일치·SO에 없는 DN 라인·취소/보류 SO 라인의 DN·PO에 없는 SO·SO에 없는 PO·한 DN에 거래처 둘·환율 없는 외화 DN). 'PO에 없는 SO'는 **주문 단위**다 — PO는 부속·운임을 한 라인에 합쳐 적어 라인 단위로 보면 운임·부속 라인만 잔뜩 걸린다(실측 32라인). 검사 = `conn → 문제 행 DataFrame` 순수 함수 + 등록표 `CHECKS`이고, 대시보드 'SO/DN 불일치' 카드도 `integrity.so_dn_line_anomalies()`를 부른다 — **산식 사본 금지** (`tests/test_integrity.py`가 대시보드에 SQL이 다시 생기는지 감시). 작업 목록(세금계산서 미발행·PO 확정 지연 등)은 늘 몇 건씩 있어 넣지 않는다 — 섞으면 항상 빨갛다. 새 검사는 **실데이터에서 몇 건 걸리는지 먼저** 본다('DN 단가 0원'은 실측 12행이 전부 무상 라인이라 탈락). DB는 백업 API 메모리 사본으로 읽고, Excel이 마지막 동기화보다 새로우면 경고한다. 검사가 죽으면 0건이 아니라 `[실패]`. 결과 xlsx는 `generated_check/정합성검사_결과.xlsx` **하나를 매번 덮어쓴다 — 정상이어도** (문제 있을 때만 만들던 시절, 고치고 다시 돌리면 파일이 안 생겨 지난 '문제' 파일이 최신처럼 남았다 — 2026-10-13 사용자 보고). 언제·어느 데이터 결과인지는 요약 표 아래에 적는다. Excel에 열려 있으면 `PermissionError` → 경고. 메뉴는 `create_po.bat [V]`뿐 (동료 메뉴 금지 목록) |
 | `reconcile_ind.py` | Industry Code 대사 — (1) Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 → `ind_code_결과_{period}.xlsx`, (2) SO Sector vs 마스터 Category 교차 검증 → `sector_검증.xlsx`. `--sector-only`로 검증만 실행 가능 |
 
 ## Business Rules

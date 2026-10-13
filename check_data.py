@@ -14,7 +14,7 @@ DB만 읽으므로 대시보드와 숫자가 같다. 대신 DB가 Excel보다 �
 고치는 건 사람 몫이다 — 이 도구는 시트를 건드리지 않는다.
 
 사용법:
-    python check_data.py        # 콘솔 요약. 문제가 있으면 generated_check/ 에 상세 xlsx
+    python check_data.py        # 콘솔 요약 + generated_check/정합성검사_결과.xlsx (매번 덮어씀)
     python check_data.py -v     # 상세 로그
 
 종료 코드: 0 = 모두 정상, 1 = 문제가 있거나 검사를 못 함
@@ -38,8 +38,13 @@ from po_generator.db_schema import get_sync_metadata
 from po_generator.integrity import CheckResult, run_checks
 from po_generator.logging_config import setup_logging
 
-# 콘솔에는 검사당 이만큼만 — 나머지는 상세 파일에 있다
+# 콘솔에는 검사당 이만큼만 — 나머지는 결과 파일에 있다
 CONSOLE_ROW_LIMIT = 10
+
+# 결과 파일은 하나를 매 실행 덮어쓴다 — **정상이어도.** 문제가 있을 때만 새 파일을 만들던
+# 시절엔 고치고 다시 돌리면 파일이 안 생겨, 직전의 '문제' 파일이 최신처럼 남았다
+# (2026-10-13 사용자 보고). 실행마다 시각을 박은 파일을 쌓으면 어느 게 최신인지 고르게 된다.
+RESULT_FILE_NAME = "정합성검사_결과.xlsx"
 
 
 def _disp_width(s: str) -> int:
@@ -78,20 +83,27 @@ def last_sync_time(conn: sqlite3.Connection) -> datetime | None:
     return max(stamps, default=None)
 
 
-def print_freshness(synced: datetime | None) -> None:
-    """데이터 기준 시각 + Excel이 그 뒤에 수정됐으면 경고
+def excel_edited_after(synced: datetime | None) -> datetime | None:
+    """Excel이 마지막 동기화 뒤에 수정됐으면 그 시각, 아니면 None
 
     DB가 낡으면 이미 고친 문제가 계속 보이거나, 방금 생긴 문제가 안 보인다.
     """
     if synced is None:
-        print("데이터 기준: (동기화 기록 없음)")
-        return
-    print(f"데이터 기준: {synced:%Y-%m-%d %H:%M} (마지막 DB 동기화)")
+        return None
     try:
         edited = datetime.fromtimestamp(NOAH_SO_PO_DN_FILE.stat().st_mtime)
     except OSError:
+        return None
+    return edited if edited > synced else None
+
+
+def print_freshness(synced: datetime | None, edited: datetime | None) -> None:
+    """데이터 기준 시각 + Excel이 그 뒤에 수정됐으면 경고"""
+    if synced is None:
+        print("데이터 기준: (동기화 기록 없음)")
         return
-    if edited > synced:
+    print(f"데이터 기준: {synced:%Y-%m-%d %H:%M} (마지막 DB 동기화)")
+    if edited is not None:
         print(f"[주의] Excel이 마지막 동기화 이후 수정됐습니다 ({edited:%Y-%m-%d %H:%M}).")
         print("       그 뒤에 고친 내용은 아직 DB에 없습니다 — 먼저 DB Sync를 돌리세요 "
               "(메뉴 [8] / python sync_db.py).")
@@ -158,10 +170,10 @@ def print_results(results: list[CheckResult]) -> None:
         for line in format_table(r.rows.head(CONSOLE_ROW_LIMIT)):
             print(f"  {line}")
         if r.count > CONSOLE_ROW_LIMIT:
-            print(f"  ... 외 {r.count - CONSOLE_ROW_LIMIT}건은 상세 파일에")
+            print(f"  ... 외 {r.count - CONSOLE_ROW_LIMIT}건은 결과 파일에")
 
 
-# === 상세 파일 ==============================================================
+# === 결과 파일 ==============================================================
 
 def _sheet_name(title: str) -> str:
     """시트 이름에 못 쓰는 문자(`[]:*?/\\`)를 바꾸고 31자로 자른다"""
@@ -170,8 +182,13 @@ def _sheet_name(title: str) -> str:
     return title[:31]
 
 
-def write_report(results: list[CheckResult], synced: datetime | None, path: Path) -> None:
-    """요약 시트 + 걸린 검사마다 한 장. 문제가 있을 때만 부른다."""
+def write_report(results: list[CheckResult], synced: datetime | None,
+                 edited: datetime | None, checked_at: datetime, path: Path) -> None:
+    """요약 시트 + 걸린 검사마다 한 장. 모두 정상이면 요약 한 장뿐이다.
+
+    같은 파일을 덮어쓰므로 **언제·어느 데이터의 결과인지** 요약 표 아래에 적는다
+    (인쇄 머리글은 화면에 안 보인다). 표는 A1부터 — 필터·복사가 깔끔하게.
+    """
     from openpyxl.styles import Alignment, Font
     from openpyxl.utils import get_column_letter
 
@@ -208,6 +225,20 @@ def write_report(results: list[CheckResult], synced: datetime | None, path: Path
         if synced is not None:
             head.oddHeader.right.text = f"데이터 기준 {synced:%Y-%m-%d %H:%M}"
 
+        # 표 아래 한 줄 띄우고 정보 블록 — B열 값은 줄바꿈 없이 오른쪽 빈 칸으로 흘러 보인다
+        info = [
+            ("검사 시각", f"{checked_at:%Y-%m-%d %H:%M:%S}"),
+            ("데이터 기준", f"{synced:%Y-%m-%d %H:%M} (마지막 DB 동기화)"
+                           if synced is not None else "(동기화 기록 없음)"),
+        ]
+        if edited is not None:
+            info.append(("주의", f"Excel이 그 뒤({edited:%Y-%m-%d %H:%M})에 수정됐다 — "
+                                 "그 뒤에 고친 내용은 이 결과에 없다. DB Sync 후 다시 검사"))
+        start = head.max_row + 2
+        for offset, (name, value) in enumerate(info):
+            head.cell(row=start + offset, column=1, value=name).font = Font(bold=True)
+            head.cell(row=start + offset, column=2, value=value)
+
 
 # === CLI ====================================================================
 
@@ -235,6 +266,7 @@ def main() -> int:
         return 1
 
     print(f"DB: {DB_FILE}")
+    checked_at = datetime.now()
     try:
         conn = open_snapshot(DB_FILE)
     except sqlite3.Error as e:
@@ -242,7 +274,8 @@ def main() -> int:
         return 1
     try:
         synced = last_sync_time(conn)
-        print_freshness(synced)
+        edited = excel_edited_after(synced)
+        print_freshness(synced, edited)
         results = run_checks(conn)
     finally:
         conn.close()
@@ -255,20 +288,22 @@ def main() -> int:
     bad = [r for r in results if not r.ok]
     if not bad:
         print(f"모두 정상 (검사 {len(results)}개)")
-        return 0
-
-    failed = sum(1 for r in bad if r.error)
-    parts = [f"문제 {len(bad) - failed}개"] + ([f"실패 {failed}개"] if failed else [])
-    print(f"{' / '.join(parts)} (검사 {len(results)}개 중)")
-
-    path = CHECK_OUTPUT_DIR / f"정합성검사_{datetime.now():%y%m%d_%H%M%S}.xlsx"
-    try:
-        write_report(results, synced, path)
-    except OSError as e:
-        print(f"[경고] 상세 파일 저장 실패: {e}")
     else:
-        print(f"상세: {path}")
-    return 1
+        failed = sum(1 for r in bad if r.error)
+        parts = [f"문제 {len(bad) - failed}개"] + ([f"실패 {failed}개"] if failed else [])
+        print(f"{' / '.join(parts)} (검사 {len(results)}개 중)")
+
+    path = CHECK_OUTPUT_DIR / RESULT_FILE_NAME
+    try:
+        write_report(results, synced, edited, checked_at, path)
+    except PermissionError:
+        # Excel이 그 파일을 열고 있으면 덮어쓸 수 없다 — 열린 창은 지난 결과를 보여 주는 중이다
+        print(f"[경고] 결과 파일이 Excel에 열려 있어 갱신하지 못했습니다 — 닫고 다시 실행하세요: {path}")
+    except OSError as e:
+        print(f"[경고] 결과 파일 저장 실패: {e}")
+    else:
+        print(f"결과: {path}")
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
