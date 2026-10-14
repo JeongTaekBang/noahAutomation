@@ -4,6 +4,18 @@
 
 ---
 
+## 2026-10-14: COO 표를 No.(순번) + Customer PO로
+
+사용자 제안: 본문 표의 Order No. 대신 Customer PO. 업체가 아는 번호이고 CI의 PO No.와 같다. 같이 Line도 바꿨다 —
+SO `Line item`은 고객 PO 라인과 다른 우리 번호라 Customer PO와 짝지으면 거짓말이 된다(실측: Watergates PO
+`WGDBS2601233`을 SO 5개로 받아 `DNO-2026-0020`에 'PO / Line 1'이 다섯 번). 그래서 **1부터 순번**.
+
+- 표: `No. | Customer PO | Item No. | Model No. / Description | HS Code | Qty` (A·B 폭을 맞바꿔 헤더 라벨 칸 폭은 그대로)
+- 정렬: Customer PO → SO → SO 라인. 우리 SO 번호는 헤더 `Order No.`에 남는다
+- 검증: COO 테스트 54 passed, 실 DN 17건(`DNO-2026-0020` 포함) — 맺음 블록 분할 0, 열 밀림 0
+
+---
+
 ## 2026-10-14: COO를 수출자(RCK) 선언서로 — 서명 RCK, 제조 NOAH 명시 / 선언문 '5년 보관' 삭제
 
 사용자 결정: 자체 선언이니 서명은 RCK가 하고 생산 공장이 NOAH라고 밝히면 된다. 서류 세트(CI·PL·COO)의

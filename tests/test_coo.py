@@ -44,21 +44,32 @@ class TestBuildLines:
         lines = lines_of([item(line=1), item(line=2, name='FEDEX COST', hs='')])
         assert [line.line for line in lines] == ['1']
 
-    def test_SO가_여럿이면_Order_No_다음_Line_순(self):
-        """실측: 해외 DN 196건 중 35건이 SO 여럿 — 35건 전부 Line 번호가 겹친다"""
+    def test_Customer_PO_다음_SO_다음_SO_라인_순이고_번호는_순번(self):
+        """업체는 PO별로 묶어 읽는다. 번호는 정렬이 끝난 뒤 1부터"""
         lines = lines_of([
-            item(so='SOO-2026-0298', line=1),
-            item(so='SOO-2026-0297', line=10),
-            item(so='SOO-2026-0297', line=2),
-            item(so='SOO-2026-0298', line=2),
+            item(so='SOO-2026-0298', line=1, po='PO-B'),
+            item(so='SOO-2026-0297', line=10, po='PO-A'),
+            item(so='SOO-2026-0297', line=2, po='PO-A'),
+            item(so='SOO-2026-0298', line=2, po='PO-B'),
         ])
-        assert [(line.order_no, line.line) for line in lines] == [
-            ('SOO-2026-0297', '2'), ('SOO-2026-0297', '10'),
-            ('SOO-2026-0298', '1'), ('SOO-2026-0298', '2'),
+        assert [(line.no, line.customer_po, line.line) for line in lines] == [
+            (1, 'PO-A', '2'), (2, 'PO-A', '10'), (3, 'PO-B', '1'), (4, 'PO-B', '2'),
         ]
 
-    def test_Line은_SO_Line_item_정수_텍스트(self):
-        """pandas가 Line item을 float로 읽어도 '1.0'이 찍히지 않는다"""
+    def test_한_PO를_SO_여럿으로_받아도_번호가_겹치지_않는다(self):
+        """실측: Watergates PO WGDBS2601233을 SO 5개로 받았다 — SO 라인 번호를 찍으면
+        DNO-2026-0020에 'PO / Line 1'이 다섯 번 나온다. 순번은 겹치지 않는다"""
+        lines = lines_of([
+            item(so='SOO-2026-0013', line=1, po='WGDBS2601233'),
+            item(so='SOO-2026-0009', line=1, po='WGDBS2601233'),
+            item(so='SOO-2026-0009', line=2, po='WGDBS2601233'),
+        ])
+        assert [(line.no, line.order_no, line.line) for line in lines] == [
+            (1, 'SOO-2026-0009', '1'), (2, 'SOO-2026-0009', '2'), (3, 'SOO-2026-0013', '1'),
+        ]
+
+    def test_SO_라인은_정수_텍스트(self):
+        """정렬에 쓰는 SO Line item — pandas가 float로 읽어도 '3.0'이 아니라 3번째로 줄 선다"""
         assert lines_of([item(line=3.0)])[0].line == '3'
 
     def test_Item_No는_앞자리_0을_지킨다(self):
@@ -81,7 +92,7 @@ class TestBuildLines:
 
     def test_cells는_머리글_순서(self):
         line = lines_of([item()])[0]
-        assert line.cells() == ['SOO-2026-0001', '1', '023150', 'NA015 230VAC ALS 17SQ',
+        assert line.cells() == ['1', 'PO-1', '023150', 'NA015 230VAC ALS 17SQ',
                                 '8481.90.0000', 5]
         assert len(line.cells()) == len(coo.ITEM_HEADERS)
 

@@ -292,8 +292,10 @@ Reconciliation layer:
   샘플 문구 그대로다 — FTA식 '5년 보관' 같은 약속 문구를 더하지 않는다.
   **배경**: 상공회의소 COO를 건별 비용으로 받는 대신 이 자체 선언서를 업체에 제안하는 것이다 — 업체가 받아 줘야
   쓸 수 있고, 양식은 업체가 늘 받던 상의 COO의 정보를 담는 방향으로 고친다 (`docs/원산지증명서_가이드.md`).
-  - **Line은 SO의 `Line item`이고 표에 Order No.(SO_ID)가 짝으로 붙는다** — DN에 SO가 여럿이면 번호가
-    겹친다 (해외 DN 196건 중 35건, 그 35건 전부. `(SO_ID, Line)`은 전수 유일, `(Customer PO, Line)`은 1건 충돌)
+  - **표는 `No.`(1부터 순번) + `Customer PO`다 — SO 라인 번호를 찍지 않는다** (2026-10-14 사용자 결정).
+    업체가 아는 번호이고 CI의 PO No.와 같다. SO `Line item`은 고객 PO 라인과 다른 **우리 번호**라 Customer PO와
+    짝지으면 거짓말이 된다 — 실측: Watergates PO `WGDBS2601233`을 SO 5개로 받아 `DNO-2026-0020`에
+    'PO / Line 1'이 다섯 번 나온다. 정렬은 Customer PO → SO → SO 라인, 우리 SO 번호는 헤더 `Order No.`에 남는다
   - **운임 줄은 싣지 않는다** (`hs_code.is_non_goods` — CI의 HS 빈칸 판정과 같은 함수). 수량을 못 읽으면
     1로 메우지 않고 멈춘다 — 증명서에 추정치를 찍지 않는다
   - HS는 CI 규칙(기본 = `DEFAULT_HS_CODE`). **SECTORIEL은 고객 코드 한 장만** — COO는 수출신고가 아니라

@@ -390,15 +390,15 @@ Total 위치(D28)를 먼저 확인한다.
 
 | 열 | 필드명 | 설명 |
 |----|--------|------|
-| A | Order No. | SO_ID |
-| B | Line | **SO Line item** — DN에 SO가 여럿이면 번호가 겹쳐서 Order No.와 짝 (해외 DN 196건 중 35건) |
+| A | No. | 1부터 순번 (정렬이 끝난 뒤 매긴다) |
+| B | Customer PO | 업체 발주번호 — CI의 PO No.와 같다. SO 라인 번호는 고객 PO 라인과 달라 찍지 않는다 (`DNO-2026-0020`: 한 PO를 SO 5개로 받아 'Line 1'이 다섯 번 나왔다) |
 | C | Item No. | Model number (고객 품번 — 텍스트 서식, 앞 0 보존) |
 | D | Model No. / Description | Item (품목명) |
 | E | HS Code | 일반 = `DEFAULT_HS_CODE` / SECTORIEL = 고객 코드 사다리 (`hs_code.py`) |
 | F | Qty | 수량 (못 읽으면 생성을 멈춘다 — 추정 수량을 찍지 않는다) |
 
 - **운임 줄(`FEDEX COST` 등)은 싣지 않는다** — `hs_code.is_non_goods()`. 원산지를 증명할 물건이 아니다
-- 정렬: Order No. → Line (숫자 순)
+- 정렬: Customer PO → SO_ID → SO Line item (숫자 순) — 헤더 Order No.도 이 순서
 
 ### Total · 맺음 블록
 

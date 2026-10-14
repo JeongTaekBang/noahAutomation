@@ -11,8 +11,10 @@ CI·PL과 다른 점:
   행 복사 삽입이 병합을 잃는 문제(`excel_helpers.ensure_row_merges`)도 생기지 않는다
   — `layout_item_rows()`가 필요 없는 이유다.
 - **운임 줄은 싣지 않는다.** 원산지를 증명할 물건이 아니다 (CI는 HS 빈칸으로 싣는다).
-- 라인 번호는 SO의 `Line item`이다. DN에 SO가 여럿이면 번호가 겹쳐서(해외 DN 196건 중
-  35건, 그 35건 전부 — 2026-10-14 실측) 표에 Order No.(SO_ID)를 짝으로 둔다.
+- 표의 주문 참조는 **Customer PO**(업체가 아는 번호, CI의 PO No.와 같다)이고 번호는 **1부터 순번**이다.
+  SO `Line item`은 고객 PO 라인과 다른 우리 번호라 Customer PO와 짝지으면 거짓말이 된다 — 실측:
+  Watergates PO `WGDBS2601233`을 SO 5개로 받아 `DNO-2026-0020`에 'PO / Line 1'이 다섯 번 나온다.
+  우리 SO 번호(SO_ID)는 헤더 Order No.에 남는다.
 
 값을 정하는 부분(`build_coo_lines`·`build_coo_header`)은 COM 없는 순수 함수라
 실데이터 없이 테스트한다.
@@ -22,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -61,7 +63,7 @@ VALUE_COLS = 'CDEF'
 HEADER_ROW = 26
 ITEM_START_ROW = 27
 LAST_COL = 'F'
-ITEM_HEADERS = ('Order No.', 'Line', 'Item No.', 'Model No. / Description', 'HS Code', 'Qty')
+ITEM_HEADERS = ('No.', 'Customer PO', 'Item No.', 'Model No. / Description', 'HS Code', 'Qty')
 TOTAL_LABEL_COL = 'D'
 QTY_COL = 'F'
 
@@ -75,7 +77,11 @@ PORT_OF_LOADING = 'INCHEON, KOREA'
 
 @dataclass(frozen=True)
 class CooLine:
-    """표 한 줄 (A~F 순서대로 `cells()`)"""
+    """표 한 줄 (A~F 순서대로 `cells()`)
+
+    `order_no`(SO_ID)·`line`(SO Line item)은 표에 찍지 않는다 — 정렬과 헤더 Order No.에만 쓴다.
+    `no`는 정렬이 끝난 뒤 1부터 매긴다 (`build_coo_lines`).
+    """
 
     order_no: str
     line: str
@@ -85,9 +91,10 @@ class CooLine:
     qty: int | float
     customer_po: str = ''
     shipping_method: str = ''
+    no: int = 0
 
     def cells(self) -> list:
-        return [self.order_no, self.line, self.item_no, self.description, self.hs_code, self.qty]
+        return [str(self.no), self.customer_po, self.item_no, self.description, self.hs_code, self.qty]
 
 
 @dataclass(frozen=True)
@@ -133,12 +140,13 @@ def _parse_qty(raw: object, label: str) -> int | float:
 
 
 def _line_sort_key(line: CooLine) -> tuple:
+    """Customer PO → SO → SO 라인 — 업체가 PO별로 묶어 읽고, 한 PO 안에서는 우리 입력 순서"""
     number = int(line.line) if line.line.isdigit() else float('inf')
-    return (line.order_no, number, line.line)
+    return (line.customer_po, line.order_no, number, line.line)
 
 
 def build_coo_lines(items_df: pd.DataFrame) -> list[CooLine]:
-    """DN 아이템 → 표 줄 (운임 제외, Order No. → Line 순)
+    """DN 아이템 → 표 줄 (운임 제외, Customer PO → SO → Line 순, 1부터 순번)
 
     Args:
         items_df: DN 아이템 (Model number 보강 + `_hs_code` 열이 붙은 상태)
@@ -163,7 +171,8 @@ def build_coo_lines(items_df: pd.DataFrame) -> list[CooLine]:
             customer_po=to_text(get_value(item, 'customer_po', '')),
             shipping_method=to_text(get_value(item, 'shipping_method', '')),
         ))
-    return sorted(lines, key=_line_sort_key)
+    ordered = sorted(lines, key=_line_sort_key)
+    return [replace(line, no=i) for i, line in enumerate(ordered, start=1)]
 
 
 def _date_text(value: object) -> str:
