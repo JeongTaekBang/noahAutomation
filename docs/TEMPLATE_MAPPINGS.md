@@ -356,6 +356,66 @@ DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지�
 
 ---
 
+## COO — Certificate of Origin (`templates/certificate_of_origin.xlsx`)
+
+**생성기**: `coo_generator.py` (xlwings) → `DocumentService.generate_coo` → **xlsx + PDF**
+**데이터 소스**: DN_해외 + SO_해외 + Customer_해외 (CI와 같은 `load_dn_export_data`, `Customer country` 추가)
+
+> **제조사(NOAH) 원산지 선언서**다 (2026-10-14 — 샘플: Bifold 'Certificate of Country of Origin').
+> 회사 정보(Manufacturer·Exporter)·선언문·서명란은 **템플릿 고정 텍스트**다. CI Seller(RCK)는 `Exporter:`
+> 줄로 남겨 세관이 CI와 맞춰 보게 한다. CI·PL과 달리 **품목 행에 병합이 없다** — 행 높이는 자동 맞춤.
+
+### 고정 필드 (Header) — 값 칸은 C:F 병합의 좌상단
+
+| 셀 | 필드명 | 데이터 소스 |
+|----|--------|-------------|
+| C7 | Certificate No. | `COO-{DN_ID}` |
+| C8 | Date of Issue | 출고일 (없으면 오늘) — CI Invoice Date와 같은 규칙 |
+| C10:C14 | Manufacturer / Exporter | 템플릿 고정 (NOAH 2줄 / RCK 3줄) |
+| C15:C17 | Consignee | Customer_해외.Bill to 1~3 (빈 줄 건너뜀, 다 비면 고객명) |
+| C19 | Commercial Invoice No. | DN_ID (CI Invoice No.와 같다) |
+| C20 | Order No. | 표에 실린 SO_ID (중복 없이, 콤마) |
+| C21 | Customer Order No. | 표에 실린 Customer PO (중복 없이, 콤마) |
+| C22 | Means of Transport | `{Shipping Method}, from INCHEON, KOREA` (여럿이면 ` / `) |
+| C23 | Country of Destination | Customer_해외.Country (`Customer country`), 없으면 Bill to 3 |
+| C24 | Country of Origin | 템플릿 고정 `REPUBLIC OF KOREA` |
+
+긴 값은 `layout_address_rows`가 줄바꿈 + 행 높이를 확보한다 (병합 칸은 경계에서 잘린다).
+
+### 동적 필드 (Item List - Row 27~)
+
+헤더 행은 Row 26 (회색 바탕, **인쇄 시 페이지마다 반복**). 생성기가 `assert_coo_template`로 이 행과
+Total 위치(D28)를 먼저 확인한다.
+
+| 열 | 필드명 | 설명 |
+|----|--------|------|
+| A | Order No. | SO_ID |
+| B | Line | **SO Line item** — DN에 SO가 여럿이면 번호가 겹쳐서 Order No.와 짝 (해외 DN 196건 중 35건) |
+| C | Item No. | Model number (고객 품번 — 텍스트 서식, 앞 0 보존) |
+| D | Model No. / Description | Item (품목명) |
+| E | HS Code | 일반 = `DEFAULT_HS_CODE` / SECTORIEL = 고객 코드 사다리 (`hs_code.py`) |
+| F | Qty | 수량 (못 읽으면 생성을 멈춘다 — 추정 수량을 찍지 않는다) |
+
+- **운임 줄(`FEDEX COST` 등)은 싣지 않는다** — `hs_code.is_non_goods()`. 원산지를 증명할 물건이 아니다
+- 정렬: Order No. → Line (숫자 순)
+
+### Total · 맺음 블록
+
+| 행 (템플릿) | 내용 |
+|-------------|------|
+| 28 | `Total` (D) + `=SUM(F)` |
+| 29 | `*** END OF LIST ***` — 뒤에 품목을 덧붙이지 못하게 |
+| 31~32 | STATEMENT + 선언문 (5년 보관 문구 포함) |
+| 34~41 | For and on behalf of NOAH · Place of Issue · 서명/직인 자리 · Authorised Signature · Name · Title |
+
+**맺음 블록(Total~Title)은 한 장에 모은다** — 자동 나누기가 그 안에 걸리면 마지막 품목 행 앞에 수동
+나누기를 넣는다 (`_keep_closing_block`). 그래서 템플릿 인쇄는 **폭만 1장, 높이 자동**이다 — 높이까지
+장수로 고정하면 Excel이 수동 나누기를 무시하고, 고정 배율(100%)은 프린터마다 열이 다음 장으로 밀린다.
+페이지 나누기를 읽는 Excel은 **빈 Book1 없이** 띄운다 (`xlwings_app_context(add_book=False)`) — Book1이
+있는 인스턴스는 쪽을 다르게 나눈다(실측). 한 장에 품목 약 8줄 (해외 DN 84%가 8줄 이하).
+
+---
+
 ## 구현 상태
 
 | 문서 유형 | 상태 | 생성기 | 템플릿 |
@@ -367,6 +427,7 @@ DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지�
 | FI (Final Invoice) | ✅ 완료 | `fi_generator.py` (xlwings) | `final_invoice.xlsx` |
 | OC (Order Confirmation) | ✅ 완료 | `oc_generator.py` (xlwings) | `order_confirmation.xlsx` |
 | PL (Packing List) | ✅ 완료 | `pl_generator.py` (xlwings) | `packing_list.xlsx` |
+| COO (Certificate of Origin) | ✅ 완료 | `coo_generator.py` (xlwings) + PDF | `certificate_of_origin.xlsx` |
 
 ---
 

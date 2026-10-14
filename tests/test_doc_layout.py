@@ -81,12 +81,13 @@ class TestGeneratorsLayoutAddresses:
 
     주소 칸은 병합 셀이라 wrap 없이 길면 병합 경계에서 잘린다(2026-08-05 실측
     74자/81자 클립). 값만 쓰고 layout_address_rows를 빼먹으면 재발한다.
-    PI·CI·PL은 주소 셀을 채우지 않아 대상이 아니다.
+    PI·CI·PL은 주소 셀을 채우지 않아 대상이 아니다. COO는 수하인·참조 칸(C:F 병합)에 쓴다.
     """
 
     @pytest.mark.parametrize('module_name', [
         'po_generator.oc_generator',
         'po_generator.fi_generator',
+        'po_generator.coo_generator',
     ])
     def test_주소를_쓰면_layout_address_rows를_부른다(self, module_name):
         import importlib

@@ -30,7 +30,7 @@ MENU_BAT = PROJECT_ROOT / "noah_menu.bat"
 FULL_BAT = PROJECT_ROOT / "create_po.bat"
 
 DOC_SCRIPTS = {"create_po.py", "create_ts.py", "create_pi.py", "create_fi.py",
-               "create_oc.py", "create_ci.py", "create_pl.py"}
+               "create_oc.py", "create_ci.py", "create_pl.py", "create_coo.py"}
 # 동료 PC 메뉴에 있으면 안 되는 것 — 마스터 워크북·DB를 건드리거나 운영자 전용
 FORBIDDEN_SCRIPTS = {"sync_db.py", "close_period.py", "create_dn.py", "reconcile_po.py",
                      "reconcile_so.py", "reconcile_ind.py", "dashboard.py",
@@ -87,14 +87,14 @@ def test_help_smoke_skips_bat():
 # === 메뉴 범위 ==============================================================
 
 def test_menu_covers_exactly_domestic_and_overseas_docs():
-    """[국내] PO·TS + [해외] PI·FI·OC·CI·PL — 그 이상은 동료 PC에 열지 않는다"""
+    """[국내] PO·TS + [해외] PI·FI·OC·CI·PL·COO — 그 이상은 동료 PC에 열지 않는다"""
     invoked = _invoked_scripts(_bat_text(MENU_BAT))
     assert invoked == DOC_SCRIPTS | {"setup_data_path.py"}
     assert not invoked & FORBIDDEN_SCRIPTS
 
 
 def test_full_menu_delegates_documents():
-    """create_po.bat은 문서 7종을 직접 부르지 않고 noah_menu.bat에 위임한다
+    """create_po.bat은 문서 8종을 직접 부르지 않고 noah_menu.bat에 위임한다
 
     블록이 양쪽에 있으면 옵션을 한쪽에만 넣는 실수가 반복된다 (tasks/lessons.md 2026-08-07).
     create_po.py는 [H] 발주 이력 조회(--history)로만 남는다.
@@ -105,14 +105,14 @@ def test_full_menu_delegates_documents():
     for line in text.splitlines():
         if "create_po.py" in line:
             assert "--history" in line, f"create_po.bat에 문서 생성 블록이 남아 있다: {line}"
-    for key in ("po", "ts", "pi", "fi", "oc", "ci", "pl"):
+    for key in ("po", "ts", "pi", "fi", "oc", "ci", "pl", "coo"):
         assert f'call "%~dp0noah_menu.bat" {key}' in text
 
 
 def test_menu_accepts_delegation_keys():
     """위임 키(po/ts/...)를 메뉴가 받는가 — 한쪽만 바뀌면 그 항목이 '올바른 번호를 입력'으로 끝난다"""
     text = _bat_text(MENU_BAT)
-    for key in ("po", "ts", "pi", "fi", "oc", "ci", "pl"):
+    for key in ("po", "ts", "pi", "fi", "oc", "ci", "pl", "coo"):
         assert f'if /i "%CHOICE%"=="{key}" goto create_{key}' in text
     assert "if defined ONESHOT exit /b 0" in text
 

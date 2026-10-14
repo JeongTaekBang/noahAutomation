@@ -99,6 +99,11 @@ DOC_TYPES: tuple[dict[str, object], ...] = (
         'id_label': 'DN_ID', 'hint': '예: DNO-2026-0001',
         'out_attr': 'PL_OUTPUT_DIR', 'options': (), 'multi': True,
     },
+    {
+        'key': 'coo', 'label': 'Certificate of Origin (COO)', 'script': 'create_coo.py',
+        'id_label': 'DN_ID', 'hint': '예: DNO-2026-0001 (xlsx + PDF)',
+        'out_attr': 'COO_OUTPUT_DIR', 'options': (), 'multi': True,
+    },
     # 유일하게 문서 ID가 아니라 거래처로 조회한다. CLI가 거래처 하나만 받으므로 multi=False.
     {
         'key': 'ds', 'label': '납기현황 (미출고 회신)', 'script': 'delivery_status.py',

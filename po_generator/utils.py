@@ -880,7 +880,7 @@ def load_dn_export_data() -> pd.DataFrame:
     """DN_해외 데이터 로드 (SO_해외 + Customer_해외 JOIN)
 
     3시트 JOIN: DN_해외 → SO_해외(SO_ID) → Customer_해외(고객코드)
-    Bill to 1/2/3, Payment terms 컬럼이 추가됩니다.
+    Bill to 1/2/3, Payment terms, Customer country 컬럼이 추가됩니다.
 
     Returns:
         DN 해외 데이터 DataFrame (고객 청구 주소 포함)
@@ -923,11 +923,13 @@ def load_dn_export_data() -> pd.DataFrame:
     df_dn = df_dn.merge(df_so_codes, on='SO_ID', how='left')
 
     # Customer_해외에서 필요한 컬럼만 추출 (고객코드 중복 제거)
-    cust_cols = ['C-code by 해외', 'Bill to 1', 'Bill to 2', 'Bill to 3', 'Payment terms']
+    cust_cols = ['C-code by 해외', 'Bill to 1', 'Bill to 2', 'Bill to 3', 'Payment terms', 'Country']
     cust_cols = [c for c in cust_cols if c in df_cust.columns]
+    # 'Country'는 이름이 너무 일반적이라 별칭(`customer_country`)이 받는 이름으로 바꿔 싣는다
+    # (COO의 Country of Destination — Bill to 3은 거래처마다 국가가 아닌 주소 끝줄이기도 하다)
     df_cust_subset = df_cust[cust_cols].drop_duplicates(
         subset='C-code by 해외', keep='first',
-    )
+    ).rename(columns={'Country': 'Customer country'})
 
     # DN_해외+SO → Customer_해외 JOIN (고객코드)
     # 고객코드 컬럼명을 동적으로 찾기 (Business registration number, C-code by 해외 등)

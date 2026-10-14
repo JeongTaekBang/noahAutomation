@@ -2,7 +2,7 @@
 chcp 65001 >nul
 title NOAH PO Generator
 
-REM 문서 7종([국내]/[해외])의 입력·실행 블록은 noah_menu.bat 에 있다 — 여기서는
+REM 문서 8종([국내]/[해외])의 입력·실행 블록은 noah_menu.bat 에 있다 — 여기서는
 REM `call noah_menu.bat <키>` 로 위임한다. 동료 PC 배포판도 같은 파일을 쓰므로
 REM 문서 옵션을 더할 때는 noah_menu.bat 한 곳만 고치면 두 메뉴에 같이 반영된다.
 
@@ -35,6 +35,7 @@ echo   [4] Final Invoice 생성 (대금 청구)
 echo   [5] Order Confirmation 생성 (OC)
 echo   [6] Commercial Invoice 생성 (CI)
 echo   [7] Packing List 생성 (PL)
+echo   [O] Certificate of Origin 생성 (COO)
 echo.
 echo   [데이터]
 echo   [8] DB Sync (Excel → SQLite)
@@ -65,6 +66,7 @@ if "%CHOICE%"=="4" goto create_fi
 if "%CHOICE%"=="5" goto create_oc
 if "%CHOICE%"=="6" goto create_ci
 if "%CHOICE%"=="7" goto create_pl
+if /i "%CHOICE%"=="O" goto create_coo
 if "%CHOICE%"=="8" goto sync_db
 if "%CHOICE%"=="9" goto close_period
 if /i "%CHOICE%"=="N" goto create_dn
@@ -165,6 +167,10 @@ goto menu
 
 :create_pl
 call "%~dp0noah_menu.bat" pl
+goto menu
+
+:create_coo
+call "%~dp0noah_menu.bat" coo
 goto menu
 
 :sync_db

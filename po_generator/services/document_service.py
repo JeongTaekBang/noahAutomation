@@ -22,12 +22,14 @@ from po_generator.config import (
     FI_OUTPUT_DIR,
     PL_OUTPUT_DIR,
     OC_OUTPUT_DIR,
+    COO_OUTPUT_DIR,
     TS_TEMPLATE_FILE,
     PI_TEMPLATE_FILE,
     CI_TEMPLATE_FILE,
     FI_TEMPLATE_FILE,
     PL_TEMPLATE_FILE,
     OC_TEMPLATE_FILE,
+    COO_TEMPLATE_FILE,
     DEFAULT_HS_CODE,
 )
 from po_generator.utils import (
@@ -46,6 +48,8 @@ from po_generator.ci_generator import create_ci_xlwings
 from po_generator.fi_generator import create_fi_xlwings
 from po_generator.pl_generator import create_pl_xlwings
 from po_generator.oc_generator import create_oc_xlwings
+from po_generator.coo_generator import create_coo_xlwings
+from po_generator.mailer import export_pdf
 from po_generator.cli_common import generate_output_filename, validate_output_path
 from po_generator.services.result import DocumentResult, GenerationStatus
 from po_generator.services.finder_service import FinderService, OrderData
@@ -587,6 +591,105 @@ class DocumentService:
             )
             if hs_file:
                 extra_files.append(hs_file)
+
+        result = DocumentResult.success_result(
+            output_file=output_file,
+            order_no=dn_id,
+            customer_name=customer_name,
+            item_count=order_data.item_count,
+            warnings=warnings,
+        )
+        result.extra_files = extra_files
+        result.errors = errors
+        return result
+
+    def generate_coo(self, dn_id: str) -> DocumentResult:
+        """Certificate of Origin 생성 (xlsx + PDF)
+
+        HS는 CI 규칙을 따르되, 자기네 코드를 요구한 거래처(`HS_LINE_CUSTOMERS`)는
+        **고객 코드 한 장만** 만든다 — COO는 수출신고가 아니라 고객의 수입통관에 쓰이므로
+        같이 제출되는 CI-HS와 코드가 맞아야 한다 (`config.COO_TEMPLATE_FILE` 주석).
+
+        PDF는 고객에게 보내는 본, xlsx는 손볼 원본이라 둘 다 남긴다. PDF 변환이 실패하면
+        xlsx는 그대로 두고 `errors`로 알린다 — CLI는 실패로 집계한다(보낼 본이 없다).
+
+        Args:
+            dn_id: DN_ID (예: DNO-2026-0001)
+
+        Returns:
+            DocumentResult — `output_file`=xlsx, `extra_files`=[PDF]
+        """
+        logger.info(f"COO 생성 시작: {dn_id}")
+
+        if not COO_TEMPLATE_FILE.exists():
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"템플릿 파일 없음: {COO_TEMPLATE_FILE}",
+            )
+
+        order_data = self._finder.find_dn_export(dn_id)
+        if order_data is None:
+            return DocumentResult.not_found_result(dn_id)
+
+        items_df = self._enrich_from_so_lines(order_data)
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+
+        warnings: list[str] = []
+        if is_hs_line_customer(customer_name):
+            # OS name이 통째로 없으면 전 행이 미지정으로 떨어진다 — 빈 HS 열 증명서를
+            # 내보내지 않는다 (`_generate_hs_line_copy`와 같은 판단)
+            if OS_NAME_COLUMN not in items_df.columns:
+                return DocumentResult.file_error_result(
+                    order_no=dn_id,
+                    error_message=(
+                        f"SO 조인 실패로 '{OS_NAME_COLUMN}'가 없어 고객 HS 코드를 정할 수 없습니다"
+                    ),
+                )
+            coo_items_df, unmatched = enrich_hs_codes(items_df)
+            if unmatched:
+                warnings.append(
+                    f"HS 코드 미지정 {len(unmatched)}줄 (추측하지 않고 비워 둠 — 고객 확인 필요): "
+                    + ', '.join(unmatched)
+                )
+        else:
+            coo_items_df, _ = enrich_hs_codes(items_df, default_code=DEFAULT_HS_CODE)
+
+        COO_OUTPUT_DIR.mkdir(exist_ok=True)
+        output_file = generate_output_filename("COO", dn_id, customer_name, COO_OUTPUT_DIR)
+
+        if not validate_output_path(output_file, COO_OUTPUT_DIR):
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message="출력 경로 검증 실패",
+            )
+
+        try:
+            create_coo_xlwings(
+                template_path=COO_TEMPLATE_FILE,
+                output_path=output_file,
+                order_data=coo_items_df.iloc[0],
+                items_df=coo_items_df,
+            )
+            logger.info(f"COO 생성 완료: {output_file}")
+
+        except FileNotFoundError as e:
+            return DocumentResult.file_error_result(order_no=dn_id, error_message=str(e))
+        except PermissionError:
+            return DocumentResult.file_error_result(
+                order_no=dn_id,
+                error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
+            )
+        except Exception as e:
+            logger.exception("COO 생성 중 오류 발생")
+            return DocumentResult.file_error_result(order_no=dn_id, error_message=str(e))
+
+        extra_files: list[Path] = []
+        errors: list[str] = []
+        try:
+            extra_files.append(export_pdf(output_file))
+        except Exception as e:
+            logger.exception("COO PDF 변환 실패")
+            errors.append(f"PDF 변환 실패 (xlsx는 생성됨): {e}")
 
         result = DocumentResult.success_result(
             output_file=output_file,

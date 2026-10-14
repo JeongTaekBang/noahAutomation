@@ -35,6 +35,7 @@ python create_oc.py SOO-2026-0001 --mail    # 확인 없이 메일 초안
 python create_oc.py SOO-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
 python create_ci.py DNO-2026-0001        # Commercial invoice (라인별 HS CODE, SECTORIEL은 고객용 한 장 더)
 python create_pl.py DNO-2026-0001        # Packing list (동일)
+python create_coo.py DNO-2026-0001       # Certificate of Origin — NOAH 원산지 선언서 (xlsx + PDF)
 
 # DN 출고기록 자동 입력 (출고리스트 → DN_국내)
 python create_dn.py P08                   # 미리보기 → y/N → 워크북에 추가
@@ -76,9 +77,9 @@ python reconcile_ind.py P03 -v            # 상세 로그
 streamlit run dashboard.py                # Streamlit 대시보드
 python dashboard_dist/build_portable_dashboard.py  # 배포 zip → dashboard_dist/NOAH_대시보드_배포.zip
 
-# GUI (문서 7종 + 납기현황) / 콘솔 메뉴 / 사내 배포판 빌드
+# GUI (문서 8종 + 납기현황) / 콘솔 메뉴 / 사내 배포판 빌드
 python noah_gui.py                        # tkinter GUI (개발 PC에서도 그대로 실행)
-noah_menu.bat                             # 콘솔 메뉴 — [국내]/[해외] 문서 7종만 (동료 PC용 진입점, 개발 PC에서도 실행)
+noah_menu.bat                             # 콘솔 메뉴 — [국내]/[해외] 문서 8종만 (동료 PC용 진입점, 개발 PC에서도 실행)
 noah_menu.bat ts                          # 한 항목만 실행하고 복귀 (create_po.bat이 이렇게 위임한다)
 python setup_data_path.py --print         # 메뉴가 쓰는 데이터 파일 경로 (--change 로 다시 지정)
 python cli_dist/build_portable_gui.py     # 배포 zip 빌드 → cli_dist/NOAH_문서생성기_배포.zip (GUI + 콘솔 메뉴 동봉)
@@ -157,14 +158,15 @@ Reconciliation layer:
 | `po_generator/validators.py` | Required field checks, ICO Unit > 0, delivery date validation |
 | `po_generator/services/document_service.py` | Orchestrator: find → validate → generate → save |
 | `po_generator/services/finder_service.py` | Order lookup across domestic/overseas sheets |
-| `create_po.bat` | **대화형 메뉴 런처 (이름과 달리 PO 전용이 아니다)** — 문서 7종 + DB Sync·마감·정합성 검사·대사·대시보드·납기현황을 번호로 고르는 메뉴다. **문서 7종의 입력·실행 블록은 여기 없고 `noah_menu.bat`에 있다** — `call noah_menu.bat <키>`로 위임한다 (2026-09-14). CLI에 옵션을 추가하면 `noah_menu.bat`과 `noah_gui.py`에도 넣어야 사용자 눈에 보인다 — `create_ts.py`만 고치고 "CLI에 반영했다"고 한 적이 있다 (2026-08-07, `tasks/lessons.md`) |
-| `noah_menu.bat` + `setup_data_path.py` | **동료 PC용 콘솔 메뉴** — [국내] PO·TS / [해외] PI·FI·OC·CI·PL **만** (DB·마감·대사·DN 쓰기·납기현황은 없다 — `tests/test_noah_menu.py`가 금지 목록으로 감시). 거래명세표·FI의 하위 메뉴까지 포함해 **문서 블록의 유일한 소유자**이고 `create_po.bat`이 `call noah_menu.bat ts`처럼 위임한다 — 블록이 두 메뉴에 있으면 옵션을 한쪽에만 넣는 실수가 반복된다. Python은 동봉 `python\`(배포판) → `local_config.bat`(개발 PC) 순. 데이터 파일은 첫 실행에 `setup_data_path.py`가 OneDrive에서 찾아 **최근 수정 순으로 전부** 보여주고 번호/Enter로 확정 → GUI와 **같은** `noah_config.ini`에 기록 (첫 BFS 결과만 쓰면 낡은 사본이 잡힌다 — 2026-09-14 실측 `문서\`의 8/7자 사본) (탐색·검증·쓰기는 `noah_gui`의 함수를 그대로 쓴다 — 규칙이 갈리면 두 진입점이 다른 파일을 본다). `--print`는 메뉴를 그릴 때마다 불리므로 tkinter(`noah_gui`, 0.6초)를 임포트하지 않는다. **`set /p` 메뉴는 파이프로 검증이 안 된다** — 환경변수로 답을 미리 넣고(`set /p`는 빈 입력이면 변수를 그대로 둔다) stdin을 NUL로 주면 분기가 재현된다 |
-| `noah_gui.py` | tkinter GUI — 문서 7종 + 납기현황. 기존 `create_*.py`·`delivery_status.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함. **DOC_TYPES에 항목을 추가하면 `build_portable_gui.APP_FILES`에도 넣어야 한다** — 안 그러면 배포판에서 그 버튼만 조용히 실패한다 (빌드 `verify()`와 `tests/test_noah_gui.py`가 대조) |
+| `create_po.bat` | **대화형 메뉴 런처 (이름과 달리 PO 전용이 아니다)** — 문서 8종 + DB Sync·마감·정합성 검사·대사·대시보드·납기현황을 번호로 고르는 메뉴다(COO는 [8]이 DB Sync라 [O]). **문서 8종의 입력·실행 블록은 여기 없고 `noah_menu.bat`에 있다** — `call noah_menu.bat <키>`로 위임한다 (2026-09-14). CLI에 옵션을 추가하면 `noah_menu.bat`과 `noah_gui.py`에도 넣어야 사용자 눈에 보인다 — `create_ts.py`만 고치고 "CLI에 반영했다"고 한 적이 있다 (2026-08-07, `tasks/lessons.md`) |
+| `noah_menu.bat` + `setup_data_path.py` | **동료 PC용 콘솔 메뉴** — [국내] PO·TS / [해외] PI·FI·OC·CI·PL·COO **만** (DB·마감·대사·DN 쓰기·납기현황은 없다 — `tests/test_noah_menu.py`가 금지 목록으로 감시). 거래명세표·FI의 하위 메뉴까지 포함해 **문서 블록의 유일한 소유자**이고 `create_po.bat`이 `call noah_menu.bat ts`처럼 위임한다 — 블록이 두 메뉴에 있으면 옵션을 한쪽에만 넣는 실수가 반복된다. Python은 동봉 `python\`(배포판) → `local_config.bat`(개발 PC) 순. 데이터 파일은 첫 실행에 `setup_data_path.py`가 OneDrive에서 찾아 **최근 수정 순으로 전부** 보여주고 번호/Enter로 확정 → GUI와 **같은** `noah_config.ini`에 기록 (첫 BFS 결과만 쓰면 낡은 사본이 잡힌다 — 2026-09-14 실측 `문서\`의 8/7자 사본) (탐색·검증·쓰기는 `noah_gui`의 함수를 그대로 쓴다 — 규칙이 갈리면 두 진입점이 다른 파일을 본다). `--print`는 메뉴를 그릴 때마다 불리므로 tkinter(`noah_gui`, 0.6초)를 임포트하지 않는다. **`set /p` 메뉴는 파이프로 검증이 안 된다** — 환경변수로 답을 미리 넣고(`set /p`는 빈 입력이면 변수를 그대로 둔다) stdin을 NUL로 주면 분기가 재현된다 |
+| `noah_gui.py` | tkinter GUI — 문서 8종 + 납기현황. 기존 `create_*.py`·`delivery_status.py`를 **자식 프로세스로 실행**하고 stdout을 로그 위젯에 흘린다(CLI 무수정, COM 격리). 데이터 파일 지정 마법사 포함. **DOC_TYPES에 항목을 추가하면 `build_portable_gui.APP_FILES`에도 넣어야 한다** — 안 그러면 배포판에서 그 버튼만 조용히 실패한다 (빌드 `verify()`와 `tests/test_noah_gui.py`가 대조) |
 | `build_common.py` | 배포판 빌드 공통부 — 런타임 내려받기·핀 3자 대조·트리밍·BUILD_INFO·zip. 문서생성기와 대시보드 두 빌더가 공유한다 (복사하면 갈라지고, 그 갈라짐은 "한쪽만 낡은 pandas로 나간다"로 늦게 드러난다 — `mail_cli.py`와 같은 이유). **최상위는 상수·함수 정의만** |
 | `cli_dist/build_portable_gui.py` | 문서생성기 배포판 — `build_common` 위에 이 배포판만의 것을 얹는다: `APP_FILES`(담을 것 — `noah_menu.bat`·`setup_data_path.py` 포함) · 런처/설치 스크립트 · `SHORTCUTS`(바탕화면 바로가기 2개: GUI `.vbs` + 콘솔 메뉴 `.bat`) · `verify()`(`DOC_TYPES` 대조 + `cli_scripts()` 전수 `--help` 스모크 — `.py`만, `.bat`에 `--help`를 주면 메뉴가 뜨고 멈춘다). **모듈 최상위는 상수·함수 정의만** (테스트가 경로로 로드하며, 예외는 `build_common`을 찾는 sys.path 한 줄뿐) |
 | `dashboard_dist/build_portable_dashboard.py` | 대시보드 배포판 — `dashboard.py`를 **무수정으로** 담고 `po_generator/`·`sql/`을 동봉한다. 예전 `build_dist.py`는 import를 문자열 치환해 standalone 파일을 만들었는데, import 한 줄이 바뀌자 패턴이 안 맞아 빌드가 죽었고 배포본이 4개월 낡았다 — 그래서 재작성을 아예 없앴다. `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다(import만으로는 트리밍 사고를 못 잡는다). pyarrow는 flight/parquet/dataset/substrait를 잘라내되 `arrow_compute`는 남긴다 (streamlit이 로드한다 — 실측) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
 | `po_generator/hs_code.py` | SECTORIEL 라인별 HS CODE 판정 — 규칙 사다리(운임 → 모델번호 → 품목텍스트 → OS 제품군 → 미매칭)와 고객 제공 코드표. **COM 없는 순수 판정**이라 실데이터 전수로 테스트한다(`dn_recorder`/`dn_writer`를 가른 것과 같은 이유). 결과는 `_hs_code` **열**로 items_df에 붙는다 — 생성기가 Model number로 재정렬하므로 리스트로 넘기면 코드가 남의 품목에 붙는다(8자리 숫자라 눈으로 안 보인다). 새 스페어 코드는 `SPARE_HS_BY_MODEL`에 한 줄 |
+| `po_generator/coo_generator.py` | 원산지증명서(COO) — **제조사(NOAH) 원산지 선언서**를 DN_해외 한 건에서 xlsx + PDF로. 값 정하기(`build_coo_lines`/`build_coo_header`)는 COM 없는 순수 함수, Excel 쪽은 값 쓰기·행 높이·**맺음 블록 한 장 유지**(`_keep_closing_block`). 셀 매핑은 `docs/TEMPLATE_MAPPINGS.md` COO 절, 규칙은 아래 Business Rules |
 | `po_generator/mailer.py` | 고객 메일 발송 — 고객 마스터에서 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **첨부는 여러 장일 수 있다** — `as_paths()`가 단건/복수를 흡수하고 `export_pdfs()`가 Excel **1회 기동**으로 N장을 변환한다(8장 실측 24초; 장마다 띄우면 그 두 배). **조인키가 국내/해외로 갈린다**: `find_recipient()`는 사업자번호로 `Customer_국내`, `find_recipient_overseas()`는 고객코드로 `Customer_해외` — 둘 다 `_build_recipient()` 하나를 공유한다. **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
 | `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`add_mail_arguments`/`prepare_mail_options`/`confirm_recipient`(수신자 조회→표시→y/N 관문)/`collect_customer_po`/`format_mail_date`. `create_ts.py`·`delivery_status.py`·`create_oc.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다). 어느 마스터를 읽을지는 `MailOptions.loader`/`sheet_label` **짝**으로 주입 — 기본은 국내, OC만 해외. **`loader` 기본값에 함수를 박지 말 것**: 클래스 정의 시점에 굳어 모듈 속성 교체(테스트 monkeypatch)가 무시된다 |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
@@ -281,6 +283,23 @@ Reconciliation layer:
   `G16`은 복수 PO 결합이라 G를 89자로 부풀렸다). 짜낼 수 있는 건 3~5자인데 필요한 건
   12자라 얻는 것도 없었다. 배율로 흡수하면 열 폭이 그대로라 **줄바꿈·행 높이가 원래
   서식과 완전히 같다** (실측: 36행 높이 합 1090.05pt 동일)
+- **COO(원산지증명서)는 제조사(NOAH) 원산지 선언서다** (2026-10-14 사용자 지시 — 샘플은 Bifold
+  'Certificate of Country of Origin'). 발행·서명은 NOAH, CI Seller(RCK)는 `Exporter:` 줄로만 남긴다
+  (세관이 CI와 맞춰 보는 연결고리). 회사 정보·선언문·서명란은 **템플릿 고정 텍스트**다.
+  - **Line은 SO의 `Line item`이고 표에 Order No.(SO_ID)가 짝으로 붙는다** — DN에 SO가 여럿이면 번호가
+    겹친다 (해외 DN 196건 중 35건, 그 35건 전부. `(SO_ID, Line)`은 전수 유일, `(Customer PO, Line)`은 1건 충돌)
+  - **운임 줄은 싣지 않는다** (`hs_code.is_non_goods` — CI의 HS 빈칸 판정과 같은 함수). 수량을 못 읽으면
+    1로 메우지 않고 멈춘다 — 증명서에 추정치를 찍지 않는다
+  - HS는 CI 규칙(기본 = `DEFAULT_HS_CODE`). **SECTORIEL은 고객 코드 한 장만** — COO는 수출신고가 아니라
+    고객의 수입통관에 쓰여 같이 제출되는 CI-HS와 맞아야 한다. `OS name`이 없으면 만들지 않는다(CI-HS와 같은 판단)
+  - 출력은 **xlsx + PDF 둘 다** (PDF = 보낼 본, xlsx = 손볼 원본). PDF 변환이 실패하면 xlsx는 남기고 실패로 집계
+  - **맺음 블록(Total~서명)은 한 장에 모은다** — 자동 나누기가 그 안에 걸리면 마지막 품목 행 앞에 수동
+    나누기. 이게 먹으려면 인쇄가 **폭만 1장·높이 자동**이어야 한다(높이까지 고정하면 수동 나누기 무시, 100% 고정은
+    프린터마다 Qty 열이 다음 장으로 밀림 — doPDF 실측). 그리고 **페이지 나누기는 빈 Book1 없이 띄운 Excel에서만
+    믿을 수 있다** — `xlwings_app_context()` 기본(Book1 있음)은 같은 파일을 1쪽으로, Book1 없으면 2쪽(= 실제 PDF)으로
+    나눴다. 또 `HPageBreaks`의 **첫 열거는 부분 결과**라([] → [47]) 두 번 같을 때까지 읽는다 (`read_page_breaks`)
+  - 템플릿 기본(Normal) 글꼴은 Arial 10 — 빈 칸 글꼴이 행 높이 하한이라, 테마 글꼴(한글 Excel에서 맑은 고딕 11)이면
+    헤더 행이 전부 18.5pt로 부푼다
 - **거래명세표에 호선명을 표기하는 건 조선 기자재 4사뿐이다**
   (`config.TS_PO_REMARK_CUSTOMERS` = 스칸텍·브이티엘·엔이에스·파나시아, 고객명 부분일치 —
   2026-08-25 사용자 지시). 호선명은 `SO_국내.Remarks`에 있고 두 군데 찍힌다:

@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-10-14: 원산지증명서(COO) — `create_coo.py`, 메뉴 [해외] [8] / 전체 메뉴 [O]
+
+사용자 요청: CI·PL처럼 원산지증명서를 출력해야 할 일이 생길 것 같다 (샘플: Bifold 'Certificate of Country
+of Origin'). 양식은 샘플 형식 + 원산지증명서 관행 항목, 발행은 **NOAH**(제조사 원산지 선언서).
+
+- 템플릿 `templates/certificate_of_origin.xlsx` — 로고·제목 / Certificate No.·Date of Issue / Manufacturer(NOAH)·
+  Exporter(RCK)·Consignee / CI 번호·Order No.·Customer Order No.·운송·도착국·원산지 / 표(Order No.|Line|Item No.|
+  Description|HS Code|Qty) / Total·`*** END OF LIST ***` / STATEMENT / 서명란(발행지·성명·직위). Serial No.와
+  Origin Criterion은 사용자 결정으로 뺐다. Line = SO Line item (DN 196건 중 35건이 SO 여럿이라 Order No.와 짝)
+- `coo_generator.py` + `DocumentService.generate_coo` — xlsx + PDF. 운임 줄 제외, SECTORIEL은 고객 HS 한 장
+- `load_dn_export_data`에 `Customer_해외.Country` → `Customer country` (도착국 — Bill to 3은 국가가 아닌 거래처도 있다)
+- `hs_code.is_non_goods()` 공개 — 운임 판정을 CI HS 빈칸과 COO 제외가 같이 쓴다
+- `xlwings_app_context(add_book=...)` 옵션 추가 (기본값 그대로). COO는 `False` — 아래
+- 메뉴·GUI·배포 목록·`.gitignore`(`generated_coo/`)
+
+**페이지 나누기에서 세 번 걸렸다** (서명란만 다음 장으로 넘어가 반복 머리글만 찍힌 2쪽이 나왔다):
+1. 고정 배율(100%)은 프린터마다 인쇄 폭이 달라 doPDF에서 Qty 열이 따로 나갔다 → 폭만 1장·높이 자동
+   (이때 Excel은 수동 나누기를 지킨다 — 실측. 높이까지 장수로 고정하면 무시한다)
+2. `HPageBreaks` 첫 열거가 부분 결과였다 ([] → [47], [43] → [43, 73]) → 두 번 같을 때까지 읽는다
+3. 그래도 생성기 안에서는 끝까지 [] — **빈 Book1이 떠 있는 Excel은 쪽을 다르게 나눈다**(같은 파일이 1쪽 vs 2쪽,
+   후자 = 실제 PDF). 생성기만 Book1 없이 띄운다
+검증: 해외 실 DN 1~51줄 16건 생성 → 맺음 블록 분할 0, 세로 나누기 0. 한 장에 8줄까지 (DN 84%) — 처음엔 4줄이라
+템플릿의 고정 영역을 줄였다(로고 옆 제목, NOAH 주소 한 줄, 수하인 3줄, 선언문 9pt).
+
+---
+
 ## 2026-10-13: 정합성 검사 결과 파일을 매번 갱신한다
 
 사용자 보고: 정합성 검사를 하면 엑셀 결과물이 업데이트가 안 된다.

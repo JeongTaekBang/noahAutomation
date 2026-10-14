@@ -111,6 +111,7 @@ APP_FILES = (
     "create_oc.py",
     "create_ci.py",
     "create_pl.py",
+    "create_coo.py",
     "delivery_status.py",
     "create_dn.py",
 )

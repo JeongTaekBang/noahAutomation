@@ -76,6 +76,7 @@ def xlwings_app_context(
     visible: bool = False,
     display_alerts: bool = False,
     screen_updating: bool = False,
+    add_book: bool = True,
 ) -> Generator[xw.App, None, None]:
     """xlwings App 생명주기를 안전하게 관리하는 컨텍스트 매니저
 
@@ -85,6 +86,9 @@ def xlwings_app_context(
         visible: Excel 창 표시 여부 (기본: False)
         display_alerts: Excel 알림 표시 여부 (기본: False)
         screen_updating: 화면 업데이트 여부 (기본: False, 성능 향상)
+        add_book: 빈 통합문서(Book1)를 같이 띄울지. **페이지 나누기를 읽는 쪽은 False** —
+            Book1이 떠 있는 인스턴스는 다르게 쪽을 나눈다 (2026-10-14 실측: 같은 파일이
+            Book1 있으면 1쪽, 없으면 2쪽 = 실제 PDF). 기존 문서들은 기본값 그대로다.
 
     Yields:
         xw.App: xlwings App 객체
@@ -99,7 +103,7 @@ def xlwings_app_context(
     """
     app = None
     try:
-        app = xw.App(visible=visible)
+        app = xw.App(visible=visible, add_book=add_book)
         app.display_alerts = display_alerts
         app.screen_updating = screen_updating
         yield app

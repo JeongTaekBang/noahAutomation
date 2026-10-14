@@ -1,3 +1,34 @@
+# 원산지증명서(COO) 생성 (2026-10-14) — 완료
+
+사용자 요청: CI·PL처럼 원산지증명서를 [해외] [8]로 생성 → 업체·품목 정보가 PDF로. 샘플 = Bifold
+'Certificate of Country of Origin'. 합의:
+- 발행 = **NOAH Actuation**(제조사 선언). CI Seller가 RCK라 `Exporter:` 줄로 RCK를 남긴다
+- 양식은 샘플 형식 + 증명서 관행(Certificate No.·Invoice 연결·운송·END OF LIST·서명자/발행지·5년 보관)
+- Serial Nos. 제외, Origin Criterion 제외, **Line = SO Line item**, 출력 **xlsx + PDF 둘 다**
+- 메뉴: `noah_menu.bat` [8], `create_po.bat` [O]
+
+실측: 해외 DN 196건 중 35건이 SO 여러 개 → 35건 전부 Line 번호 충돌 → 표에 Order No.(SO_ID) 열을 Line과 짝으로.
+(SO_ID, Line)은 196건 전부 유일 / (Customer PO, Line)은 1건 충돌. 운임 줄(FEDEX COST) 17행 — 물품이 아니라 COO에서 뺀다.
+
+- [x] 템플릿 확정 — Order No.|Line|Item No.|Description|HS Code|Qty, 품목 행 병합 없음, 기본 글꼴 Arial 10
+- [x] config `COO_TEMPLATE_FILE`/`COO_OUTPUT_DIR`, loader에 `Customer_해외.Country` → `Customer country`
+- [x] `hs_code.is_non_goods()` 공개 (운임 판정 한 곳)
+- [x] `coo_generator.py` + `DocumentService.generate_coo` (+PDF) + `create_coo.py`
+- [x] 메뉴(`noah_menu.bat` [8] / `create_po.bat` [O]) · GUI · 배포 목록 · `.gitignore` + 테스트(`tests/test_coo.py` 51개)
+- [x] 실데이터 E2E — 1~51줄 16건: 맺음 블록 분할 0 · 세로 나누기 0 · PDF 눈 확인 (1쪽 8줄 / SECTORIEL 33줄 2쪽 / 51줄 3쪽)
+- [x] 콘솔 메뉴 실행 (`noah_menu.bat coo`, 답 미리 넣고 stdin NUL) → xlsx + PDF
+- [x] 문서: TEMPLATE_MAPPINGS(COO 절)·CLAUDE.md·CHANGELOG, lessons
+
+## 리뷰
+
+- 전체 스위트 1069 passed / 2 skipped (`add_book` 인자로 바뀐 `xlwings_app_context` 테스트 1건 갱신)
+- 페이지 나누기 함정 3개(고정 배율 열 밀림 / 첫 열거 부분 결과 / Book1 인스턴스의 다른 쪽 나누기)는
+  CLAUDE.md Business Rules COO 항목과 CHANGELOG에 적었다
+- **사용자가 확인할 것**: NOAH 영문 주소(공개 자료 기준 `11, Jeongseojin 9-ro, Seo-gu, Incheon 22850`),
+  서명권자 성명·직위·서명/직인 이미지(지금은 빈 서명란), Rotork 로고 유지 여부
+- `generated_coo/`에 검증 중 만든 파일이 남아 있다 (git 제외 폴더 — 지워도 된다)
+
+
 # 정합성 검사 결과 파일을 매번 갱신 (2026-10-13) — 완료
 
 사용자 보고: "정합성 검사 하면 엑셀 결과물이 업데이트가 안되는데?"

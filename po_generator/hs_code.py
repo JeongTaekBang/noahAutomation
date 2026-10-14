@@ -210,6 +210,16 @@ OS_NAME_COLUMN = 'OS name'
 HS_COLUMN = '_hs_code'
 
 
+def is_non_goods(item_name: object) -> bool:
+    """운임·수수료 줄인가 — 물품이 아니라 HS도 원산지도 없다
+
+    `OS name`은 운임 줄에도 제품군이 찍혀 있어 믿을 수 없다(모듈 docstring) —
+    품목명으로만 판정한다. CI/PL은 이 줄을 HS 빈칸으로 싣고, COO는 아예 뺀다
+    (원산지를 증명할 물건이 아니다).
+    """
+    return bool(NON_GOODS_PATTERN.search(_norm_text(item_name)))
+
+
 def default_hs_result(item_name: object, code: str) -> HsResult:
     """거래처 고유 코드를 따로 받지 않은 문서 — 우리 수출신고 코드를 일괄로 쓴다
 
@@ -217,7 +227,7 @@ def default_hs_result(item_name: object, code: str) -> HsResult:
     깔면 운송비 청구 라인에 밸브 부품 세번이 찍힌다 (거래처 판정표에서 운임을 가장
     먼저 걸러내는 것과 같은 이유).
     """
-    if NON_GOODS_PATTERN.search(_norm_text(item_name)):
+    if is_non_goods(item_name):
         return HsResult(code='', rule='운임·수수료(HS 없음)')
     return HsResult(code=code, rule='수출신고 기본값')
 

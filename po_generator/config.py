@@ -142,6 +142,15 @@ HS_LINE_CUSTOMERS: Final[tuple[str, ...]] = ('SECTORIEL',)
 # 되돌리고(안 그러면 200줄이 406 → 505줄로 늘어 쪽수가 갈린다) 초과분은 인쇄 배율로
 # 흡수한다. 기존 열은 한 칸도 건드리지 않는다.
 
+# === Certificate of Origin (원산지증명서) 설정 ===
+# **제조사(NOAH) 원산지 선언서**다 — 샘플(Bifold)이 그 형식이고, 생산 사실을 보증할 수
+# 있는 쪽이 생산자라서다. 회사 정보·선언문·서명란은 템플릿 고정 텍스트(CI의 Seller 블록과
+# 같은 규약)이고, CI Seller(RCK)는 `Exporter:` 줄로 남겨 세관이 CI와 맞춰 볼 수 있게 한다.
+# HS는 CI 규칙(기본 = 수출신고 코드)을 따르되 `HS_LINE_CUSTOMERS`는 **고객 코드 한 장만**
+# 낸다 — COO는 수출신고에 쓰이지 않고 고객의 수입통관에만 쓰여서 CI-HS와 맞아야 한다.
+COO_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "certificate_of_origin.xlsx"
+COO_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_coo"
+
 # === Order Confirmation 설정 ===
 OC_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "order_confirmation.xlsx"
 OC_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_oc"

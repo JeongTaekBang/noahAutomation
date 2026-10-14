@@ -173,11 +173,20 @@ class TestXlwingsAppContext:
                 display_alerts=True,
                 screen_updating=True,
             ) as app:
-                # visible은 App 생성자에 전달됨
-                mock_app_class.assert_called_once_with(visible=True)
+                # visible·add_book은 App 생성자에 전달됨 (add_book 기본값은 기존 동작 그대로)
+                mock_app_class.assert_called_once_with(visible=True, add_book=True)
                 # display_alerts와 screen_updating은 속성으로 설정됨
                 assert mock_app.display_alerts is True
                 assert mock_app.screen_updating is True
+
+    def test_add_book_false_passes_through(self):
+        """페이지 나누기를 읽는 쪽(COO)은 빈 Book1 없이 띄운다 — 있으면 쪽을 다르게 나눈다"""
+        mock_app = MagicMock()
+        mock_app.books = []
+
+        with patch('po_generator.excel_helpers.xw.App', return_value=mock_app) as mock_app_class:
+            with xlwings_app_context(add_book=False):
+                mock_app_class.assert_called_once_with(visible=False, add_book=False)
 
     def test_handles_quit_failure(self):
         """quit 실패 시에도 에러 없이 종료"""

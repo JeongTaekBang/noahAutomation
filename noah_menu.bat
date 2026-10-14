@@ -69,6 +69,7 @@ echo   [4] Final Invoice 생성 (대금 청구)
 echo   [5] Order Confirmation 생성 (OC)
 echo   [6] Commercial Invoice 생성 (CI)
 echo   [7] Packing List 생성 (PL)
+echo   [8] Certificate of Origin 생성 (COO)
 echo.
 echo   [P] 데이터 파일 경로 변경
 echo   [0] 종료
@@ -87,6 +88,7 @@ if "%CHOICE%"=="4" goto create_fi
 if "%CHOICE%"=="5" goto create_oc
 if "%CHOICE%"=="6" goto create_ci
 if "%CHOICE%"=="7" goto create_pl
+if "%CHOICE%"=="8" goto create_coo
 if /i "%CHOICE%"=="po" goto create_po
 if /i "%CHOICE%"=="ts" goto create_ts
 if /i "%CHOICE%"=="pi" goto create_pi
@@ -94,6 +96,7 @@ if /i "%CHOICE%"=="fi" goto create_fi
 if /i "%CHOICE%"=="oc" goto create_oc
 if /i "%CHOICE%"=="ci" goto create_ci
 if /i "%CHOICE%"=="pl" goto create_pl
+if /i "%CHOICE%"=="coo" goto create_coo
 if /i "%CHOICE%"=="P" goto change_path
 if "%CHOICE%"=="0" goto end
 echo [오류] 올바른 번호를 입력하세요.
@@ -462,6 +465,36 @@ echo.
 echo ----------------------------------------
 set /p PL_CONTINUE="다른 Packing List를 생성하시겠습니까? (Y/N): "
 if /i "%PL_CONTINUE%"=="Y" goto pl_input
+goto back
+
+:create_coo
+echo.
+echo ----------------------------------------
+echo   Certificate of Origin 생성 (해외)
+echo ----------------------------------------
+echo.
+echo   DN_ID 입력 (예: DNO-2026-0001)
+echo   xlsx와 PDF가 함께 만들어집니다.
+echo.
+
+:coo_input
+set /p COO_DN_ID="DN_ID 입력: "
+
+if "%COO_DN_ID%"=="" (
+    echo [오류] DN_ID를 입력하세요.
+    goto coo_input
+)
+
+echo.
+echo Certificate of Origin 생성 중...
+echo.
+
+"%PYTHON_PATH%" "%~dp0create_coo.py" %COO_DN_ID%
+
+echo.
+echo ----------------------------------------
+set /p COO_CONTINUE="다른 Certificate of Origin을 생성하시겠습니까? (Y/N): "
+if /i "%COO_CONTINUE%"=="Y" goto coo_input
 goto back
 
 :end

@@ -22,6 +22,7 @@ from po_generator.hs_code import (
     HS_COLUMN,
     default_hs_result,
     enrich_hs_codes,
+    is_non_goods,
     resolve_hs_code,
 )
 
@@ -70,6 +71,16 @@ class TestNonGoods:
     @pytest.mark.parametrize('text', ['FEDEX COST', 'Freight charge', 'DHL COURIER', '운임'])
     def test_운임_표기_변형(self, text):
         assert resolve_hs_code(os_name='SA', item_name=text).code == ''
+
+    @pytest.mark.parametrize('text', ['FEDEX COST', 'fedex cost', 'Freight charge', '운임'])
+    def test_운임_판정은_한_곳이다(self, text):
+        """COO가 운임 줄을 뺄 때 쓰는 판정 = HS 판정이 운임을 비우는 판정"""
+        assert is_non_goods(text)
+        assert default_hs_result(text, '8481.90.0000').code == ''
+
+    @pytest.mark.parametrize('text', ['NA015 230VAC ALS 17SQ', 'HEATER NA015', '', None])
+    def test_물품은_운임이_아니다(self, text):
+        assert not is_non_goods(text)
 
 
 class TestSpares:
