@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-10-14: COO를 수출자(RCK) 선언서로 — 서명 RCK, 제조 NOAH 명시 / 선언문 '5년 보관' 삭제
+
+사용자 결정: 자체 선언이니 서명은 RCK가 하고 생산 공장이 NOAH라고 밝히면 된다. 서류 세트(CI·PL·COO)의
+판매자·서명자가 RCK로 맞고, CI와 같은 RCK 서명 이미지로 완성본 PDF가 나온다(건마다 NOAH 서명 불필요).
+대신 **NOAH가 RCK에 원산지확인서로 원산지를 보증**해 줘야 한다.
+
+- 템플릿: 부제 `Exporter's Declaration of Origin`, Exporter(RCK) → Manufacturer(NOAH) 순, 선언문
+  "Rotork Controls Korea …, as the exporter, … manufactured by NOAH Actuation …", 서명란은 RCK 서명 이미지
+  (Name/Title 칸 삭제), 발행지 Seongnam, 바닥글 RCK. 맺음 블록 끝 41 → 40행
+- 선언문의 '5년 보관' 문구 삭제 — FTA 증명서 규칙이라 이 선언서엔 근거가 없고, 샘플에도 없다
+- 검증: 실 DN 1~51줄 16건 재생성 — 맺음 블록 분할 0 (서명 이미지가 블록과 같이 다음 장으로 넘어간다)
+- 템플릿을 **페이지 나누기 미리 보기 115%**로 저장 — 열면 인쇄영역(파란 테두리)이 바로 보인다 (CI·PL 템플릿과 같은 설정,
+  생성 파일도 따라간다)
+- `docs/원산지증명서_가이드.md` — 배경(상의 COO 건별 비용 대신 RCK 자체 선언서를 업체에 제안, NOAH는 인증수출자
+  아님), 쓸 수 있는 조건, 양식 결정의 이유, 상의 COO 항목 대응표와 보완 후보(인보이스 날짜·출항일·포장)
+
+---
+
 ## 2026-10-14: 원산지증명서(COO) — `create_coo.py`, 메뉴 [해외] [8] / 전체 메뉴 [O]
 
 사용자 요청: CI·PL처럼 원산지증명서를 출력해야 할 일이 생길 것 같다 (샘플: Bifold 'Certificate of Country

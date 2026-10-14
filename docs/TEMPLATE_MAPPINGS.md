@@ -361,9 +361,10 @@ DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지�
 **생성기**: `coo_generator.py` (xlwings) → `DocumentService.generate_coo` → **xlsx + PDF**
 **데이터 소스**: DN_해외 + SO_해외 + Customer_해외 (CI와 같은 `load_dn_export_data`, `Customer country` 추가)
 
-> **제조사(NOAH) 원산지 선언서**다 (2026-10-14 — 샘플: Bifold 'Certificate of Country of Origin').
-> 회사 정보(Manufacturer·Exporter)·선언문·서명란은 **템플릿 고정 텍스트**다. CI Seller(RCK)는 `Exporter:`
-> 줄로 남겨 세관이 CI와 맞춰 보게 한다. CI·PL과 달리 **품목 행에 병합이 없다** — 행 높이는 자동 맞춤.
+> **수출자(RCK) 원산지 선언서**다 — 선언·서명은 RCK(CI의 Seller), 생산 공장 NOAH는 Manufacturer로 밝힌다
+> (2026-10-14 — 샘플: Bifold 'Certificate of Country of Origin'). 근거는 NOAH가 RCK에 내주는 원산지확인서.
+> 회사 정보(Exporter·Manufacturer)·선언문·서명 이미지는 **템플릿 고정**이다. CI·PL과 달리 **품목 행에 병합이
+> 없다** — 행 높이는 자동 맞춤. 왜 이런 양식인지(상의 COO 대체 제안)는 `docs/원산지증명서_가이드.md`.
 
 ### 고정 필드 (Header) — 값 칸은 C:F 병합의 좌상단
 
@@ -371,7 +372,7 @@ DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지�
 |----|--------|-------------|
 | C7 | Certificate No. | `COO-{DN_ID}` |
 | C8 | Date of Issue | 출고일 (없으면 오늘) — CI Invoice Date와 같은 규칙 |
-| C10:C14 | Manufacturer / Exporter | 템플릿 고정 (NOAH 2줄 / RCK 3줄) |
+| C10:C14 | Exporter / Manufacturer | 템플릿 고정 (RCK 3줄 / NOAH 2줄) |
 | C15:C17 | Consignee | Customer_해외.Bill to 1~3 (빈 줄 건너뜀, 다 비면 고객명) |
 | C19 | Commercial Invoice No. | DN_ID (CI Invoice No.와 같다) |
 | C20 | Order No. | 표에 실린 SO_ID (중복 없이, 콤마) |
@@ -405,8 +406,8 @@ Total 위치(D28)를 먼저 확인한다.
 |-------------|------|
 | 28 | `Total` (D) + `=SUM(F)` |
 | 29 | `*** END OF LIST ***` — 뒤에 품목을 덧붙이지 못하게 |
-| 31~32 | STATEMENT + 선언문 (5년 보관 문구 포함) |
-| 34~41 | For and on behalf of NOAH · Place of Issue · 서명/직인 자리 · Authorised Signature · Name · Title |
+| 31~32 | STATEMENT + 선언문 (샘플 문구 그대로 — 회사명만 NOAH. 보관 기간을 약속하지 않는다) |
+| 34~40 | For and on behalf of Rotork Controls Korea · Place of Issue(Seongnam) · RCK 서명 이미지(`sign_rotork.png`, A36) |
 
 **맺음 블록(Total~Title)은 한 장에 모은다** — 자동 나누기가 그 안에 걸리면 마지막 품목 행 앞에 수동
 나누기를 넣는다 (`_keep_closing_block`). 그래서 템플릿 인쇄는 **폭만 1장, 높이 자동**이다 — 높이까지

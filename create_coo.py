@@ -4,7 +4,7 @@ Certificate of Origin(원산지증명서) 생성기
 ==========================================
 
 DN_ID를 입력하면 NOAH_SO_PO_DN.xlsx의 DN_해외 시트에서 해당 데이터를 읽어
-제조사(NOAH) 원산지 선언서를 xlsx + PDF로 생성합니다.
+수출자(RCK) 원산지 선언서(제조사 NOAH 명시)를 xlsx + PDF로 생성합니다.
 
 사용법:
     python create_coo.py DNO-2026-0001              # 단일 생성
@@ -108,7 +108,7 @@ Certificate of Origin(원산지증명서) 생성기
 ==========================================
 
 NOAH_SO_PO_DN.xlsx의 DN_해외 시트에서 데이터를 읽어
-제조사(NOAH) 원산지 선언서를 xlsx + PDF로 생성합니다.
+수출자(RCK) 원산지 선언서(제조사 NOAH 명시)를 xlsx + PDF로 생성합니다.
 """
 
     epilog = """

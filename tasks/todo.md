@@ -3,7 +3,8 @@
 사용자 요청: CI·PL처럼 원산지증명서를 [해외] [8]로 생성 → 업체·품목 정보가 PDF로. 샘플 = Bifold
 'Certificate of Country of Origin'. 합의:
 - 발행 = **NOAH Actuation**(제조사 선언). CI Seller가 RCK라 `Exporter:` 줄로 RCK를 남긴다
-- 양식은 샘플 형식 + 증명서 관행(Certificate No.·Invoice 연결·운송·END OF LIST·서명자/발행지·5년 보관)
+- 양식은 샘플 형식 + 증명서 관행(Certificate No.·Invoice 연결·운송·END OF LIST·서명자/발행지)
+  (선언문의 '5년 보관' 문구는 사용자 지시로 뺐다 — FTA 증명서 규칙이라 이 선언서엔 근거가 없고 NOAH가 기간을 약속하게 된다)
 - Serial Nos. 제외, Origin Criterion 제외, **Line = SO Line item**, 출력 **xlsx + PDF 둘 다**
 - 메뉴: `noah_menu.bat` [8], `create_po.bat` [O]
 
@@ -25,7 +26,8 @@
 - 페이지 나누기 함정 3개(고정 배율 열 밀림 / 첫 열거 부분 결과 / Book1 인스턴스의 다른 쪽 나누기)는
   CLAUDE.md Business Rules COO 항목과 CHANGELOG에 적었다
 - **사용자가 확인할 것**: NOAH 영문 주소(공개 자료 기준 `11, Jeongseojin 9-ro, Seo-gu, Incheon 22850`),
-  서명권자 성명·직위·서명/직인 이미지(지금은 빈 서명란), Rotork 로고 유지 여부
+  NOAH → RCK 원산지확인서 발급 협의
+- (후속) 발행을 **RCK 수출자 선언 + 제조 NOAH 명시**로 바꿨다 — 서명은 CI와 같은 RCK 서명 이미지, 로고 Rotork 그대로
 - `generated_coo/`에 검증 중 만든 파일이 남아 있다 (git 제외 폴더 — 지워도 된다)
 
 

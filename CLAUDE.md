@@ -35,7 +35,7 @@ python create_oc.py SOO-2026-0001 --mail    # 확인 없이 메일 초안
 python create_oc.py SOO-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
 python create_ci.py DNO-2026-0001        # Commercial invoice (라인별 HS CODE, SECTORIEL은 고객용 한 장 더)
 python create_pl.py DNO-2026-0001        # Packing list (동일)
-python create_coo.py DNO-2026-0001       # Certificate of Origin — NOAH 원산지 선언서 (xlsx + PDF)
+python create_coo.py DNO-2026-0001       # Certificate of Origin — RCK 수출자 원산지 선언서, 제조 NOAH (xlsx + PDF)
 
 # DN 출고기록 자동 입력 (출고리스트 → DN_국내)
 python create_dn.py P08                   # 미리보기 → y/N → 워크북에 추가
@@ -166,7 +166,7 @@ Reconciliation layer:
 | `dashboard_dist/build_portable_dashboard.py` | 대시보드 배포판 — `dashboard.py`를 **무수정으로** 담고 `po_generator/`·`sql/`을 동봉한다. 예전 `build_dist.py`는 import를 문자열 치환해 standalone 파일을 만들었는데, import 한 줄이 바뀌자 패턴이 안 맞아 빌드가 죽었고 배포본이 4개월 낡았다 — 그래서 재작성을 아예 없앴다. `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다(import만으로는 트리밍 사고를 못 잡는다). pyarrow는 flight/parquet/dataset/substrait를 잘라내되 `arrow_compute`는 남긴다 (streamlit이 로드한다 — 실측) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
 | `po_generator/hs_code.py` | SECTORIEL 라인별 HS CODE 판정 — 규칙 사다리(운임 → 모델번호 → 품목텍스트 → OS 제품군 → 미매칭)와 고객 제공 코드표. **COM 없는 순수 판정**이라 실데이터 전수로 테스트한다(`dn_recorder`/`dn_writer`를 가른 것과 같은 이유). 결과는 `_hs_code` **열**로 items_df에 붙는다 — 생성기가 Model number로 재정렬하므로 리스트로 넘기면 코드가 남의 품목에 붙는다(8자리 숫자라 눈으로 안 보인다). 새 스페어 코드는 `SPARE_HS_BY_MODEL`에 한 줄 |
-| `po_generator/coo_generator.py` | 원산지증명서(COO) — **제조사(NOAH) 원산지 선언서**를 DN_해외 한 건에서 xlsx + PDF로. 값 정하기(`build_coo_lines`/`build_coo_header`)는 COM 없는 순수 함수, Excel 쪽은 값 쓰기·행 높이·**맺음 블록 한 장 유지**(`_keep_closing_block`). 셀 매핑은 `docs/TEMPLATE_MAPPINGS.md` COO 절, 규칙은 아래 Business Rules |
+| `po_generator/coo_generator.py` | 원산지증명서(COO) — **수출자(RCK) 원산지 선언서**(제조사 NOAH 명시)를 DN_해외 한 건에서 xlsx + PDF로. 값 정하기(`build_coo_lines`/`build_coo_header`)는 COM 없는 순수 함수, Excel 쪽은 값 쓰기·행 높이·**맺음 블록 한 장 유지**(`_keep_closing_block`). 셀 매핑은 `docs/TEMPLATE_MAPPINGS.md` COO 절, 규칙은 아래 Business Rules |
 | `po_generator/mailer.py` | 고객 메일 발송 — 고객 마스터에서 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **첨부는 여러 장일 수 있다** — `as_paths()`가 단건/복수를 흡수하고 `export_pdfs()`가 Excel **1회 기동**으로 N장을 변환한다(8장 실측 24초; 장마다 띄우면 그 두 배). **조인키가 국내/해외로 갈린다**: `find_recipient()`는 사업자번호로 `Customer_국내`, `find_recipient_overseas()`는 고객코드로 `Customer_해외` — 둘 다 `_build_recipient()` 하나를 공유한다. **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
 | `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`add_mail_arguments`/`prepare_mail_options`/`confirm_recipient`(수신자 조회→표시→y/N 관문)/`collect_customer_po`/`format_mail_date`. `create_ts.py`·`delivery_status.py`·`create_oc.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다). 어느 마스터를 읽을지는 `MailOptions.loader`/`sheet_label` **짝**으로 주입 — 기본은 국내, OC만 해외. **`loader` 기본값에 함수를 박지 말 것**: 클래스 정의 시점에 굳어 모듈 속성 교체(테스트 monkeypatch)가 무시된다 |
 | `docs/ARCHITECTURE.md` | Detailed system design and data flow diagrams |
@@ -176,6 +176,7 @@ Reconciliation layer:
 | `docs/CHANGELOG.md` | 버전별 변경 이력 |
 | `docs/TEMPLATE_MAPPINGS.md` | Excel 템플릿 셀 매핑 — 템플릿/generator 수정 시 참고 |
 | `docs/매입대사_가이드.md` | 운영자 관점 시각 가이드 — 데이터 흐름·합계 블록 해석·월별 액션 |
+| `docs/원산지증명서_가이드.md` | COO **배경과 쓸 수 있는 조건** — 상의 COO(건별 비용) 대신 RCK 자체 선언서를 업체에 제안하려고 만들었다(NOAH는 인증수출자 아님). 양식 결정마다 그 배경에서 나온 이유, 상의 COO 항목 대응표, 보완 후보(인보이스 날짜·출항일·포장), 운영 순서. **COO 양식을 고치기 전에 읽을 것** |
 | `docs/정합성검사_가이드.md` | 정합성 검사 운영 가이드 — 언제 돌리나·결과 읽는 법·검사별 고치는 법·동기화 키 중복 에러·**일부러 안 보는 것(측정 후 제외/보류 후보)**. '검사 목록' 표 = `CHECKS` (`tests/test_integrity.py`가 대조 — 검사를 더하면 표에도 한 줄) |
 | `po_generator/snapshot.py` | SnapshotEngine — 월별 마감, Variance 추적 |
 | `po_generator/db_schema.py` | SQLite DDL, snapshot tables (`ob_snapshot`, `ob_snapshot_meta`), `_sync_runs` + `_sync_log` v2 (record당 1행 + JSON, actor/host/sync_id/snapshot 포함), `fx(currency, ym, rate)`, **`v_dn_revenue`(라인 매출 산식) + `v_dn_by_month`(인식 필터+월별 합산) 뷰 = DN 매출의 단일 정의**. 뷰는 `sync_db.py`가 매번 DROP+CREATE로 갱신. `SYNC_LOG_CHANGE_TYPES`·`KNOWN_SYNC_SHEETS`도 여기가 소유 |
@@ -283,9 +284,14 @@ Reconciliation layer:
   `G16`은 복수 PO 결합이라 G를 89자로 부풀렸다). 짜낼 수 있는 건 3~5자인데 필요한 건
   12자라 얻는 것도 없었다. 배율로 흡수하면 열 폭이 그대로라 **줄바꿈·행 높이가 원래
   서식과 완전히 같다** (실측: 36행 높이 합 1090.05pt 동일)
-- **COO(원산지증명서)는 제조사(NOAH) 원산지 선언서다** (2026-10-14 사용자 지시 — 샘플은 Bifold
-  'Certificate of Country of Origin'). 발행·서명은 NOAH, CI Seller(RCK)는 `Exporter:` 줄로만 남긴다
-  (세관이 CI와 맞춰 보는 연결고리). 회사 정보·선언문·서명란은 **템플릿 고정 텍스트**다.
+- **COO(원산지증명서)는 수출자(RCK) 원산지 선언서다 — 생산 공장 NOAH를 Manufacturer로 밝힌다**
+  (2026-10-14 사용자 결정 — 샘플은 Bifold 'Certificate of Country of Origin'). 자체 선언이라 서류 세트
+  (CI·PL·COO)의 판매자·서명자를 RCK로 맞추고, CI와 같은 RCK 서명 이미지로 완성본 PDF를 낸다. 수출자가
+  생산자가 아니므로 **NOAH가 RCK에 원산지확인서(건별 또는 포괄)로 원산지를 보증**해 줘야 하고 RCK가 보관한다
+  (처음엔 NOAH 발행으로 만들었다가 바꿨다). 회사 정보·선언문·서명은 **템플릿 고정 텍스트**이고, 선언문은
+  샘플 문구 그대로다 — FTA식 '5년 보관' 같은 약속 문구를 더하지 않는다.
+  **배경**: 상공회의소 COO를 건별 비용으로 받는 대신 이 자체 선언서를 업체에 제안하는 것이다 — 업체가 받아 줘야
+  쓸 수 있고, 양식은 업체가 늘 받던 상의 COO의 정보를 담는 방향으로 고친다 (`docs/원산지증명서_가이드.md`).
   - **Line은 SO의 `Line item`이고 표에 Order No.(SO_ID)가 짝으로 붙는다** — DN에 SO가 여럿이면 번호가
     겹친다 (해외 DN 196건 중 35건, 그 35건 전부. `(SO_ID, Line)`은 전수 유일, `(Customer PO, Line)`은 1건 충돌)
   - **운임 줄은 싣지 않는다** (`hs_code.is_non_goods` — CI의 HS 빈칸 판정과 같은 함수). 수량을 못 읽으면

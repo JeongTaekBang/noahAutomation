@@ -210,9 +210,13 @@ class TestTemplateShape:
         assert ws.print_title_rows.replace('$', '') == f'{coo.HEADER_ROW}:{coo.HEADER_ROW}'
 
     def test_맺음_블록_끝이_템플릿_마지막_행(self, ws):
-        """생성기는 이 행까지를 한 장에 모은다 — 템플릿 끝이 바뀌면 상수도 같이"""
-        assert ws[f'A{coo.TEMPLATE_LAST_ROW}'].value == 'Title:'
+        """생성기는 이 행까지를 한 장에 모은다 — 템플릿 끝이 바뀌면 상수도 같이.
+        서명 이미지는 그 블록 안(For and on behalf 아래 ~ 마지막 행)에 걸려 있어야 같이 넘어간다"""
         assert ws.print_area.replace('$', '').endswith(f'F{coo.TEMPLATE_LAST_ROW}')
+        on_behalf = next(r for r in range(1, coo.TEMPLATE_LAST_ROW + 1)
+                         if str(ws[f'A{r}'].value or '').startswith('For and on behalf of'))
+        sign_rows = [img.anchor._from.row + 1 for img in ws._images]  # 0-based → 1-based
+        assert any(on_behalf < r <= coo.TEMPLATE_LAST_ROW for r in sign_rows)
 
     def test_폭만_한_장에_맞추고_높이는_자동(self, ws):
         """고정 배율은 프린터마다 인쇄 폭이 달라 열이 밀린다(doPDF 100% → Qty 열이 다음 장).
@@ -221,6 +225,11 @@ class TestTemplateShape:
         assert ws.page_setup.fitToWidth == 1
         assert ws.page_setup.fitToHeight == 0
 
+    def test_열면_인쇄영역이_보인다(self, ws):
+        """CI·PL 템플릿과 같은 '페이지 나누기 미리 보기' — 파란 테두리로 인쇄영역이 바로 보인다.
+        생성 파일은 템플릿 사본이라 같이 따라간다"""
+        assert ws.sheet_view.view == 'pageBreakPreview'
+
     def test_기본_글꼴이_Arial_10(self, ws):
         """빈 칸의 글꼴이 행 높이 하한을 정한다 — 테마 글꼴이면 한글 Excel에서 맑은 고딕 11
         (16.5pt)이 되어 헤더 행이 전부 18.5pt로 부풀었다 (실측)"""
@@ -228,13 +237,20 @@ class TestTemplateShape:
         assert (normal.name, normal.sz) == ('Arial', 10)
 
 
-    def test_발행_주체는_제조사_NOAH(self, ws):
-        """2026-10-14 결정 — 제조사 원산지 선언서. RCK는 Exporter 줄로만 남는다"""
+    def test_선언은_수출자_RCK_생산은_NOAH(self, ws):
+        """2026-10-14 결정 — RCK(CI의 Seller)가 선언·서명하고 생산 공장 NOAH를 밝힌다"""
         values = [c.value for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
-        assert ws['C10'].value == 'NOAH Actuation Co., Ltd.'
-        assert ws['A12'].value == 'Exporter:'
-        assert any(v.startswith('For and on behalf of NOAH Actuation') for v in values)
-        assert any(v.startswith('NOAH Actuation Co., Ltd., as the manufacturer') for v in values)
+        assert (ws['A10'].value, ws['C10'].value) == ('Exporter:', 'Rotork Controls Korea Co., Ltd.')
+        assert (ws['A13'].value, ws['C13'].value) == ('Manufacturer:', 'NOAH Actuation Co., Ltd.')
+        assert any(v.startswith('For and on behalf of Rotork Controls Korea') for v in values)
+        statement = next(v for v in values if v.startswith('Rotork Controls Korea Co., Ltd., as the exporter'))
+        assert 'manufactured by NOAH Actuation Co., Ltd.' in statement
+
+    def test_선언문은_보관_기간을_약속하지_않는다(self, ws):
+        """샘플(Bifold) 문구 그대로 — FTA식 '5년 보관'은 사용자 지시로 뺐다 (2026-10-14)"""
+        statement = next(c.value for row in ws.iter_rows() for c in row
+                         if isinstance(c.value, str) and 'as the exporter' in c.value)
+        assert 'year' not in statement.lower()
 
 
 class TestClosingBlockSplit:

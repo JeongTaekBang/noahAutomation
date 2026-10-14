@@ -2,8 +2,9 @@
 Certificate of Origin 생성 모듈 (xlwings 기반)
 ================================================
 
-DN_해외 한 건으로 **제조사(NOAH) 원산지 선언서**를 만든다. 양식(회사 정보·선언문·
-서명란)은 템플릿 파일이 소유하고, 생성기는 값만 쓴다.
+DN_해외 한 건으로 **수출자(RCK) 원산지 선언서**를 만든다 — 선언·서명은 RCK(CI의 Seller),
+생산 공장 NOAH는 Manufacturer로 밝힌다. 근거는 NOAH가 RCK에 내주는 원산지확인서다.
+양식(회사 정보·선언문·서명 이미지)은 템플릿 파일이 소유하고, 생성기는 값만 쓴다.
 
 CI·PL과 다른 점:
 - 품목 행에 **병합이 없다**. 그래서 행 높이는 Excel 자동 맞춤이 그대로 먹고,
@@ -64,9 +65,9 @@ ITEM_HEADERS = ('Order No.', 'Line', 'Item No.', 'Model No. / Description', 'HS 
 TOTAL_LABEL_COL = 'D'
 QTY_COL = 'F'
 
-# 템플릿 마지막 행(서명 블록의 'Title:') — 품목이 늘면 그만큼 아래로 밀린다.
+# 템플릿 마지막 행(서명 이미지 자리의 끝) — 품목이 늘면 그만큼 아래로 밀린다.
 # Total부터 여기까지가 '맺음 블록'이라 페이지가 갈리면 안 된다 (`_keep_closing_block`).
-TEMPLATE_LAST_ROW = 41
+TEMPLATE_LAST_ROW = 40
 
 # 선적항 — CI의 From(B14)과 같은 값
 PORT_OF_LOADING = 'INCHEON, KOREA'
@@ -351,7 +352,7 @@ def closing_block_split(breaks: list[int], last_item_row: int, block_end_row: in
     Args:
         breaks: Excel 페이지 나누기 행 번호들 (그 행이 새 페이지의 첫 행)
         last_item_row: 마지막 품목 행
-        block_end_row: 맺음 블록 마지막 행 (서명란 'Title:')
+        block_end_row: 맺음 블록 마지막 행 (서명 이미지 자리의 끝)
 
     Returns:
         새 페이지가 Total 행부터 서명란 사이에서 시작하면 True — Total부터 시작하는
