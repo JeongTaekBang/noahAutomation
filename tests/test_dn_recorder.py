@@ -805,6 +805,102 @@ def test_일부만_기록돼_있으면_나머지를_넣는다():
     assert qty_map(plan) == {1: 7}
 
 
+def _late_row_case():
+    """2026-10 SOD-2026-0357 모양 — 본품(L1)을 기록한 뒤 같은 날짜로 선급검사 비용(L2) 행이
+    출고리스트에 붙었다"""
+    delivery = make_delivery([
+        {R.COL_INVOICE_AMOUNT: 800_000},
+        {R.COL_INVOICE_AMOUNT: 300_000, R.COL_JOB_NO: 'L260100-1R'},
+    ])
+    so = make_so([
+        {'Line item': 1, 'Item qty': 10},
+        {'Line item': 2, 'Item qty': 1, 'Item name': '선급검사 비용'},
+    ])
+    po = make_po([
+        {'Line item': 1, 'Item qty': 10, 'Total ICO': 800_000},
+        {'Line item': 2, 'Item qty': 1, 'Total ICO': 300_000, 'Item name': '선급검사 비용'},
+    ])
+    return delivery, so, po
+
+
+def test_기록된_날에_빠진_라인은_새_DN으로_넣는다():
+    """(SO_ID, 출고일)만 보고 건너뛰면 뒤늦게 붙은 행의 라인이 영영 안 들어간다"""
+    dn = make_dn([{'Line item': 1, 'Qty': 10, '출고일': SHIP}])
+
+    plan = run(*_late_row_case(), dn)
+
+    assert [(l.dn_id, l.line_item, l.qty) for l in plan.lines] == [('DND-2026-0002', 2, 1)]
+    assert not plan.reviews and not plan.skipped
+    assert [r.reason for r in plan.topups] == ['빠진 라인 추가']
+    assert 'DND-2026-0001' in plan.topups[0].detail
+
+
+def test_빠진_라인을_넣은_뒤_다시_돌리면_건너뛴다():
+    dn = make_dn([
+        {'Line item': 1, 'Qty': 10, '출고일': SHIP},
+        {'DN_ID': 'DND-2026-0002', 'Line item': 2, 'Qty': 1, '출고일': SHIP},
+    ])
+
+    plan = run(*_late_row_case(), dn)
+
+    assert not plan.lines and not plan.topups
+    assert [r.reason for r in plan.skipped] == ['이미 입력됨']
+
+
+def test_빠진_라인이_다른_날로_기록돼_있으면_넣지_않는다():
+    dn = make_dn([
+        {'Line item': 1, 'Qty': 10, '출고일': SHIP},
+        {'Line item': 2, 'Qty': 1, '출고일': dt.datetime(2026, 8, 7)},
+    ])
+
+    plan = run(*_late_row_case(), dn)
+
+    assert not plan.lines
+    assert [r.reason for r in plan.skipped] == ['이미 입력됨']
+
+
+def test_기록된_날의_수량만_다른_라인은_건드리지_않는다():
+    """사람이 고쳐 적은 것일 수 있다 — 라인째 빠진 것만 넣는다"""
+    delivery = make_delivery([{}])
+    so = make_so([{'Line item': 1, 'Item qty': 10}])
+    po = make_po([{'Line item': 1, 'Item qty': 10}])
+    dn = make_dn([{'Line item': 1, 'Qty': 5, '출고일': SHIP}])
+
+    plan = run(delivery, so, po, dn)
+
+    assert not plan.lines
+    assert [r.reason for r in plan.skipped] == ['이미 입력됨']
+
+
+def test_기록된_날에_없는_부속_라인은_근거가_없어_넣지_않는다():
+    """PO에 따로 없는 라인은 공장 계산서로 확인이 안 된다 (PO는 부속을 본품에 합쳐 적는다)"""
+    delivery = make_delivery([{}])
+    so = make_so([
+        {'Line item': 1, 'Item qty': 10},
+        {'Line item': 2, 'Item qty': 2, 'Item name': '부싱가공'},
+    ])
+    po = make_po([{'Line item': 1, 'Item qty': 10}])
+    dn = make_dn([{'Line item': 1, 'Qty': 10, '출고일': SHIP}])
+
+    plan = run(delivery, so, po, dn)
+
+    assert not plan.lines
+    assert [r.reason for r in plan.skipped] == ['이미 입력됨']
+
+
+def test_기록된_날은_검증에_걸려도_확인필요에_올리지_않는다():
+    """사람이 이미 적은 출고다 — 빠진 라인을 못 찾으면 예전처럼 '이미 입력됨'"""
+    delivery = make_delivery([{R.COL_INVOICE_AMOUNT: 900_000}])     # PO ICO 800,000
+    so = make_so([{'Line item': 1, 'Item qty': 10}])
+    po = make_po([{'Line item': 1, 'Item qty': 10}])
+    dn = make_dn([{'Line item': 1, 'Qty': 10, '출고일': SHIP}])
+
+    plan = run(delivery, so, po, dn)
+
+    assert not plan.lines and not plan.reviews
+    assert [r.reason for r in plan.skipped] == ['이미 입력됨']
+
+
 # === 채번 ==================================================================
 
 def test_DN_ID는_출고리스트_1행당_1개이고_연번이다():

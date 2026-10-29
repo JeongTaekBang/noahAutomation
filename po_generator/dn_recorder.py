@@ -40,6 +40,8 @@ PO 기준으로만 뽑으면 부속 라인이 통째로 빠진다 (2026-03~08 �
 ------
 `(SO_ID, 출고일)`이 이미 `DN_국내`에 있으면 건너뛴다. 같은 기간을 두 번 돌려도 중복 입력되지
 않는다 — 출고리스트는 월중에 갱신되며 여러 번 실행하는 것이 정상 사용 방식이다.
+단, 그날 기록에 **라인째 빠진** 것이 공장 계산서에 있으면 그 라인만 새 DN으로 넣는다
+(`_unrecorded_lines` — 같은 날 출고에 행이 뒤늦게 붙는다, 2026-10 SOD-2026-0357 선급검사 비용).
 """
 
 from __future__ import annotations
@@ -115,6 +117,7 @@ class Plan:
     lines: list[DnLine] = field(default_factory=list)
     reviews: list[Review] = field(default_factory=list)
     skipped: list[Review] = field(default_factory=list)   # 이미 입력된 건
+    topups: list[Review] = field(default_factory=list)    # 기록된 출고일에 빠진 라인을 넣은 건
 
     @property
     def dn_ids(self) -> list[str]:
@@ -347,21 +350,30 @@ def build_plan(
                 f"출고리스트의 '{COL_SHIP_DATE}'가 비어 있습니다"))
             continue
 
-        if (so_id, ship_date.normalize()) in already:
+        # 이미 기록된 날도 끝까지 따져 그날 DN에 **빠진 라인**을 찾는다. 출고리스트는 같은 날
+        # 출고에 행이 뒤늦게 붙기도 한다 — 2026-10 SOD-2026-0357/0902: 10/26 본품(L1~L3)을
+        # 기록한 뒤 같은 날짜로 선급검사 비용(L4) 행이 붙었는데, (SO_ID, 출고일)만 보고 통째로
+        # 건너뛰어 L4가 영영 안 들어갔다. 따지다 걸리는 것은 사람이 이미 적은 출고라 확인
+        # 목록에 올리지 않는다 — '이미 입력됨'으로 적어 두고, 빠진 라인이 나올 때만 옮긴다.
+        recorded_ids = already.get((so_id, ship_date.normalize()))
+        if recorded_ids is not None:
+            recorded_at = len(plan.skipped)
             plan.skipped.append(Review(
                 so_id, ship_date, customer, '이미 입력됨',
                 f"DN_국내에 {so_id} / {ship_date:%Y-%m-%d} 행이 이미 있습니다"))
-            continue
+            reviews = skipped = []          # 이 출고에서 나오는 사유는 버린다
+        else:
+            reviews, skipped = plan.reviews, plan.skipped
 
         if so_id not in so_lines:
-            plan.reviews.append(Review(
+            reviews.append(Review(
                 so_id, ship_date, customer, 'SO 없음',
                 f"SO_국내에 {so_id}가 없습니다"))
             continue
 
         po_rows = po_by_so.get(so_id)
         if po_rows is None or po_rows.empty:
-            plan.reviews.append(Review(
+            reviews.append(Review(
                 so_id, ship_date, customer, 'PO 없음',
                 f"PO_국내에 {so_id}가 없습니다"))
             continue
@@ -369,14 +381,14 @@ def build_plan(
         invoiced_rows = po_rows[po_rows['_status'] == invoiced_now]
         if invoiced_rows.empty:
             statuses = ', '.join(sorted(set(po_rows['_status']))) or '(없음)'
-            plan.reviews.append(Review(
+            reviews.append(Review(
                 so_id, ship_date, customer, f'{invoiced_now} 없음',
                 f"PO 상태가 {statuses} — 공장 계산서가 이 기간에 안 잡혔습니다"))
             continue
 
         if ship_date.normalize() in corrections.get(so_id, ()):
             # 출고가 아니라 단가 정정 행 — 금액은 첫 출고에 합산돼 이미 반영된다
-            plan.skipped.append(Review(
+            skipped.append(Review(
                 so_id, ship_date, customer, '단가 정정 행',
                 '출고가 아니라 금액만 정정한 행입니다 (계산서금액은 첫 출고에 합산)'))
             continue
@@ -397,7 +409,7 @@ def build_plan(
                     f"출고리스트에 {ship_dates[so_id]}개 날짜인데 "
                     + SPLIT_FAILURE_DETAIL.get(unresolved.get(so_id),
                                                SPLIT_FAILURE_DETAIL['no_split']))
-                plan.reviews.append(Review(
+                reviews.append(Review(
                     so_id, ship_date, customer, reason, detail))
                 continue
             # 배정은 PO 전 라인으로 하고(금액이 맞아야 하므로), DN에 쓸 때 SO에 없는
@@ -409,7 +421,7 @@ def build_plan(
                 invoiced_rows['Total ICO'], errors='coerce').fillna(0).sum())
             inv_amt = float(invoice_total.get(so_id, 0) or 0)
             if abs(ico_sum - inv_amt) >= AMOUNT_TOLERANCE:
-                plan.reviews.append(Review(
+                reviews.append(Review(
                     so_id, ship_date, customer, '금액 불일치',
                     f"PO ICO 합 {ico_sum:,.0f} vs 계산서금액 {inv_amt:,.0f} "
                     f"(차이 {ico_sum - inv_amt:,.0f})"))
@@ -424,17 +436,25 @@ def build_plan(
                 else _partial_shipment_lines(invoiced_rows, so_lines[so_id])
             )
 
+        if recorded_ids is not None:
+            on_day = recorded_maps.get(so_id, {}).get(ship_date.normalize(), {})
+            qty_by_line = _unrecorded_lines(
+                qty_by_line, on_day, set(invoiced_rows['_line']),
+                po_rows, invoiced, shipped, so_id)
+            if not qty_by_line:
+                continue                    # 그날 기록에 빠진 게 없다 — '이미 입력됨' 그대로
+
         if not qty_by_line:
             # 잔량이 0 = 이미 다 나갔다는 뜻이지 확인할 거리가 아니다. 사람이 출고일을
             # 하루 이틀 다르게 적어 두면 이 경로로 온다 (2026-07 SOD-2026-0790:
             # 출고리스트 7/29, DN 7/27). 확인 목록에 올리면 헛경보만 쌓인다.
             done = _recorded_summary(recorded_maps, so_id)
             if done:
-                plan.skipped.append(Review(
+                skipped.append(Review(
                     so_id, ship_date, customer, '이미 출고 완료',
                     f"잔량이 없습니다 — 기록된 출고: {done}"))
             else:
-                plan.reviews.append(Review(
+                reviews.append(Review(
                     so_id, ship_date, customer, '기록할 라인 없음',
                     '대상 라인이 모두 취소/보류이거나 SO에 없습니다'))
             continue
@@ -447,7 +467,7 @@ def build_plan(
         recorded = _recorded_date(recorded_maps, so_id, qty_by_line)
         if recorded and not _billed_beyond_dn(
                 po_rows, invoiced, shipped, so_id, qty_by_line):
-            plan.skipped.append(Review(
+            skipped.append(Review(
                 so_id, ship_date, customer, '이미 입력됨(다른 출고일)',
                 f"라인·수량이 똑같은 출고가 {recorded}에 이미 기록돼 있습니다"))
             continue
@@ -465,6 +485,13 @@ def build_plan(
             dn_seq += 1
             if group:
                 group_dn[group] = dn_id
+        if recorded_ids is not None:
+            plan.skipped.pop(recorded_at)
+            plan.topups.append(Review(
+                so_id, ship_date, customer, '빠진 라인 추가',
+                f"{ship_date:%Y-%m-%d} 기록({', '.join(recorded_ids) or 'DN_ID 없음'}: "
+                f"{_line_labels(on_day)})에 없는 {_line_labels(qty_by_line)}를 "
+                f"새 DN으로 추가합니다 ({dn_id})"))
         for line_item in sorted(qty_by_line):
             plan.lines.append(DnLine(
                 dn_id=dn_id,
@@ -1013,16 +1040,21 @@ def _po_by_order(po_df: pd.DataFrame, status_col: pd.Series | None
     return {so_id: grp for so_id, grp in df.groupby('SO_ID')}
 
 
-def _existing_shipments(dn_df: pd.DataFrame) -> set[tuple[str, pd.Timestamp]]:
-    """이미 기록된 (SO_ID, 출고일) — 멱등성 판정용"""
+def _existing_shipments(dn_df: pd.DataFrame
+                        ) -> dict[tuple[str, pd.Timestamp], list[str]]:
+    """이미 기록된 (SO_ID, 출고일) → 그 날의 DN_ID들 — 멱등성 판정용"""
+    out: dict[tuple[str, pd.Timestamp], list[str]] = {}
     if 'SO_ID' not in dn_df.columns or '출고일' not in dn_df.columns:
-        return set()
+        return out
     dates = pd.to_datetime(dn_df['출고일'], errors='coerce')
-    return {
-        (str(so_id).strip(), date.normalize())
-        for so_id, date in zip(dn_df['SO_ID'], dates)
-        if pd.notna(so_id) and pd.notna(date)
-    }
+    dn_ids = dn_df['DN_ID'] if 'DN_ID' in dn_df.columns else pd.Series(index=dn_df.index)
+    for so_id, date, dn_id in zip(dn_df['SO_ID'], dates, dn_ids):
+        if pd.isna(so_id) or pd.isna(date):
+            continue
+        ids = out.setdefault((str(so_id).strip(), date.normalize()), [])
+        if pd.notna(dn_id) and str(dn_id).strip() not in ids:
+            ids.append(str(dn_id).strip())
+    return out
 
 
 ShipLog = dict[tuple[str, int], list[tuple[pd.Timestamp, int]]]
@@ -1094,6 +1126,34 @@ def _recorded_date(maps: dict[str, dict[pd.Timestamp, dict[int, int]]],
         if recorded == qty_by_line:
             return f"{date:%Y-%m-%d}"
     return ''
+
+
+def _unrecorded_lines(qty_by_line: dict[int, int], on_day: dict[int, int],
+                      billed_lines: set[int], po_rows: pd.DataFrame,
+                      invoiced: set[str], shipped: ShipLog,
+                      so_id: str) -> dict[int, int]:
+    """이미 기록된 출고일에 그날 DN이 빠뜨린 라인 — 근거가 분명한 것만
+
+    출고리스트는 같은 날 출고에 행이 뒤늦게 붙기도 한다 (2026-10 SOD-2026-0357/0902:
+    본품 L1~L3을 기록한 뒤 같은 10/26로 선급검사 비용 L4 행이 붙었다). 사람이 적은 기록을
+    뒤집지 않도록 셋 다 맞을 때만 넣는다:
+
+    - 그날 DN에 **라인째** 없다 — 수량만 다른 라인은 사람이 고쳐 적은 것일 수 있다
+    - 이번 기간 공장 계산서(`Invoiced P{XX}`)에 그 라인이 있다 — PO에 따로 없는 부속은
+      근거가 없다 (PO는 부속을 본품 라인에 합쳐 적는다)
+    - 공장 계산서가 DN보다 그만큼 앞서 있다(`_billed_beyond_dn`) — 다른 날로 적어 둔 게 아니다
+    """
+    if not on_day:      # 기록은 있는데 라인·수량을 못 읽었다 — 무엇이 빠졌는지 모른다
+        return {}
+    return {
+        li: q for li, q in qty_by_line.items()
+        if li not in on_day and li in billed_lines
+        and _billed_beyond_dn(po_rows, invoiced, shipped, so_id, {li: q})
+    }
+
+
+def _line_labels(qty_by_line: dict[int, int]) -> str:
+    return ', '.join(f"L{li}" for li in sorted(qty_by_line))
 
 
 def _billed_beyond_dn(po_rows: pd.DataFrame, invoiced: set[str], shipped: ShipLog,

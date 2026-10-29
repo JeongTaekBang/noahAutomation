@@ -32,6 +32,7 @@ DN 출고기록 자동 입력 (Delivery Note Recorder)
 채울 때 어느 날짜를 쓸지 알 수 있게 합니다.
 
 같은 기간을 여러 번 돌려도 안전합니다 — 이미 기록된 `(SO_ID, 출고일)`은 건너뜁니다.
+그날 기록에 라인째 빠진 것(뒤늦게 붙은 선급검사 비용 등)만 새 DN으로 추가합니다.
 
 사용법:
     python create_dn.py P08                # 미리보기 → y/N → 워크북에 추가
@@ -111,6 +112,14 @@ def build_review_table(plan: Plan) -> pd.DataFrame:
         '사유': r.reason,
         '내용': r.detail,
     } for r in plan.reviews]
+    rows += [{
+        '구분': '빠진 라인 추가',
+        'SO_ID': r.so_id,
+        '출고일': r.ship_date,
+        'Customer': r.customer,
+        '사유': r.reason,
+        '내용': r.detail,
+    } for r in plan.topups]
     rows += [{
         '구분': '건너뜀',
         'SO_ID': r.so_id,
@@ -192,6 +201,12 @@ def print_summary(plan: Plan) -> None:
             print(f"    {r.so_id}  {date}  {r.customer}")
         if len(plan.skipped) > 10:
             print(f"    ... 외 {len(plan.skipped) - 10}건")
+
+    if plan.topups:
+        print(f"\n  {MSG_NOTICE} 기록된 출고일에 빠진 라인 {len(plan.topups)}건 — 새 DN으로 추가")
+        for r in plan.topups:
+            print(f"    {r.so_id}  {r.ship_date:%Y-%m-%d}  {r.customer}")
+            print(f"        {r.detail}")
 
     if plan.reviews:
         print(f"\n  {MSG_NOTICE} 확인 필요 {len(plan.reviews)}건 — 자동 입력에서 제외")
