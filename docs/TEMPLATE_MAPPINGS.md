@@ -28,7 +28,7 @@ F(단가)·H(세액)는 본문 기준으로는 과폭이지만 상단 공급자 
 |----|--------|------|
 | A | 월/일 | 출고일 (MM/DD) |
 | B | 품명 | 품목명 (item_name) |
-| C | 비고 | 월합=행별 Customer PO > 선수금='선수금' > 조선 기자재 4사=행별 호선명(SO_국내.Remarks) > 빈 값 (`build_row_remark`) |
+| C | 비고 | 월합=행별 Customer PO > 선수금='선수금' > 조선 기자재 5사=행별 호선명(SO_국내.Remarks) > 빈 값 (`build_row_remark`) |
 | D | 규격 | 고정값 "EA" |
 | E | 수량 | item_qty |
 | F | 단가 | unit_price |
@@ -39,7 +39,7 @@ F(단가)·H(세액)는 본문 기준으로는 과폭이지만 상단 공급자 
 
 | 위치 | 필드명 | 설명 |
 |------|--------|------|
-| PO No 행 (B열) | PO No | Customer PO 번호. 조선 기자재 4사(`config.TS_PO_REMARK_CUSTOMERS`)는 SO_국내.Remarks의 호선명을 발주번호별 괄호 병기 — `SCT2605-134 (한화-H4394, ...)` |
+| PO No 행 (B열) | PO No | Customer PO 번호. 조선 기자재 5사(`config.TS_PO_REMARK_CUSTOMERS`)는 SO_국내.Remarks의 호선명을 발주번호별 괄호 병기 — `SCT2605-134 (한화-H4394, ...)` |
 | 소계 행 | SUM | E/G/H열 합계 수식 |
 | 합계 행 (G열) | 합계 | 공급가 + 세액 |
 

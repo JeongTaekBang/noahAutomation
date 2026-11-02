@@ -2,8 +2,9 @@
 거래명세표 PO No. 칸 — 호선명(SO Remarks) 병기 테스트
 =====================================================
 
-조선 기자재 4사(스칸텍·브이티엘·엔이에스·파나시아)는 발주가 호선 단위라
-하단 PO No. 옆에 `SO_국내.Remarks`(호선명)를 병기한다 (2026-08-25 사용자 지시).
+조선 기자재 5사(스칸텍·브이티엘·엔이에스·파나시아·한라IMS)는 발주가 호선 단위라
+하단 PO No. 옆에 `SO_국내.Remarks`(호선명)를 병기한다 (2026-08-25 사용자 지시,
+한라IMS는 2026-10-27 추가).
 
 지켜야 할 것 둘:
 - **지정 거래처가 아니면 절대 붙지 않는다** — 다른 거래처의 Remarks에는 내부 메모가 있다.
@@ -82,9 +83,9 @@ class TestVesselNameAppended:
         assert result == 'OR26060022 (H-8327), OR26060013 (SN2755), SCT2605-002'
 
     @pytest.mark.parametrize('customer', [
-        SCANTECH, '주식회사 브이티엘', NES, '주식회사 파나시아',
+        SCANTECH, '주식회사 브이티엘', NES, '주식회사 파나시아', '한라IMS(주)',
     ])
-    def test_all_four_customers_match(self, customer):
+    def test_all_designated_customers_match(self, customer):
         result = build_po_cell_text(order(customer), items(
             {'Customer PO': 'PO-1', 'SO Remarks': 'S590'},
         ))
@@ -95,7 +96,7 @@ class TestVesselNameAppended:
 
 class TestVesselNameNotAppended:
     def test_other_customers_never_show_remarks(self):
-        """지정 4사가 아니면 Remarks가 있어도 붙지 않는다 (내부 메모 노출 방지)"""
+        """지정 거래처가 아니면 Remarks가 있어도 붙지 않는다 (내부 메모 노출 방지)"""
         result = build_po_cell_text(order(CK, '26071402R0'), items(
             {'Customer PO': '26071402R0', 'SO Remarks': '내부 메모'},
         ))
