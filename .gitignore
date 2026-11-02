@@ -69,6 +69,9 @@ po_reconciliation/
 so_reconciliation/
 ind_code_reconciliation/
 
+# AX 오더북 — 회계팀 오더북·Item requirement/transaction export·환율 이력 (거래처·단가 업무 자료)
+ax_orderbook/
+
 # Claude Code temp files
 tmpclaude-*
 .claude/

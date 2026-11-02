@@ -73,6 +73,10 @@ python reconcile_ind.py P03               # Industry code 채움 + Sector 검증
 python reconcile_ind.py --sector-only     # Sector 검증만 (월 입력 불필요)
 python reconcile_ind.py P03 -v            # 상세 로그
 
+# AX Sales order book — IR + Item transaction으로 P01~마감월 오더북 (회계 오더북은 P01 Start·매핑·대조용)
+python build_ax_orderbook.py P10                   # → ax_orderbook/2026/AX_오더북_2026_P10.xlsx (Raw P01~P10 + 회계와의 차이·원인)
+python build_ax_orderbook.py P10 --fx JPY=8.6157   # 마감월 환율 직접 입력 (다른 달: JPY=2026-09=8.6968)
+
 # Dashboard
 streamlit run dashboard.py                # Streamlit 대시보드
 python dashboard_dist/build_portable_dashboard.py  # 배포 zip → dashboard_dist/NOAH_대시보드_배포.zip
@@ -118,6 +122,9 @@ Reconciliation layer:
   po_reconciliation/{year}/{period}/ — PO input/output files per period (flat `{period}/` 도 자동 호환)
   so_reconciliation/{year}/{period}/ — SO input/output files per period
   ind_code_reconciliation/{year}/{period}/ — Industry code input/output files per period (sector_검증.xlsx은 루트)
+
+AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — NOAH Order_Book 컨셉, 매번 전부 다시 계산):
+  build_ax_orderbook.py → ax_orderbook.py (연속 계산·차이 원인, COM 없음) ← ax_orderbook/ (IR·IT export, 회계 오더북, fx_history.csv, 통화지정.csv)
 ```
 
 **Data flow:** CLI → FinderService loads Excel data → validators check fields → generator fills template → output saved to `generated_*/` + history snapshot to `po_history/YYYY/M월/`.
@@ -192,6 +199,7 @@ Reconciliation layer:
 | `delivery_status.py` | 거래처 납기현황 회신 — 사업자번호로 `SO_국내` 미출고 조회 → `generated_ds/납기현황_*.xlsx` (납기현황/상세 2시트) → 메일 발송. **출고 여부는 시트 `Status`가 아니라 `DN_국내` 출고수량으로 직접 계산** (아래 Business Rules 참조) |
 | `check_data.py` + `po_generator/integrity.py` | 데이터 정합성 검사 — **0이어야 하는 것만** 8종(과다출고·단가 불일치·SO에 없는 DN 라인·취소/보류 SO 라인의 DN·PO에 없는 SO·SO에 없는 PO·한 DN에 거래처 둘·환율 없는 외화 DN). 'PO에 없는 SO'는 **주문 단위**다 — PO는 부속·운임을 한 라인에 합쳐 적어 라인 단위로 보면 운임·부속 라인만 잔뜩 걸린다(실측 32라인). 검사 = `conn → 문제 행 DataFrame` 순수 함수 + 등록표 `CHECKS`이고, 대시보드 'SO/DN 불일치' 카드도 `integrity.so_dn_line_anomalies()`를 부른다 — **산식 사본 금지** (`tests/test_integrity.py`가 대시보드에 SQL이 다시 생기는지 감시). 작업 목록(세금계산서 미발행·PO 확정 지연 등)은 늘 몇 건씩 있어 넣지 않는다 — 섞으면 항상 빨갛다. 새 검사는 **실데이터에서 몇 건 걸리는지 먼저** 본다('DN 단가 0원'은 실측 12행이 전부 무상 라인이라 탈락). DB는 백업 API 메모리 사본으로 읽고, Excel이 마지막 동기화보다 새로우면 경고한다. 검사가 죽으면 0건이 아니라 `[실패]`. 결과 xlsx는 `generated_check/정합성검사_결과.xlsx` **하나를 매번 덮어쓴다 — 정상이어도** (문제 있을 때만 만들던 시절, 고치고 다시 돌리면 파일이 안 생겨 지난 '문제' 파일이 최신처럼 남았다 — 2026-10-13 사용자 보고). 언제·어느 데이터 결과인지는 요약 표 아래에 적는다. Excel에 열려 있으면 `PermissionError` → 경고. 메뉴는 `create_po.bat [V]`뿐 (동료 메뉴 금지 목록) |
 | `reconcile_ind.py` | Industry Code 대사 — (1) Orderbook 빈 Industry code를 PO→SO 매핑으로 채움 → `ind_code_결과_{period}.xlsx`, (2) SO Sector vs 마스터 Category 교차 검증 → `sector_검증.xlsx`. `--sector-only`로 검증만 실행 가능 |
+| `build_ax_orderbook.py` + `po_generator/ax_orderbook.py` | **AX Sales order book을 IR + Item transaction(IT)으로** — 회계팀 오더북 Raw 형식의 **P01~마감월 연속 오더북**(NOAH Order_Book과 별개, RCK AX 쪽). NOAH 파워쿼리 Order_Book **컨셉**: 원천 데이터로 매번 전부 다시 계산, Cancelled 제외(과거 달도 지금 데이터 = 소급 반영), 청구 전 = Backlog. Start(P01) = **회계 P01 Start**, 그 뒤 = 직전 달 우리 End / Input = IR 생성(KST) / Output = **IT 출고 행 중 청구된 것(출고월)** / End = 미출고 + **청구 전(`Posted`) 출고** / Variance = 차액(AX 정의 — 환차만 두면 회계 기초 안의 나중 취소분이 영영 안 빠진다). 키 = Project + Cost center + Prod/Dept(Revenue) — 매핑·Raw 속성은 회계 파일에서 배우고 숫자는 IR·IT만. 실측 함정: **IR `Invoiced`는 청구가 아니라 출고됨**(프로젝트 품목요구는 출고만 올려도 Invoiced — 청구 여부는 IT `Transaction status`에만 있다), IT `Posted`는 **라인 합계로**(크레딧·반품 = 음수 Non-Invoiceable Posted로 상쇄 — 수량·금액 둘 다 남아야 청구 대기), `Adjusted` 제외, **라인번호 재사용**(1,902쌍) → 단가가 맞는 라인 + 출고일 이전 생성, IR `Net amount`는 **거래통화**(외화 거래처 목록 + `통화지정.csv`), `Created date`는 **UTC**(+9h), 환율은 Input·End = 수주월·Output = 출고월(**전월** 마감환율 파일 = 다음 달, 2025년 생성 외화 라인은 NOAH FX 시트에 그 달 열), 대상은 **키로 거르지 않는다**(예전엔 공식 Start 키만 보다 크레인 등 9.4M이 조용히 빠졌다). 회계와 갈리는 정의: 취소 주문은 처음부터 제외(회계는 취소한 달 Variance), 청구 날짜가 없어 출고월 인식(월말 출고·다음 달 청구는 한 달 어긋나 다음 달에 상쇄). 결과 `차이_원인` 시트가 달·키별 차이를 원인(회계 조정·키 갈림·청구 월·취소·수주 사후 변경·기초 등)으로 가른다. P10 실측: 프로젝트 99.7%(Output)/99.6%(End) 원 단위 일치. **추출은 IR = Show All + Created ≥ 01/01/2024, IT = Project date ≥ 01/01/2024, 같은 날 한 쌍.** 다음 단계: 월 마감 고정(NOAH `close_period` 컨셉). 설계·실측은 `tasks/todo.md` 'AX 오더북' 절 |
 
 ## Business Rules
 

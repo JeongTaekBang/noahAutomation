@@ -591,3 +591,13 @@ OC_MAIL_BODY: Final[str] = _load_user_setting(
     'Please find attached our Order Confirmation for your purchase order {customer_po}.\n\n'
     '* This email has been sent automatically.*\n',
 )
+
+
+# === AX Sales order book (build_ax_orderbook.py) ===
+# Item requirement + Item transaction export로 회계팀 오더북 Raw 형식의 P01~마감월 오더북을 만든다.
+# 회계팀 오더북·IR/IT export·환율 이력(fx_history.csv)을 이 폴더에 둔다 — 거래처·단가가 든 업무 자료라 git 제외.
+AX_ORDERBOOK_DIR: Final[Path] = BASE_DIR / "ax_orderbook"
+# 그룹 월 마감환율 폴더(사용자별 OneDrive 경로). 'FX Rates - Closing rates - P{NN} {YYYY}.xlsx' 한 기간분만 있고
+# 그 파일은 **다음 달** AX 환율이다(P10 파일 = 11월) — 읽은 값을 AX_ORDERBOOK_DIR/fx_history.csv에 쌓는다.
+_finance_hub_dir = _load_user_setting('FINANCE_HUB_DIR', None)
+FINANCE_HUB_DIR: Final[Path | None] = Path(_finance_hub_dir) if _finance_hub_dir else None
