@@ -2,21 +2,25 @@
 AX Sales order book — Item requirement(IR) + Item transaction(IT)로 만드는 오더북
 ==============================================================================
 
-회계팀 오더북 파일(`Sales order book_MM_YYYY.xlsx`)의 **Raw** 시트 형식으로, AX export 두 개만 가지고
-연속 오더북(P01~마감월)을 만든다. NOAH 파워쿼리 `Order_Book`의 컨셉을 따른다 — 수주 라인을 월별로 굴리고,
-원천 데이터로 매번 전부 다시 계산한다.
+회계팀 오더북 파일(`Sales order book_MM_YYYY.xlsx`)의 **Raw** 시트 형식으로, AX export 두 개만 가지고 오더북을 만든다.
+AX Sales Order Book(Table 50229)처럼 **달마다 계산해 저장**하고, 다음 달은 저장된 End에서 시작한다 — 저장은
+ax_orderbook_store.py가 하고 여기는 계산만 한다(저장소를 모른다). 처음 한 번은 같은 IR·IT로 P01~마감월을 한 번에
+만든다(기준선 — NOAH 파워쿼리 `Order_Book`처럼 수주 라인을 월별로 굴린다).
 
     IR (Item requirement) = 수주 라인: 생성일·수량·단가·상태
     IT (Item transaction) = 출고 1건 = 1행: Project date·수량·금액·통화, Transaction status = 청구 여부
 
-    Start    = P01은 회계 P01 Start(키별), 그 뒤로는 직전 달 우리 End
+    Start    = 기준선 P01은 회계 P01 Start(키별), 그 뒤로는 직전 달 End(기준선 안에선 계산값, 그 뒤엔 저장값)
     Input    = 그달 생성된 라인(KST) × 수주월 환율
-    Output   = 그달 출고된 IT 행 중 청구된 것(Invoiced) × 그달 환율 — IT엔 청구 날짜가 없어 출고월을 인식월로 쓴다
+    Output   = 그달 말까지 청구된 출고 누계 − 이미 Output으로 인식한 누계, × 그달 환율. 기준선은 같은 추출본의 지난 달 말
+               누계를 빼므로 '그달 출고분 중 청구된 것'이고(IT엔 청구 날짜가 없어 출고월), 그 뒤로는 저장된 누계를 빼므로
+               지난 마감 때 청구 전이던 출고가 청구되면 그 달 Output이다(AX처럼 청구한 달)
     End      = (라인 수량 − 월말까지 출고 수량) × 단가 × 수주월 환율 + 월말까지 출고했지만 청구 전(Posted)인 금액
-    Variance = End − Start − Input + Output   (환율 재평가·수주/청구 금액 차이 — AX도 같은 뜻으로 쓴다)
+    Variance = End − Start − Input + Output   (환율 재평가·수주/청구 금액 차이·지난 계산 뒤의 취소와 변경 — AX도 같은 뜻)
 
 IR의 `Invoiced`는 고객 청구가 아니라 **출고됨**이다(프로젝트 품목요구는 출고만 올려도 Invoiced). 청구 여부는 IT에만 있다.
-Cancelled 라인은 처음부터 뺀다(NOAH Order_Book이 Cancelled·Hold를 빼는 것과 같다 — 과거 달도 지금 데이터로 계산된다).
+Cancelled 라인은 처음부터 뺀다(NOAH Order_Book이 Cancelled·Hold를 빼는 것과 같다). 기준선 안의 지난 달은 지금 데이터로
+계산되고, 저장한 뒤의 취소·변경은 그 일이 보인 달의 Variance로 들어간다.
 키 = Project + Cost center + Prod/Dept(Revenue). 키 매핑과 Raw 속성은 회계 오더북에서 배우고, 숫자는 IR·IT로만 낸다.
 실측 근거는 tasks/todo.md. Excel/COM은 쓰지 않는다(읽기는 pandas, 환율 파일만 openpyxl).
 """
@@ -120,7 +124,9 @@ FX_SEED: dict[tuple[str, str], float] = {
     ('JPY', '2026-01'): 9.2159, ('JPY', '2026-02'): 9.3580, ('JPY', '2026-03'): 9.1261,
     ('JPY', '2026-04'): 9.4347, ('JPY', '2026-05'): 9.2479, ('JPY', '2026-06'): 9.4041,
     ('JPY', '2026-07'): 9.5269, ('JPY', '2026-08'): 8.8645, ('JPY', '2026-09'): 8.6968,
+    ('JPY', '2026-10'): 8.6157,
 }
+MANUAL_FX_SOURCE = '직접 입력'
 _CLOSING_FILE_RE = re.compile(r'Closing rates\s*-\s*P(\d{1,2})\s+(\d{4})', re.IGNORECASE)
 
 BIG_VARIANCE = 10_000_000      # 확인 목록에 올리는 Variance 크기 (원)
@@ -174,6 +180,9 @@ def read_raw(path: Path) -> pd.DataFrame:
         df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0.0)
     df['Period'] = df['Period'].astype(str).str.strip()
     df['pn'] = pd.to_numeric(df['Period'].str.extract(r'(\d+)')[0], errors='coerce').astype('Int64')
+    # 이 파일의 연도 — Report Start가 그 달 1일이다(다른 달이 한두 행 섞여 있어 최빈값으로)
+    years = pd.to_datetime(df['Report Start'], errors='coerce').dt.year.dropna()
+    df['year'] = int(years.mode().iloc[0]) if len(years) else pd.NA
     # Key는 수식(Project & Cost center & Prod/Dept) — 캐시가 비어도 다시 만들 수 있게
     df['Key'] = df['Project'].fillna('') + df['Cost center'].fillna('') + df['Prod/Dept (Revenue)'].fillna('')
     return df
@@ -346,7 +355,9 @@ def load_fx_book(db_file: Path | None, history_csv: Path | None, hub_dir: Path |
                  overrides: dict[tuple[str, str], float] | None = None) -> FxBook:
     """우선순위(높은 쪽이 이긴다): 직접 입력 > 마감환율 파일·이력 > NOAH FX 시트 > 역산 시드.
 
-    Finance Hub 폴더엔 현재 기간 파일만 남으므로, 읽은 값을 이력 CSV에 쌓아 다음 달에도 쓰게 한다.
+    Finance Hub 폴더엔 현재 기간 파일만 남으므로, 읽은 값을 이력 CSV에 쌓아 다음 달에도 쓰게 한다. 직접 입력(--fx)도
+    이력에 남긴다 — 저장한 달의 End는 라인을 수주월 환율로 매긴 값이라, 다음 달에 그 환율이 빠지면 같은 라인이 다른
+    환율로 다시 매겨져 가짜 Variance가 생긴다(10월 JPY를 --fx로만 넣었더니 11월에 82-15517.001이 +1.1M).
     지난 해 환율(2025년 생성 외화 라인의 수주월)은 NOAH FX 시트에 월 열을 더해 `sync_db.py`로 넣는다.
     """
     book = FxBook()
@@ -359,6 +370,7 @@ def load_fx_book(db_file: Path | None, history_csv: Path | None, hub_dir: Path |
     history = pd.DataFrame(columns=['ym', 'currency', 'rate', 'source'])
     if history_csv is not None and history_csv.exists():
         history = pd.read_csv(history_csv, dtype={'ym': str, 'currency': str, 'source': str})
+    changed = False
     if hub_dir is not None and hub_dir.is_dir():
         for path in sorted(hub_dir.glob('FX Rates - Closing rates - P* *.xlsx')):
             try:
@@ -366,19 +378,27 @@ def load_fx_book(db_file: Path | None, history_csv: Path | None, hub_dir: Path |
             except (ValueError, OSError) as exc:
                 logger.warning("마감환율 파일을 못 읽었습니다: %s (%s)", path.name, exc)
                 continue
-            if (history['ym'] == applies).any():
+            if (history['ym'].eq(applies) & history['source'].ne(MANUAL_FX_SOURCE)).any():
                 continue
             new = pd.DataFrame([{'ym': applies, 'currency': c, 'rate': r, 'source': path.name}
                                 for c, r in sorted(rates.items())])
             history = new if history.empty else pd.concat([history, new], ignore_index=True)
-            if history_csv is not None:
-                history_csv.parent.mkdir(parents=True, exist_ok=True)
-                history.to_csv(history_csv, index=False, encoding='utf-8-sig')
-                logger.info("마감환율 이력에 %s 환율을 추가했습니다 (%s)", applies, path.name)
-    for r in history.itertuples():
-        book.put(r.currency, r.ym, r.rate, r.source)
-    for (cur, month), rate in (overrides or {}).items():
-        book.put(cur, month, rate, '직접 입력')
+            changed = True
+            logger.info("마감환율 이력에 %s 환율을 추가했습니다 (%s)", applies, path.name)
+    if overrides:
+        manual = pd.DataFrame([{'ym': m, 'currency': c, 'rate': r, 'source': MANUAL_FX_SOURCE}
+                               for (c, m), r in sorted(overrides.items())])
+        replaced = ((history['ym'] + '|' + history['currency']).isin(manual['ym'] + '|' + manual['currency'])
+                    & history['source'].eq(MANUAL_FX_SOURCE))
+        history = manual if history.empty else pd.concat([history[~replaced], manual], ignore_index=True)
+        changed = True
+    if changed and history_csv is not None:
+        history_csv.parent.mkdir(parents=True, exist_ok=True)
+        history.to_csv(history_csv, index=False, encoding='utf-8-sig')
+    manual_rows = history['source'].eq(MANUAL_FX_SOURCE)          # 직접 입력은 이력 안에서도 마지막(우선)
+    for part in (history[~manual_rows], history[manual_rows]):
+        for r in part.itertuples():
+            book.put(r.currency, r.ym, r.rate, r.source)
     return book
 
 
@@ -493,6 +513,10 @@ def link_shipments(lines: pd.DataFrame, it: pd.DataFrame, official: pd.DataFrame
     back['Key'] = back['Key'].fillna(back['Project'].map(proj_key))
     back['cre_ym'] = back['cre_ym'].fillna(back['Project date'].dt.strftime('%Y-%m'))
     back['group'] = back['line_key'].fillna('~' + back['Project'] + '|' + back['ln'].fillna('?'))
+    # 청구 누계 묶음 — 추출본이 바뀌어도 같은 출고를 같은 묶음으로 보게 IR 라인키 대신 원천 값으로 만든다.
+    # 라인번호가 재사용돼도 품목이 다르면 갈린다(82-15514.001: 108번이 압력계와 포지셔너)
+    back['bgroup'] = (back['Project'] + '|' + back['ln'].fillna('?') + '|'
+                      + back['Item number'].fillna('?').astype(str))
     return back.drop(columns=['cre_day']).sort_values('it_id').reset_index(drop=True)
 
 
@@ -529,11 +553,14 @@ def _relink_reused(linked: pd.DataFrame, lines: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # 계산
 # ---------------------------------------------------------------------------
+BILLED_COLUMNS: tuple[str, ...] = ('Project', 'Key', 'cur', 'qty', 'amt')
+
+
 @dataclass
 class OrderbookResult:
     year: int
     upto: int
-    raw_rows: pd.DataFrame          # Raw 시트 행 (P01~upto, 48열 + _key·pn)
+    raw_rows: pd.DataFrame          # Raw 시트 행 (계산한 달들, 48열 + _key·pn)
     keys: pd.DataFrame              # 달·키별 계산 (pn, Key, Project, Sq..Vv)
     lines: pd.DataFrame             # 마감월(upto) 라인별 기여
     pending: pd.DataFrame           # 마감월 말 출고 후 미청구 (라인별)
@@ -541,6 +568,7 @@ class OrderbookResult:
     fx_used: pd.DataFrame
     next_filter_note: str
     key_currency: dict[str, str] = field(default_factory=dict)   # 키 → 통화 (차이 원인 '환율' 판단용)
+    billed: pd.DataFrame = field(default_factory=pd.DataFrame)   # 계산한 달마다 그달 말까지 인식한 청구 누계 (pn 열)
 
     @property
     def period(self) -> str:
@@ -553,8 +581,41 @@ def _is_pending_balance(qty: pd.Series, net: pd.Series) -> pd.Series:
     return qty.gt(_EPS) & net.ge(0.5)
 
 
-def _month_contrib(lines: pd.DataFrame, ship: pd.DataFrame, year: int, month: int, fx: FxBook) -> pd.DataFrame:
-    """월 m의 라인(그룹)별 Input·Output·End. 그룹 = IR 라인키(라인 없는 출고는 '~프로젝트|번호')."""
+def empty_billed() -> pd.DataFrame:
+    return pd.DataFrame({c: pd.Series(dtype=float if c in ('qty', 'amt') else object) for c in BILLED_COLUMNS},
+                        index=pd.Index([], name='bgroup'))
+
+
+def billed_cumulative(ship: pd.DataFrame, pend: pd.Timestamp) -> pd.DataFrame:
+    """pend 전까지 출고된 IT 행 중 청구된 것의 누계 — 묶음(프로젝트|라인번호|품목번호)별 수량·금액(거래통화).
+
+    Output은 이 누계가 '이미 인식한 누계'보다 늘어난 만큼이다. 같은 추출본의 지난 달 말 누계와 빼면 그달 출고분이 되고
+    (기준선), 저장된 지난 마감 때 누계와 빼면 그 사이에 청구된 것 전부가 된다 — 지난 마감 때 청구 전이던 출고가 이번에
+    청구되면 이번 달 Output이다(AX Sales Order Book처럼 청구한 달)."""
+    rows = ship[ship['billed'] & ship['Project date'].lt(pend)]
+    if rows.empty:
+        return empty_billed()
+    return rows.groupby('bgroup').agg(Project=('Project', 'first'), Key=('Key', 'first'),
+                                      cur=('Sales currency', 'first'), qty=('Quantity', 'sum'),
+                                      amt=('Net amount', 'sum'))
+
+
+def _output_delta(now: pd.DataFrame, prev: pd.DataFrame, fx: FxBook, close_ym: str) -> pd.DataFrame:
+    """Output = 청구 누계 − 이미 인식한 누계(묶음별), 그달 환율. 누계가 줄면(청구 뒤 크레딧) 음수 Output."""
+    d = now[['qty', 'amt']].sub(prev[['qty', 'amt']], fill_value=0.0)
+    d = d.join(now[['Project', 'Key', 'cur']].combine_first(prev[['Project', 'Key', 'cur']]))
+    d = d[d['qty'].abs().gt(_EPS) | d['amt'].abs().ge(0.5)]
+    if d.empty:
+        return pd.DataFrame(columns=['group', 'Key', 'Project', 'out_q', 'out_v'])
+    return pd.DataFrame({'group': 'B|' + d.index.astype(str), 'Key': d['Key'].to_numpy(),
+                         'Project': d['Project'].to_numpy(), 'out_q': d['qty'].to_numpy(),
+                         'out_v': d['amt'].to_numpy() * fx.rate_series(d['cur'], pd.Series([close_ym] * len(d)))})
+
+
+def _month_contrib(lines: pd.DataFrame, ship: pd.DataFrame, year: int, month: int, fx: FxBook,
+                   prev_billed: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """월 m의 그룹별 Input·Output·End + 그달 말 청구 누계. 그룹 = IR 라인키(라인 없는 출고는 '~프로젝트|번호'),
+    Output은 청구 누계 묶음('B|프로젝트|번호|품목')."""
     pstart, pend = month_bounds(year, month)
     close_ym = ym(pstart)
     live = lines[lines['created_kst'] < pend]
@@ -597,73 +658,162 @@ def _month_contrib(lines: pd.DataFrame, ship: pd.DataFrame, year: int, month: in
                                                     'end_v': g['v'].to_numpy(), 'in_q': 0.0, 'in_v': 0.0})],
                               ignore_index=True)
 
-    # Output — 그달 출고 중 청구된 것, 그달 환율
-    out = ship[ship['billed'] & ship['Project date'].ge(pstart) & ship['Project date'].lt(pend)]
+    # Output — 그달 말 청구 누계 − 이미 인식한 누계, 그달 환율
+    billed_now = billed_cumulative(ship, pend)
+    out = _output_delta(billed_now, prev_billed, fx, close_ym)
     if len(out):
-        o = pd.DataFrame({'group': out['group'], 'Key': out['Key'], 'Project': out['Project'],
-                          'out_q': out['Quantity'],
-                          'out_v': out['Net amount'].to_numpy() * fx.rate_series(out['Sales currency'],
-                                                                                 pd.Series([close_ym] * len(out)))})
-        frame = pd.concat([frame, o], ignore_index=True)
+        frame = pd.concat([frame, out], ignore_index=True)
     for c in ('in_q', 'in_v', 'out_q', 'out_v', 'end_q', 'end_v'):
         if c not in frame.columns:
             frame[c] = 0.0
-        frame[c] = frame[c].fillna(0.0)
-    return frame.groupby(['group', 'Key', 'Project'], as_index=False)[
+        frame[c] = frame[c].astype(float).fillna(0.0)
+    contrib = frame.groupby(['group', 'Key', 'Project'], as_index=False)[
         ['in_q', 'in_v', 'out_q', 'out_v', 'end_q', 'end_v']].sum()
+    return contrib, billed_now
+
+
+def _key_month(start: pd.DataFrame, contrib: pd.DataFrame, month: int) -> pd.DataFrame:
+    """키별 Start(q, v) + 그달 기여 → 그달 키별 계산 (Variance = 차액)"""
+    agg = contrib.groupby('Key')[['in_q', 'in_v', 'out_q', 'out_v', 'end_q', 'end_v']].sum()
+    k = pd.DataFrame(index=start.index.union(agg.index))
+    k.index.name = 'Key'
+    k['Sq'] = start['q'].reindex(k.index).fillna(0.0)
+    k['Sv'] = start['v'].reindex(k.index).fillna(0.0)
+    k = k.join(agg).fillna(0.0).rename(columns={'in_q': 'Iq', 'in_v': 'Iv', 'out_q': 'Oq', 'out_v': 'Ov',
+                                                'end_q': 'Eq', 'end_v': 'Ev'})
+    k['Vq'] = k['Eq'] - k['Sq'] - k['Iq'] + k['Oq']
+    k['Vv'] = k['Ev'] - k['Sv'] - k['Iv'] + k['Ov']
+    # 금액이 하나도 없는 키(무상 라인 수량만 남은 옛 프로젝트)는 뺀다 — 회계 Raw에도 8979행 중 8행뿐이다
+    k = k[k[['Sv', 'Iv', 'Ov', 'Ev', 'Vv']].abs().ge(0.5).any(axis=1)].copy()
+    k['pn'] = month
+    return k.reset_index()
+
+
+def _prepare(ir: pd.DataFrame, it: pd.DataFrame, official: pd.DataFrame,
+             overrides: dict[str, str]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    lines = line_frame(ir, official, overrides)
+    return lines, link_shipments(lines, it, official)
 
 
 def build_orderbook(official: pd.DataFrame, ir: pd.DataFrame, it: pd.DataFrame, year: int, upto: int,
                     fx: FxBook, currency_overrides: dict[str, str] | None = None) -> OrderbookResult:
-    """P01~upto 오더북. official = 회계 오더북 Raw 행(P01 필수 — 기초값, 그리고 키 매핑·속성 학습용)."""
+    """기준선 — IR·IT 한 벌로 P01~upto를 한 번에. official = 회계 오더북 Raw 행(P01 필수 — 기초값, 키 매핑·속성 학습용).
+    달마다 '이미 인식한 청구 누계'를 같은 추출본의 지난 달 말 누계로 두므로 Output은 그달 출고분이다."""
     p01 = official[official['pn'] == 1]
     if p01.empty:
         raise ValueError("회계 오더북에 P01 행이 없습니다 — 기초(P01 Start)를 못 잡습니다")
     overrides = currency_overrides or {}
-    lines = line_frame(ir, official, overrides)
-    ship = link_shipments(lines, it, official)
+    lines, ship = _prepare(ir, it, official, overrides)
 
     start = p01.groupby('Key')[['Qty Start', 'Value Start']].sum()
     start.columns = ['q', 'v']
-    months, last = [], None
+    prev_billed = billed_cumulative(ship, pd.Timestamp(year, 1, 1))       # 올해 전에 이미 인식된 청구
+    months, billed, last = [], [], None
     for m in range(1, upto + 1):
-        contrib = _month_contrib(lines, ship, year, m, fx)
-        agg = contrib.groupby('Key')[['in_q', 'in_v', 'out_q', 'out_v', 'end_q', 'end_v']].sum()
-        k = pd.DataFrame(index=start.index.union(agg.index))
-        k.index.name = 'Key'
-        k['Sq'] = start['q'].reindex(k.index).fillna(0.0)
-        k['Sv'] = start['v'].reindex(k.index).fillna(0.0)
-        k = k.join(agg).fillna(0.0).rename(columns={'in_q': 'Iq', 'in_v': 'Iv', 'out_q': 'Oq', 'out_v': 'Ov',
-                                                    'end_q': 'Eq', 'end_v': 'Ev'})
-        k['Vq'] = k['Eq'] - k['Sq'] - k['Iq'] + k['Oq']
-        k['Vv'] = k['Ev'] - k['Sv'] - k['Iv'] + k['Ov']
-        # 금액이 하나도 없는 키(무상 라인 수량만 남은 옛 프로젝트)는 뺀다 — 회계 Raw에도 8979행 중 8행뿐이다
-        k = k[k[['Sv', 'Iv', 'Ov', 'Ev', 'Vv']].abs().ge(0.5).any(axis=1)].copy()
-        k['pn'] = m
-        months.append(k.reset_index())
-        start = k[['Eq', 'Ev']].rename(columns={'Eq': 'q', 'Ev': 'v'})
-        last = contrib
-    keys = pd.concat(months, ignore_index=True)
-    project_of = {**dict(zip(official['Key'], official['Project'])), **dict(zip(lines['Key'], lines['Project'])),
-                  **dict(zip(ship['Key'], ship['Project']))}
+        last, prev_billed = _month_contrib(lines, ship, year, m, fx, prev_billed)
+        k = _key_month(start, last, m)
+        months.append(k)
+        billed.append(prev_billed.reset_index().assign(pn=m))
+        start = k.set_index('Key')[['Eq', 'Ev']].rename(columns={'Eq': 'q', 'Ev': 'v'})
+    return _finish(pd.concat(months, ignore_index=True), last, lines, ship, ir, fx, year, upto, official,
+                   attribute_history(official, None, year), overrides, pd.concat(billed, ignore_index=True))
+
+
+def build_month(official: pd.DataFrame, ir: pd.DataFrame, it: pd.DataFrame, year: int, month: int, fx: FxBook,
+                prev_rows: pd.DataFrame, prev_billed: pd.DataFrame, history: pd.DataFrame | None = None,
+                currency_overrides: dict[str, str] | None = None) -> OrderbookResult:
+    """다음 달 하나 — AX Sales Order Book처럼 **저장된 직전 달**에서 시작한다.
+
+    Start = 저장된 직전 End, '이미 인식한 청구 누계' = 저장된 직전 달 누계. 그래서 직전 계산 뒤의 취소·단가/수량 변경은
+    이번 달 Variance로, 지난 마감 때 청구 전이던 출고가 이번에 청구되면 이번 달 Output으로 잡히고 지난 달은 그대로다.
+    history = 저장된 Raw 행(속성 물려받기용 — 계산할 달보다 앞의 것), official = 회계 오더북(키 매핑·속성 — 지난 해
+    파일이어도 되고, 없으면 `empty_official()`)."""
+    overrides = currency_overrides or {}
+    lines, ship = _prepare(ir, it, official, overrides)
+    start = prev_rows.groupby('_key')[['Qty End', 'Value End']].sum()
+    start.columns = ['q', 'v']
+    start.index.name = 'Key'
+    last, billed_now = _month_contrib(lines, ship, year, month, fx, prev_billed)
+    keys = _key_month(start, last, month)
+    if history is not None and len(history):        # 다시 계산할 때 그 달의 옛 계산이 속성 이력에 끼지 않게
+        history = history[history['year'] * 100 + history['pn'] < year * 100 + month]
+    attr_history = attribute_history(official, history, year)
+    return _finish(keys, last, lines, ship, ir, fx, year, month, official, attr_history, overrides,
+                   billed_now.reset_index().assign(pn=month))
+
+
+def empty_official() -> pd.DataFrame:
+    """회계 오더북이 없을 때 — 부서 매핑은 규칙으로, 속성은 저장된 행에서만"""
+    return pd.DataFrame(columns=[*RAW_COLUMNS, 'pn', 'year'])
+
+
+def attribute_history(official: pd.DataFrame, stored: pd.DataFrame | None, year: int) -> pd.DataFrame:
+    """속성을 물려받을 이력 — 저장된 우리 Raw 행 + 회계 Raw 행, 기간 순. 같은 기간이면 회계 행이 이긴다.
+    'pn'을 연·월 순번(연×100+월)으로 바꿔 둔다 — 아래 함수들이 'pn' 순으로 마지막 값을 고르기 때문. 회계 행의 연도는
+    파일의 연도('year' 열 — read_raw), 없으면 계산하는 해."""
+    parts = []
+    if stored is not None and len(stored):
+        s = stored.copy()
+        s['Key'] = s['_key']
+        s['_ord'] = s['year'] * 100 + s['pn']
+        s['_src'] = 0
+        parts.append(s)
+    if official is not None and len(official):
+        o = official.copy()
+        o_year = pd.to_numeric(o['year'], errors='coerce').fillna(year).astype(int) if 'year' in o.columns else year
+        o['_ord'] = o_year * 100 + o['pn']
+        o['_src'] = 1
+        parts.append(o)
+    if not parts:
+        return pd.DataFrame(columns=list(RAW_COLUMNS) + ['pn'])
+    # 빈 열(수식 열 등)은 빼고 합친 뒤 되살린다 — 빈 열이 열 타입을 정하지 않게(pandas가 바꾸려는 동작을 미리 고정)
+    columns = list(dict.fromkeys(c for p in parts for c in p.columns))
+    h = (pd.concat([p.dropna(axis=1, how='all') for p in parts], ignore_index=True)
+           .reindex(columns=columns).sort_values(['_ord', '_src'], kind='stable'))
+    h['pn'] = h['_ord']
+    return h.drop(columns=['_ord', '_src']).reset_index(drop=True)
+
+
+def keys_from_raw(raw_rows: pd.DataFrame) -> pd.DataFrame:
+    """Raw 행 → 달·키별 계산 표(pn, Key, Project, Sq..Vv) — 저장된 달까지 합쳐 요약·대조할 때"""
+    names = {'Qty Start': 'Sq', 'Qty Input': 'Iq', 'Qty Output': 'Oq', 'Qty End': 'Eq', 'Qty Variance': 'Vq',
+             'Value Start': 'Sv', 'Value Input': 'Iv', 'Value Output': 'Ov', 'Value End': 'Ev',
+             'Value Variance': 'Vv'}
+    k = raw_rows.rename(columns=names)
+    k['Key'] = raw_rows['_key']
+    return k[['pn', 'Key', 'Project'] + list(_KEY_VALUES)].reset_index(drop=True)
+
+
+def _finish(keys: pd.DataFrame, last: pd.DataFrame, lines: pd.DataFrame, ship: pd.DataFrame, ir: pd.DataFrame,
+            fx: FxBook, year: int, upto: int, official: pd.DataFrame, attr_history: pd.DataFrame,
+            overrides: dict[str, str], billed: pd.DataFrame) -> OrderbookResult:
+    project_of = {**dict(zip(attr_history['Key'], attr_history['Project'])),
+                  **dict(zip(lines['Key'], lines['Project'])), **dict(zip(ship['Key'], ship['Project']))}
     keys['Project'] = keys['Key'].map(project_of).fillna('')
+    # 신규 = 회계 오더북에 없는 키 — 지난 달에 저장했어도 회계가 속성을 채우기 전까지는 확인 목록에 남는다
     keys['new_key'] = ~keys['Key'].isin(set(official['Key']))
 
-    raw_rows = _assemble_raw(keys, lines, official, year)
+    raw_rows = _assemble_raw(keys, lines, attr_history, year)
     pending = _pending_list(ship, lines, year, upto, fx)
     line_detail = last.merge(lines[['line_key', 'Line number', 'Item number', 'Item name', 'Customer', 'cur',
                                     'Line status', 'created_kst', 'Actual ship date', 'Quantity',
                                     'Deliver remainder', 'Net amount']],
                              left_on='group', right_on='line_key', how='left')
+    out_rows = line_detail['group'].str.startswith('B|')
+    if out_rows.any():
+        parts = line_detail.loc[out_rows, 'group'].str.split('|', n=3, expand=True)
+        line_detail.loc[out_rows, 'Line number'] = parts[2]
+        line_detail.loc[out_rows, 'Item number'] = parts[3]
     line_detail = line_detail[line_detail[['in_v', 'out_v', 'end_v', 'in_q', 'out_q', 'end_q']].abs().gt(_EPS)
                               .any(axis=1)].drop(columns='line_key').reset_index(drop=True)
     review = _review(keys, lines, ship, raw_rows, ir, fx, {**FOREIGN_CUSTOMER_CURRENCY, **overrides},
-                     year, upto, official)
+                     year, upto, attr_history)
     fx_used = pd.DataFrame([{'통화': c, '월': mo, '환율': r, '출처': s, '대체한 달': fx.fallbacks.get((c, mo), '')}
                             for (c, mo), (r, s) in sorted(fx.used.items())])
     note = _next_filter_note(ir, raw_rows[raw_rows['pn'] == upto])
     key_currency = lines.groupby('Key')['cur'].agg(lambda s: s.mode().iloc[0]).to_dict()
-    return OrderbookResult(year, upto, raw_rows, keys, line_detail, pending, review, fx_used, note, key_currency)
+    return OrderbookResult(year, upto, raw_rows, keys, line_detail, pending, review, fx_used, note, key_currency,
+                           billed)
 
 
 def _pending_list(ship: pd.DataFrame, lines: pd.DataFrame, year: int, upto: int, fx: FxBook) -> pd.DataFrame:
@@ -691,14 +841,14 @@ def _mode(s: pd.Series):
     return s.mode().iloc[0] if len(s) else None
 
 
-def _assemble_raw(keys: pd.DataFrame, lines: pd.DataFrame, official: pd.DataFrame, year: int) -> pd.DataFrame:
-    """달·키별 숫자 + 속성 → Raw 48열. 속성은 키마다 한 번 정한다:
-    회계 오더북에 있는 키는 마지막 행 그대로, 새 키는 같은 프로젝트의 프로젝트 단위 속성 + IR."""
-    hist = official.sort_values('pn')
+def _assemble_raw(keys: pd.DataFrame, lines: pd.DataFrame, history: pd.DataFrame, year: int) -> pd.DataFrame:
+    """달·키별 숫자 + 속성 → Raw 48열. 속성은 키마다 한 번 정한다: 이력(회계 오더북·저장된 우리 행)에 있는 키는
+    마지막 행 그대로, 새 키는 같은 프로젝트의 프로젝트 단위 속성 + IR."""
+    hist = history.sort_values('pn', kind='stable')
     key_attr = hist.drop_duplicates('Key', keep='last').set_index('Key')
     proj_attr = hist.drop_duplicates('Project', keep='last').set_index('Project')
-    name_by_account = _latest_by(official, ['Account number'], 'Customer Name')
-    ce_code_by_name = _latest_by(official, ['Contract Engineer Name'], 'Contract Engineer')
+    name_by_account = _latest_by(history, ['Account number'], 'Customer Name')
+    ce_code_by_name = _latest_by(history, ['Contract Engineer Name'], 'Contract Engineer')
     by_proj = lines.groupby('Project')
     proj_created = by_proj['created_kst'].min().dt.normalize()
     proj_receipt = by_proj['Ship date'].max() if 'Ship date' in lines.columns else pd.Series(dtype='datetime64[ns]')
@@ -767,11 +917,11 @@ def _order_book_code_hints(history: pd.DataFrame, min_share: float = 0.8) -> dic
 
 
 def _review(keys: pd.DataFrame, lines: pd.DataFrame, ship: pd.DataFrame, raw_rows: pd.DataFrame, ir: pd.DataFrame,
-            fx: FxBook, currency_map: dict[str, str], year: int, upto: int, official: pd.DataFrame) -> pd.DataFrame:
+            fx: FxBook, currency_map: dict[str, str], year: int, upto: int, history: pd.DataFrame) -> pd.DataFrame:
     items: list[dict] = []
     ystart, _ = month_bounds(year, 1)
     _, pend = month_bounds(year, upto)
-    obc_hints = _order_book_code_hints(official)
+    obc_hints = _order_book_code_hints(history)
 
     def add(kind, key='', project='', customer='', amount=np.nan, detail=''):
         items.append({'구분': kind, 'Key': key, 'Project': project, '고객': customer, '금액': amount, '내용': detail})

@@ -597,6 +597,9 @@ OC_MAIL_BODY: Final[str] = _load_user_setting(
 # Item requirement + Item transaction export로 회계팀 오더북 Raw 형식의 P01~마감월 오더북을 만든다.
 # 회계팀 오더북·IR/IT export·환율 이력(fx_history.csv)을 이 폴더에 둔다 — 거래처·단가가 든 업무 자료라 git 제외.
 AX_ORDERBOOK_DIR: Final[Path] = BASE_DIR / "ax_orderbook"
+# 달마다 계산한 오더북을 쌓는 저장소(우리 판 AX Table 50229) — 지난 달은 바뀌지 않고 다음 달은 저장된 End에서 시작한다.
+# 지우면 다음 실행이 기준선(P01~마감월을 한 번에)부터 다시 만든다.
+AX_ORDERBOOK_DB: Final[Path] = AX_ORDERBOOK_DIR / "ax_orderbook.db"
 # 그룹 월 마감환율 폴더(사용자별 OneDrive 경로). 'FX Rates - Closing rates - P{NN} {YYYY}.xlsx' 한 기간분만 있고
 # 그 파일은 **다음 달** AX 환율이다(P10 파일 = 11월) — 읽은 값을 AX_ORDERBOOK_DIR/fx_history.csv에 쌓는다.
 _finance_hub_dir = _load_user_setting('FINANCE_HUB_DIR', None)

@@ -1,8 +1,10 @@
 """
-AX 오더북 — IR + Item transaction 엔진 (po_generator/ax_orderbook.py, build_ax_orderbook.py) 테스트
+AX 오더북 — IR + Item transaction 엔진·저장소 (po_generator/ax_orderbook.py, ax_orderbook_store.py,
+build_ax_orderbook.py) 테스트
 
 한 프로젝트가 규칙 하나를 맡는 가짜 회계 오더북(P01 Start)·Item requirement·Item transaction으로 2026 P01~P03을
-만들어 본다. 실측 근거는 tasks/todo.md 'AX 오더북' 절.
+만들어 본다(기준선). 그 결과를 '저장된 달'로 두고, 나중 추출본으로 다음 달을 이어 계산한다(AX Sales Order Book처럼).
+실측 근거는 tasks/todo.md 'AX 오더북' 절.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ import pytest
 
 import build_ax_orderbook as cli
 from po_generator import ax_orderbook as ax
+from po_generator.ax_orderbook_store import BASELINE, CLOSED, MONTHLY, OPEN, OrderbookStore, PeriodError, Plan
 
 
 def official_row(project: str, cc: str, dept: str, period: str = 'P01', qty: float = 0, value: float = 0,
@@ -43,12 +46,12 @@ def official_df(rows: list[dict]) -> pd.DataFrame:
 
 def ir_line(project: str, line, material: str, status: str, qty: float, unit_price: float, created_utc: str,
             ship: str | None = None, remainder: float | None = None, customer: str = 'C00001',
-            division: str = '10', vat: str = '01') -> dict:
+            division: str = '10', vat: str = '01', item: str = 'ITEM') -> dict:
     net = 0.0 if status == 'Cancelled' else qty * unit_price
     return {
         'Project': project, 'Line number': str(line), 'Created date': pd.Timestamp(created_utc),
         'Customer': customer, 'Customer name': f'고객{customer}', 'Project group': 'ProdSale',
-        'Item number': 'ITEM', 'Item name': 'item', 'Quantity': qty, 'Unit price': unit_price,
+        'Item number': item, 'Item name': 'item', 'Quantity': qty, 'Unit price': unit_price,
         'Net amount': net, 'Line status': status, 'Actual ship date': pd.Timestamp(ship) if ship else pd.NaT,
         'Deliver remainder': remainder, 'Division': division, 'Prod/Dept (Material)': material,
         'Contract engineer': 'CE Kim', 'VAT group': vat,
@@ -56,9 +59,9 @@ def ir_line(project: str, line, material: str, status: str, qty: float, unit_pri
 
 
 def it_row(project: str, line, when: str, qty: float, net: float, status: str = 'Invoiced',
-           currency: str = 'KRW', prop: str = 'Invoiceable') -> dict:
+           currency: str = 'KRW', prop: str = 'Invoiceable', item: str = 'ITEM') -> dict:
     return {'Project date': pd.Timestamp(when), 'Project': project, 'Line number': float(line),
-            'Item number': 'ITEM', 'Item name': 'item', 'Quantity': qty, 'Net amount': net,
+            'Item number': item, 'Item name': 'item', 'Quantity': qty, 'Net amount': net,
             'Sales currency': currency, 'Line property': prop, 'Transaction status': status}
 
 
@@ -89,8 +92,8 @@ IR_LINES = [
     ir_line('82-00007.001', 1, '3060', 'Open order', 1, 700_000, '2025-12-01', remainder=1),
     ir_line('82-00007.001', 2, '1008', 'Open order', 1, 300_000, '2025-12-01', remainder=1),
     # H: 라인번호 재사용 — 1번이 1월(1012, 10만)과 2월(1849, 25만) 두 라인
-    ir_line('82-00008.001', 1, '1012', 'Invoiced', 1, 100_000, '2026-01-05', ship='2026-03-03'),
-    ir_line('82-00008.001', 1, '1849', 'Invoiced', 1, 250_000, '2026-02-01', ship='2026-02-20'),
+    ir_line('82-00008.001', 1, '1012', 'Invoiced', 1, 100_000, '2026-01-05', ship='2026-03-03', item='GAUGE'),
+    ir_line('82-00008.001', 1, '1849', 'Invoiced', 1, 250_000, '2026-02-01', ship='2026-02-20', item='POSITIONER'),
     # J: EUR — 수주월(2025-11) 환율이 없다
     ir_line('82-00011.001', 1, '1012', 'Open order', 1, 1_500, '2025-11-15', remainder=1, customer='C00014',
             vat='ZR'),
@@ -107,8 +110,8 @@ IT_ROWS = [
     it_row('82-00005.001', 1, '2026-01-28', 1, 300_000, status='Posted'),
     it_row('82-00006.001', 1, '2025-11-01', 2, 1_000_000, status='Posted'),
     it_row('82-00006.001', 1, '2025-12-01', -2, -1_000_000, status='Posted', prop='Non-Invoiceable'),
-    it_row('82-00008.001', 1, '2026-02-20', 1, 250_000),
-    it_row('82-00008.001', 1, '2026-03-03', 1, 100_000),
+    it_row('82-00008.001', 1, '2026-02-20', 1, 250_000, item='POSITIONER'),
+    it_row('82-00008.001', 1, '2026-03-03', 1, 100_000, item='GAUGE'),
     it_row('82-00012.001', 1, '2026-01-15', 1, 900_000),
     it_row('82-00012.001', 1, '2026-01-20', 1, 900_000, status='Adjusted'),
     it_row('82-00012.001', 1, '2026-01-20', -1, -900_000, status='Adjusted'),
@@ -122,6 +125,20 @@ def make_fx() -> ax.FxBook:
         fx.put('USD', month, rate, 'test')
     fx.put('EUR', '2026-01', 1_500, 'test')
     return fx
+
+
+def write_inputs(folder, monkeypatch, stamp: str = '20260401', ir_lines=None, it_rows=None) -> list[str]:
+    """CLI 입력 파일(IR·IT·회계 오더북)을 쓰고 main()에 넘길 인자를 돌려준다 — 저장소·결과 폴더는 folder 안"""
+    ir_p, it_p = folder / f'Item requirement_{stamp}.xlsx', folder / f'Item transaction_{stamp}.xlsx'
+    ob_p = folder / 'Sales order book_01_2026.xlsx'
+    pd.DataFrame(ir_lines or IR_LINES).to_excel(ir_p, index=False)
+    pd.DataFrame(it_rows or IT_ROWS).to_excel(it_p, index=False)
+    if not ob_p.exists():
+        official_df(OFFICIAL)[list(ax.RAW_COLUMNS)].to_excel(ob_p, sheet_name='Raw', index=False)
+    monkeypatch.setattr(cli, 'load_fx_book', lambda *a, **kw: make_fx())
+    monkeypatch.setattr(cli, 'CURRENCY_OVERRIDE_FILE', folder / 'none.csv')
+    return ['--year', '2026', '--ir', str(ir_p), '--it', str(it_p), '--orderbook', str(ob_p),
+            '--store', str(folder / 'store.db'), '--out', str(folder / 'out')]
 
 
 @pytest.fixture
@@ -349,6 +366,22 @@ class TestFx:
         (hub / 'FX Rates - Closing rates - P10 2026.xlsx').unlink()
         assert ax.load_fx_book(None, history, hub).get('USD', '2026-11') == pytest.approx(1325.8562, abs=1e-3)
 
+    def test_manual_rate_is_remembered(self, tmp_path):
+        """--fx 환율도 이력에 남는다 — 저장한 달의 End를 매긴 환율이 다음 달 계산에서 빠지면 가짜 Variance가 생긴다"""
+        history = tmp_path / 'fx_history.csv'
+        ax.load_fx_book(None, history, None, {('USD', '2026-11'): 1_400.0})
+        book = ax.load_fx_book(None, history, None)
+        assert book.get('USD', '2026-11') == 1_400.0
+        hub = tmp_path / 'hub'
+        hub.mkdir()
+        self._closing_file(hub)                          # P10 파일 = 2026-11 — 직접 입력이 있어도 쌓인다
+        book = ax.load_fx_book(None, history, hub)
+        assert book.get('USD', '2026-11') == 1_400.0     # 직접 입력이 이긴다
+        assert book.get('JPY', '2026-11') == pytest.approx(1776.7799 / 210.083)
+        ax.load_fx_book(None, history, None, {('USD', '2026-11'): 1_410.0})   # 다시 넣으면 바꿔 넣는다
+        assert ax.load_fx_book(None, history, None).get('USD', '2026-11') == 1_410.0
+        assert (pd.read_csv(history)['source'] == ax.MANUAL_FX_SOURCE).sum() == 1
+
     def test_override_beats_everything(self):
         book = ax.load_fx_book(None, None, None, {('JPY', '2026-10'): 8.6157})
         assert book.get('JPY', '2026-10') == 8.6157
@@ -415,17 +448,209 @@ class TestCli:
             cli.load_official([p], 2026, 3)
 
     def test_main_writes_workbook(self, tmp_path, monkeypatch):
-        ir_p, it_p = tmp_path / 'Item requirement_20260401.xlsx', tmp_path / 'Item transaction_20260401.xlsx'
-        ob_p = tmp_path / 'Sales order book_01_2026.xlsx'
-        pd.DataFrame(IR_LINES).to_excel(ir_p, index=False)
-        pd.DataFrame(IT_ROWS).to_excel(it_p, index=False)
-        official_df(OFFICIAL)[list(ax.RAW_COLUMNS)].to_excel(ob_p, sheet_name='Raw', index=False)
-        monkeypatch.setattr(cli, 'load_fx_book', lambda *a, **kw: make_fx())
-        monkeypatch.setattr(cli, 'CURRENCY_OVERRIDE_FILE', tmp_path / 'none.csv')
-        rc = cli.main(['P03', '--year', '2026', '--ir', str(ir_p), '--it', str(it_p), '--orderbook', str(ob_p),
-                       '--out', str(tmp_path / 'out')])
+        args = write_inputs(tmp_path, monkeypatch)
+        rc = cli.main(['P03', *args])
         assert rc == 0
         out = tmp_path / 'out' / 'AX_오더북_2026_P03.xlsx'
         with pd.ExcelFile(out) as x:
-            assert {'요약', 'Raw', '차이_월별', '출고후미청구', '확인목록', '환율'} <= set(x.sheet_names)
+            assert {'요약', '기간', 'Raw', '차이_월별', '출고후미청구', '확인목록', '환율'} <= set(x.sheet_names)
             assert len(pd.read_excel(x, sheet_name='Raw')) > 0
+
+    def test_reference_orderbook_falls_back_to_last_year(self, tmp_path):
+        """1월 계산엔 그 해 회계 파일이 아직 없다 — 지난 해 파일로 매핑·속성만, 대조는 하지 않는다"""
+        rows = official_df([official_row('82-1.001', '10', '0112', period='P10')])
+        rows['Report Start'] = pd.Timestamp('2026-10-01')
+        p = tmp_path / 'Sales order book_10_2026.xlsx'
+        rows[list(ax.RAW_COLUMNS)].to_excel(p, sheet_name='Raw', index=False)
+        ref, path = cli.load_reference([p], 2027, 1)
+        assert path == p and list(ref['year']) == [2026]
+        assert cli.official_of_year(ref, 2027).empty
+        assert cli.load_reference([], 2027, 1)[1] is None
+
+
+VALUES = ['Sq', 'Iq', 'Oq', 'Eq', 'Vq', 'Sv', 'Iv', 'Ov', 'Ev', 'Vv']
+
+
+def as_stored(res: ax.OrderbookResult, month: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """기준선 결과의 한 달을 '저장된 달'처럼 — (Raw 행, 청구 누계)"""
+    rows = res.raw_rows[res.raw_rows['pn'] == month].assign(year=2026)
+    billed = res.billed[res.billed['pn'] == month].set_index('bgroup')[list(ax.BILLED_COLUMNS)]
+    return rows, billed
+
+
+def month_values(res: ax.OrderbookResult, month: int | None = None) -> pd.DataFrame:
+    t = res.keys if month is None else res.keys[res.keys['pn'] == month]
+    return t.set_index('Key')[VALUES].sort_index()
+
+
+class TestMonthly:
+    """다음 달 계산 — 저장된 직전 달(End·청구 누계)에서 시작한다. 지난 달은 그대로, 그 뒤의 일은 이번 달로"""
+
+    def test_same_extract_continues_the_baseline(self, scenario):
+        """기준선 P02를 저장해 두고 같은 추출본으로 P03을 계산하면 기준선 P03과 같다 — 계산 경로가 하나"""
+        official, ir, it, res = scenario
+        rows, billed = as_stored(res, 2)
+        history = res.raw_rows[res.raw_rows['pn'] <= 2].assign(year=2026)
+        nxt = ax.build_month(official, ir, it, 2026, 3, make_fx(), rows, billed, history)
+        pd.testing.assert_frame_equal(month_values(nxt), month_values(res, 3), atol=1e-6)
+        order = ['Project', 'Cost center', 'Prod/Dept (Revenue)']
+        a = nxt.raw_rows[list(ax.RAW_COLUMNS)].sort_values(order).reset_index(drop=True)
+        b = res.raw_rows[res.raw_rows['pn'] == 3][list(ax.RAW_COLUMNS)].sort_values(order).reset_index(drop=True)
+        pd.testing.assert_frame_equal(a, b, check_dtype=False, atol=1e-6)
+
+    def test_billing_after_close_is_output_of_the_billing_month(self, scenario):
+        """지난 마감 때 청구 전(Posted)이던 1월 출고가 나중 추출본에선 청구됨 → 이번 달 Output (AX처럼 청구한 달)"""
+        official, ir, _, res = scenario
+        rows, billed = as_stored(res, 2)
+        later = [dict(r, **{'Transaction status': 'Invoiced'}) if r['Project'] == '82-00005.001' else r
+                 for r in IT_ROWS]
+        nxt = ax.build_month(official, ir, ax.prepare_it(pd.DataFrame(later)), 2026, 3, make_fx(), rows, billed)
+        row = k(nxt, '82-00005.001100107', 3)
+        assert (row['Sv'], row['Oq'], row['Ov'], row['Ev'], row['Vv']) == (300_000, 1, 300_000, 0, 0)
+        assert k(res, '82-00005.001100107', 2)['Ev'] == 300_000            # 저장된 달은 그대로
+
+    def test_cancellation_after_close_is_variance_of_this_month(self, scenario):
+        """저장한 뒤 취소된 라인 — Start는 저장된 End 그대로, 이번 달 Variance로 빠진다"""
+        official, _, it, res = scenario
+        rows, billed = as_stored(res, 2)
+        history = res.raw_rows[res.raw_rows['pn'] <= 2].assign(year=2026)
+        later = [dict(r, **{'Line status': 'Cancelled', 'Net amount': 0.0}) if r['Project'] == '82-00013.001'
+                 else r for r in IR_LINES]
+        nxt = ax.build_month(official, ax.prepare_ir(pd.DataFrame(later)), it, 2026, 3, make_fx(), rows, billed,
+                             history)
+        row = k(nxt, '82-00013.001100112', 3)
+        assert (row['Project'], row['Sv'], row['Iv'], row['Ov'], row['Ev'], row['Vv']) == (
+            '82-00013.001', 50_000, 0, 0, 0, -50_000)
+
+    def test_credit_after_billing_is_negative_output(self, scenario):
+        official, ir, _, res = scenario
+        rows, billed = as_stored(res, 2)
+        later = IT_ROWS + [it_row('82-00001.001', 1, '2026-03-05', -2, -2_000_000)]
+        nxt = ax.build_month(official, ir, ax.prepare_it(pd.DataFrame(later)), 2026, 3, make_fx(), rows, billed)
+        row = k(nxt, '82-00001.001100112', 3)
+        assert (row['Oq'], row['Ov'], row['Ev'], row['Vv']) == (-2, -2_000_000, 0, -2_000_000)
+
+    def test_attribute_history_orders_by_year_then_month(self):
+        """작년 회계 파일(P10)과 저장된 작년 12월 행 — 연도까지 보고 12월 행이 나중이다"""
+        off = official_df([official_row('82-1.001', '10', '0112', period='P10')]).assign(year=2026)
+        stored = off.assign(_key=off['Key'], pn=12, Market='STORED')
+        h = ax.attribute_history(off, stored, 2027)
+        assert list(h['pn']) == [202610, 202612]
+        assert h.iloc[-1]['Market'] == 'STORED'
+
+
+def norm(df: pd.DataFrame) -> pd.DataFrame:
+    """저장소 왕복 비교용 — 빈 값은 None, 행 순서는 달·키 순"""
+    out = df.astype(object).where(df.notna(), None)
+    return out.sort_values(['pn', '_key']).reset_index(drop=True)
+
+
+class TestStore:
+    def test_empty_store_is_baseline_and_reading_creates_nothing(self, tmp_path):
+        store = OrderbookStore(tmp_path / 'ob.db')
+        assert store.plan(2026, 10) == Plan('baseline', None)
+        assert store.rows().empty and store.periods().empty
+        assert not store.path.exists()
+
+    def test_round_trip(self, tmp_path, scenario):
+        res = scenario[3]
+        store = OrderbookStore(tmp_path / 'ob.db')
+        store.save(2026, [1, 2, 3], res.raw_rows, res.billed, BASELINE, 'ir.xlsx', 'it.xlsx', '2026-04-01')
+        cols = ['pn', '_key', *ax.RAW_COLUMNS]
+        pd.testing.assert_frame_equal(norm(store.rows(2026)[cols]), norm(res.raw_rows[cols]), check_dtype=False)
+        b = res.billed[res.billed['pn'] == 3].set_index('bgroup')[list(ax.BILLED_COLUMNS)]
+        pd.testing.assert_frame_equal(store.billed(2026, 3).sort_index(), b.sort_index(), check_dtype=False)
+        p = store.periods(2026)
+        assert list(p['status']) == [CLOSED, CLOSED, OPEN]
+        assert set(p['basis']) == {BASELINE} and set(p['snapshot']) == {'2026-04-01'}
+        assert list(p['row_count']) == list(res.raw_rows['pn'].value_counts().sort_index())
+
+    def test_period_rules(self, tmp_path, scenario):
+        res = scenario[3]
+        store = OrderbookStore(tmp_path / 'ob.db')
+        store.save(2026, [1, 2, 3], res.raw_rows, res.billed, BASELINE)
+        assert store.plan(2026, 3) == Plan('recompute', (2026, 2))         # 마지막 달(Open)은 다시 계산
+        assert store.plan(2026, 4) == Plan('next', (2026, 3))
+        with pytest.raises(PeriodError, match='닫혔'):
+            store.plan(2026, 2)
+        with pytest.raises(PeriodError, match='건너뛸'):
+            store.plan(2026, 5)
+        with pytest.raises(PeriodError, match='남아 있지 않습니다'):
+            store.billed(2026, 1)                    # 청구 누계는 마지막 달과 그 앞 달 것만 남는다
+        with pytest.raises(PeriodError, match='닫힌 달'):
+            store.save(2026, [2, 3], res.raw_rows[res.raw_rows['pn'] >= 2], res.billed, MONTHLY)   # 저장소도 지킨다
+
+        p4 = res.raw_rows[res.raw_rows['pn'] == 3].assign(pn=4)
+        b4 = res.billed[res.billed['pn'] == 3].assign(pn=4)
+        store.save(2026, [4], p4, b4, MONTHLY)
+        assert list(store.periods(2026)['status']) == [CLOSED, CLOSED, CLOSED, OPEN]
+        with pytest.raises(PeriodError, match='닫혔'):
+            store.plan(2026, 3)
+        with pytest.raises(PeriodError):
+            store.billed(2026, 2)
+        assert len(store.billed(2026, 3)) == len(b4)
+        store.save(2026, [4], p4, b4, MONTHLY)        # 마지막 달 다시 저장 = 바꿔 넣기
+        assert len(store.rows(2026, 4)) == len(p4) and len(store.periods()) == 4
+
+    def test_year_boundary(self, tmp_path, scenario):
+        res = scenario[3]
+        store = OrderbookStore(tmp_path / 'ob.db')
+        rows, billed = res.raw_rows[res.raw_rows['pn'] == 3], res.billed[res.billed['pn'] == 3]
+        store.save(2026, [12], rows.assign(pn=12), billed.assign(pn=12), BASELINE)
+        assert store.plan(2027, 1) == Plan('next', (2026, 12))
+        store.save(2027, [1], rows.assign(pn=1), billed.assign(pn=1), MONTHLY)
+        p = store.periods()
+        assert list(zip(p['year'], p['pn'], p['status'])) == [(2026, 12, CLOSED), (2027, 1, OPEN)]
+        assert len(store.billed(2026, 12)) == len(billed)         # 앞 달(작년 12월) 누계는 남는다
+
+
+class TestLifecycle:
+    """CLI — 기준선 → 다음 달 → 다시 계산, 추출 시점 점검"""
+
+    def test_baseline_then_next_month_equals_one_baseline(self, tmp_path, monkeypatch, scenario):
+        args = write_inputs(tmp_path, monkeypatch)
+        assert cli.main(['P02', *args]) == 0                       # 기준선 P01~P02
+        assert cli.main(['P03', *args]) == 0                       # 저장된 P02에서 P03
+        store = OrderbookStore(tmp_path / 'store.db')
+        p = store.periods(2026)
+        assert list(zip(p['pn'], p['status'], p['basis'])) == [(1, CLOSED, BASELINE), (2, CLOSED, BASELINE),
+                                                               (3, OPEN, MONTHLY)]
+        got = ax.keys_from_raw(store.rows(2026, 3)).set_index('Key')[VALUES].sort_index()
+        pd.testing.assert_frame_equal(got, month_values(scenario[3], 3), check_dtype=False, atol=1e-6)
+        with pd.ExcelFile(tmp_path / 'out' / 'AX_오더북_2026_P03.xlsx') as x:
+            assert set(pd.read_excel(x, sheet_name='Raw')['Period']) == {'P01', 'P02', 'P03'}
+            assert list(pd.read_excel(x, sheet_name='기간')['상태']) == [CLOSED, CLOSED, OPEN]
+
+    def test_closed_month_is_refused_and_open_month_is_recomputed(self, tmp_path, monkeypatch, capsys):
+        args = write_inputs(tmp_path, monkeypatch)
+        assert cli.main(['P02', *args]) == 0
+        store = OrderbookStore(tmp_path / 'store.db')
+        before = store.rows(2026, 2)
+        assert cli.main(['P01', *args]) == 1
+        assert '닫혔' in capsys.readouterr().out
+        assert cli.main(['P02', *args]) == 0                       # 같은 추출본으로 다시 계산 → 같은 숫자
+        p = store.periods(2026)
+        assert list(zip(p['status'], p['basis'])) == [(CLOSED, BASELINE), (OPEN, MONTHLY)]
+        cols = ['pn', '_key', *ax.RAW_COLUMNS]
+        pd.testing.assert_frame_equal(norm(store.rows(2026, 2)[cols]), norm(before[cols]), check_dtype=False)
+
+    def test_pre_close_extract_is_not_saved_but_can_be_previewed(self, tmp_path, monkeypatch):
+        args = write_inputs(tmp_path, monkeypatch, stamp='20260320')
+        assert cli.main(['P03', *args]) == 1                       # 3월이 끝나기 전 추출본 — 저장 거부
+        assert cli.main(['P03', *args, '--dry-run']) == 0           # 미리보기는 된다
+        assert (tmp_path / 'out' / 'AX_오더북_2026_P03_미리보기.xlsx').exists()
+        assert not (tmp_path / 'store.db').exists()
+
+    def test_snapshot_checks(self, tmp_path):
+        def pair(ir_day: str, it_day: str):
+            return [tmp_path / f'Item requirement_{ir_day}.xlsx'], [tmp_path / f'Item transaction_{it_day}.xlsx']
+        assert cli.check_snapshot(*pair('20261102', '20261102'), 2026, 10) == (date(2026, 11, 2), [], [])
+        assert cli.check_snapshot(*pair('20261107', '20261107'), 2026, 10)[2] == []
+        _, errors, _ = cli.check_snapshot(*pair('20261102', '20261103'), 2026, 10)
+        assert any('추출일이 다릅니다' in e for e in errors)
+        _, errors, _ = cli.check_snapshot(*pair('20261030', '20261030'), 2026, 10)
+        assert any('끝나기 전' in e for e in errors)
+        _, errors, warns = cli.check_snapshot(*pair('20261108', '20261108'), 2026, 10)
+        assert not errors and any('8일째' in w for w in warns)
+        _, errors, warns = cli.check_snapshot([tmp_path / 'ir.xlsx'], [tmp_path / 'it.xlsx'], 2026, 10)
+        assert not errors and warns
