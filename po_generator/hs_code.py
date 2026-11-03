@@ -123,7 +123,7 @@ class HsResult:
 def is_hs_line_customer(customer_name: object) -> bool:
     """라인별 HS CODE 판을 따로 받는 거래처인가 (고객명 부분일치)
 
-    시트 표기가 흔들려도 걸리도록 부분일치로 본다 (`TS_PO_REMARK_CUSTOMERS`와 같은 규약).
+    시트 표기가 흔들려도 걸리도록 부분일치로 본다 ('주식회사 ○○'·'○○(주)'처럼 법인 접두/접미가 제각각).
     """
     name = _norm_text(customer_name)
     return bool(name) and any(keyword.upper() in name for keyword in HS_LINE_CUSTOMERS)

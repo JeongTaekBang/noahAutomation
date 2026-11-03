@@ -428,7 +428,7 @@ def load_dn_data() -> pd.DataFrame:
         'Sales Unit Price',     # 판매단가
         'Total Sales',          # 총 판매금액
         'Business registration number',
-        'Remarks',              # SO 비고 (조선 기자재 거래처는 호선명이 여기 있다)
+        'Remarks',              # SO 비고 (호선명·현장명 — 거래명세표에 찍힌다. 내부 메모는 'Comment'라 안 가져온다)
     ]
     so_cols = [c for c in so_cols if c in df_so.columns]
     df_so_subset = df_so[so_cols].copy()

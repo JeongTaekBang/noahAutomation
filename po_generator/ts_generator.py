@@ -23,7 +23,6 @@ import xlwings as xw
 from po_generator.config import (
     TS_TEMPLATE_FILE,
     TS_COLUMN_WIDTHS,
-    TS_PO_REMARK_CUSTOMERS,
     ITEM_START_ROW_FALLBACK,
     VAT_RATE_DOMESTIC,
 )
@@ -56,7 +55,7 @@ LABEL_SEARCH_END = 50
 BASE_PO_ROW = 23           # PO No. 행 (폴백값)
 BASE_TOTAL_ROW = 25        # 합계 행 (폴백값)
 
-# SO 비고(호선명) 컬럼 — 문서 경로마다 이름이 다르다.
+# SO 비고(호선명·현장명) 컬럼 — 문서 경로마다 이름이 다르다.
 # DN 경로는 load_dn_data()가 DN 자체 Remarks(월합 세금계산서 문구)와 구분하려고
 # 'SO Remarks'로 개명해 병합하고, 선수금(ADV) 경로는 SO_국내 행 그대로라 'Remarks'다.
 # 컬럼 유무로 추측하면 안 된다 — DN 아이템에도 'Remarks'는 있는데 그건 월합 문구다.
@@ -64,25 +63,20 @@ SO_REMARK_COLUMNS = {'DN': 'SO Remarks', 'ADV': 'Remarks'}
 
 
 def resolve_so_remark_column(
-    order_data: pd.Series,
     items_df: pd.DataFrame | None,
     doc_type: str = 'DN',
 ) -> str | None:
-    """호선명을 표기할 문서인지 판정 — 맞으면 SO 비고 컬럼명, 아니면 None
+    """SO 비고를 표기할 컬럼명 — 경로별 컬럼(SO_REMARK_COLUMNS)이 실제로 있을 때만, 아니면 None
 
-    하단 PO No. 병기와 본문 비고(C열) 표기가 같은 관문을 쓴다 —
-    지정 거래처(config.TS_PO_REMARK_CUSTOMERS, 고객명 부분일치)이고
-    경로별 SO 비고 컬럼(SO_REMARK_COLUMNS)이 실제로 있을 때만.
+    하단 PO No. 병기와 본문 비고(C열) 표기가 같은 관문을 쓴다.
+    거래처는 가리지 않는다 — SO_국내.Remarks는 고객에게 보이는 칸이고 내부 메모는
+    SO_국내.Comment에 적는다 (2026-11-03 사용자 결정. 그 전엔 Remarks에 내부 메모가
+    섞여 있어 지정 거래처 6곳만 표기했다).
     """
     if items_df is None:
         return None
     remark_col = SO_REMARK_COLUMNS.get(doc_type)
-    customer_name = str(get_value(order_data, 'customer_name', '') or '')
-    if (
-        remark_col is not None
-        and remark_col in items_df.columns
-        and any(keyword in customer_name for keyword in TS_PO_REMARK_CUSTOMERS)
-    ):
+    if remark_col is not None and remark_col in items_df.columns:
         return remark_col
     return None
 
@@ -98,7 +92,7 @@ def build_row_remark(
     우선순위 — 기존 표기를 밀어내지 않는다:
     1. 월합(use_po_as_remark): 행별 Customer PO (하단에서 발주번호↔호선 짝을 보인다)
     2. 공통 remark: 선수금 문서의 '선수금' 표기
-    3. 지정 거래처의 호선명(SO 비고) — 비고가 비어 있을 자리에만 들어간다.
+    3. SO 비고(호선명·현장명) — 비고가 비어 있을 자리에만 들어간다.
        한 문서에 호선이 여럿이면(실측 DND-2026-0790: 12행에 배 3척) 하단 나열만으로는
        어느 행이 어느 배인지 알 수 없어서 행마다 적는다
     """
@@ -117,16 +111,16 @@ def build_po_cell_text(
     items_df: pd.DataFrame | None,
     doc_type: str = 'DN',
 ) -> str:
-    """하단 PO No. 칸 텍스트 — 발주번호 나열 + (지정 거래처만) SO 비고(호선명) 병기
+    """하단 PO No. 칸 텍스트 — 발주번호 나열 + SO 비고(호선명·현장명) 병기
 
-    조선 기자재 거래처(config.TS_PO_REMARK_CUSTOMERS)는 발주가 호선 단위라,
-    거래명세표에도 호선명이 있어야 고객이 어느 배 물량인지 안다.
+    조선 기자재 거래처는 발주가 호선 단위라 거래명세표에도 호선명이 있어야 고객이
+    어느 배 물량인지 안다 (현장 단위 거래처는 현장명).
     형식은 발주번호별 괄호 병기 — 'OR26060022 (H-8327)'. 한 발주에 호선이 여럿이면
     나열한다: 'SCT2605-134 (한화-H4394, 한화-H4395, 한화-H4396)' (2026-08 실측).
     비고가 빈 발주번호는 지금처럼 번호만 적는다.
 
     Args:
-        order_data: 대표 행 (거래처 판정용 고객명)
+        order_data: 대표 행 (items_df가 없을 때의 발주번호)
         items_df: 문서에 실린 전체 아이템 (None이면 order_data 단건)
         doc_type: 'DN' 또는 'ADV' — SO 비고 컬럼명이 갈린다 (SO_REMARK_COLUMNS)
 
@@ -141,7 +135,7 @@ def build_po_cell_text(
         str(v).strip() for v in items_df['Customer PO'].dropna() if str(v).strip()
     ))
 
-    remark_col = resolve_so_remark_column(order_data, items_df, doc_type)
+    remark_col = resolve_so_remark_column(items_df, doc_type)
     if remark_col is None:
         return ', '.join(po_values)
 
@@ -376,7 +370,7 @@ def _fill_ts_data(
     ws.range(f'A{item_start_row}:H{end_row}').value = None
 
     # 아이템 데이터 배치 쓰기 (N개 아이템 * 8열 COM 호출 → 1회로 감소)
-    so_remark_col = resolve_so_remark_column(order_data, items_df, doc_type)
+    so_remark_col = resolve_so_remark_column(items_df, doc_type)
     total_amount, total_tax = _fill_items_batch(
         ws, item_start_row, items_df, dispatch_date, remark, use_po_as_remark,
         so_remark_col=so_remark_col,
@@ -401,7 +395,7 @@ def _fill_ts_data(
     row_shift = num_items - template_item_count
     label_search_end = LABEL_SEARCH_END + max(0, row_shift)
 
-    # PO No. 채우기 (여러 발주번호면 콤마로 구분, 지정 거래처는 SO 비고의 호선명 병기)
+    # PO No. 채우기 (여러 발주번호면 콤마로 구분, SO 비고의 호선명·현장명 병기)
     customer_po = build_po_cell_text(order_data, items_df, doc_type)
     po_row = find_text_in_column_batch(ws, 'A', 'PO No', LABEL_SEARCH_START, label_search_end)
     if po_row is None:
@@ -436,7 +430,7 @@ def _fill_items_batch(
         dispatch_date: 출고일
         remark: 비고 텍스트
         use_po_as_remark: True면 행별 비고를 해당 아이템의 Customer PO로 채움
-        so_remark_col: 지정 거래처의 호선명 컬럼 (resolve_so_remark_column 결과, 아니면 None)
+        so_remark_col: SO 비고 컬럼 (resolve_so_remark_column 결과, 아니면 None)
 
     Returns:
         (총 금액, 총 세액)

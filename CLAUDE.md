@@ -319,14 +319,17 @@ AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — AX Sales Order
     나눴다. 또 `HPageBreaks`의 **첫 열거는 부분 결과**라([] → [47]) 두 번 같을 때까지 읽는다 (`read_page_breaks`)
   - 템플릿 기본(Normal) 글꼴은 Arial 10 — 빈 칸 글꼴이 행 높이 하한이라, 테마 글꼴(한글 Excel에서 맑은 고딕 11)이면
     헤더 행이 전부 18.5pt로 부푼다
-- **거래명세표에 호선명을 표기하는 건 조선 기자재 5사뿐이다**
-  (`config.TS_PO_REMARK_CUSTOMERS` = 스칸텍·브이티엘·엔이에스·파나시아·한라IMS, 고객명 부분일치 —
-  2026-08-25 사용자 지시, 한라IMS는 2026-10-27 추가). 호선명은 `SO_국내.Remarks`에 있고 두 군데 찍힌다:
+- **거래명세표에 `SO_국내.Remarks`(호선명·현장명)를 모든 거래처에 표기한다 — 내부 메모는 `SO_국내.Comment`**
+  (2026-11-03 사용자 결정). 원래는 Remarks에 내부 메모가 섞여 있어 조선 기자재 거래처 등 지정 6곳만
+  표기했는데(`TS_PO_REMARK_CUSTOMERS`, 2026-08-25~11-03), 사용자가 내부용 `Comment` 컬럼을 따로 만들어
+  거래처 목록을 없앴다. **그래서 Remarks = 고객에게 보이는 칸**이다 — 새 문서·코드에서 Remarks를
+  내부 메모 자리로 쓰지 말 것. `Comment`가 거래명세표에 안 실리는 건 `load_dn_data()`가 SO 컬럼을
+  명시 목록으로만 가져오기 때문이다 (`tests/test_ts_generator.py`가 감시). Remarks는 두 군데 찍힌다:
   (1) 하단 PO No.에 발주번호별 괄호 병기 `SCT2605-134 (한화-H4394, ...)`,
-  (2) 본문 아이템 행의 비고(C열)에 행별 호선명 — 한 문서에 배가 여럿이면(실측
+  (2) 본문 아이템 행의 비고(C열)에 행별 Remarks — 한 문서에 배가 여럿이면(실측
   DND-2026-0790: 12행에 3척) 하단 나열만으로는 어느 행이 어느 배인지 모른다.
-  비고 우선순위는 월합 행별 PO > '선수금' > 호선명 (`build_row_remark` — 기존 표기를
-  밀어내지 않는다). 다른 거래처는 Remarks에 내부 메모가 있어 붙이면 안 된다.
+  비고 우선순위는 월합 행별 PO > '선수금' > Remarks (`build_row_remark` — 기존 표기를
+  밀어내지 않는다).
   **'Remarks'라는 이름이 시트마다 뜻이 다르다** — DN_국내 것은 월합 세금계산서 문구라,
   `load_dn_data()`가 SO 쪽을 `SO Remarks`로 개명해 병합하고 `ts_generator.build_po_cell_text()`가
   경로별 컬럼(DN=`SO Remarks`, 선수금=`Remarks`)을 명시로 고른다. 컬럼 유무로 추측하면

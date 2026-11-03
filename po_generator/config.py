@@ -130,8 +130,8 @@ PL_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_pl"
 # 달라 보이는 게 정상이다.
 DEFAULT_HS_CODE: Final[str] = '8481.90.0000'
 
-# 자기네 수입통관 코드를 따로 요구한 거래처 (고객명 부분일치 — TS_PO_REMARK_CUSTOMERS와
-# 같은 규약, 시트 표기가 흔들린다). 이들만 수출신고용에 더해 **고객 제출용을 한 장 더**
+# 자기네 수입통관 코드를 따로 요구한 거래처 (고객명 부분일치 — 시트 표기가 흔들린다).
+# 이들만 수출신고용에 더해 **고객 제출용을 한 장 더**
 # 만든다 (`CI-HS_*`/`PL-HS_*`). 두 장의 양식은 완전히 같고 D열 값만 다르다.
 HS_LINE_CUSTOMERS: Final[tuple[str, ...]] = ('SECTORIEL',)
 
@@ -498,14 +498,6 @@ class TSColumnWidths:
 
 
 TS_COLUMN_WIDTHS: Final[TSColumnWidths] = TSColumnWidths()
-
-# 거래명세표 하단 PO No. 옆에 SO_국내 Remarks(호선명)를 병기하는 거래처.
-# 조선 기자재 거래처는 발주가 호선 단위라 명세표에 호선명이 있어야 어느 배 물량인지
-# 알 수 있다 (2026-08-25 사용자 지시 — 이 4곳만, 2026-10-27 한라IMS 추가). 고객명 부분일치로 판정한다
-# (시트 표기가 '주식회사 스칸텍'·'엔이에스 주식회사'·'한라IMS(주)'처럼 법인 접두/접미가 제각각이라).
-TS_PO_REMARK_CUSTOMERS: Final[tuple[str, ...]] = (
-    '스칸텍', '브이티엘', '엔이에스', '파나시아', '한라IMS',
-)
 
 
 # === 거래명세표 메일 발송 설정 ===

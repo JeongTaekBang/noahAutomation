@@ -1,13 +1,14 @@
 """
-거래명세표 PO No. 칸 — 호선명(SO Remarks) 병기 테스트
-=====================================================
+거래명세표 PO No. 칸 — 호선명·현장명(SO Remarks) 병기 테스트
+============================================================
 
-조선 기자재 5사(스칸텍·브이티엘·엔이에스·파나시아·한라IMS)는 발주가 호선 단위라
-하단 PO No. 옆에 `SO_국내.Remarks`(호선명)를 병기한다 (2026-08-25 사용자 지시,
-한라IMS는 2026-10-27 추가).
+하단 PO No. 옆과 본문 비고(C열)에 `SO_국내.Remarks`(호선명·현장명)를 싣는다.
+처음엔 조선 기자재 거래처만 지정했지만(2026-08-25), 2026-11-03부터 **모든 거래처**다 —
+Remarks는 고객에게 보이는 칸이고 내부 메모는 `SO_국내.Comment`에 적기로 했다.
 
 지켜야 할 것 둘:
-- **지정 거래처가 아니면 절대 붙지 않는다** — 다른 거래처의 Remarks에는 내부 메모가 있다.
+- **SO Comment(내부 메모)는 절대 거래명세표에 실리지 않는다** — `load_dn_data()`가
+  SO 컬럼을 명시 목록으로만 가져오는 것이 그 보장이다.
 - **DN 자체 Remarks(월합 세금계산서 문구)는 절대 PO 칸에 새지 않는다** — 이름이 같아서
   헷갈리기 쉬운 자리다 (`load_dn_data()`가 SO 쪽을 'SO Remarks'로 개명하는 이유).
 
@@ -28,7 +29,7 @@ from po_generator import utils as po_utils
 
 SCANTECH = '주식회사 스칸텍'          # 시트 실표기 — 법인 접두가 붙는다
 NES = '엔이에스 주식회사'             # 접미가 붙는 경우
-CK = '씨앤케이엔지니어링(C&K ENG)'    # 비대상 거래처
+CK = '씨앤케이엔지니어링(C&K ENG)'    # 예전 비대상 거래처 — 지금은 똑같이 붙는다
 
 
 def order(customer=SCANTECH, po='OR26060022'):
@@ -84,24 +85,26 @@ class TestVesselNameAppended:
 
     @pytest.mark.parametrize('customer', [
         SCANTECH, '주식회사 브이티엘', NES, '주식회사 파나시아', '한라IMS(주)',
+        '제이케이콘트롤', CK, '',
     ])
-    def test_all_designated_customers_match(self, customer):
+    def test_every_customer_shows_remarks(self, customer):
+        """거래처를 가리지 않는다 (2026-11-03 — 예전 지정 6곳 밖의 거래처·고객명 빈 행도)"""
         result = build_po_cell_text(order(customer), items(
             {'Customer PO': 'PO-1', 'SO Remarks': 'S590'},
         ))
         assert result == 'PO-1 (S590)'
 
+    def test_site_name_appended(self):
+        """현장 단위 거래처는 현장명이 실린다 (실측 DND-2026-0717 제이케이콘트롤)"""
+        result = build_po_cell_text(order('제이케이콘트롤', 'JK2026071601'), items(
+            {'Customer PO': 'JK2026071601', 'SO Remarks': 'SK 울산 데이터센터'},
+        ))
+        assert result == 'JK2026071601 (SK 울산 데이터센터)'
+
 
 # === 붙으면 안 되는 자리 ===
 
 class TestVesselNameNotAppended:
-    def test_other_customers_never_show_remarks(self):
-        """지정 거래처가 아니면 Remarks가 있어도 붙지 않는다 (내부 메모 노출 방지)"""
-        result = build_po_cell_text(order(CK, '26071402R0'), items(
-            {'Customer PO': '26071402R0', 'SO Remarks': '내부 메모'},
-        ))
-        assert result == '26071402R0'
-
     def test_dn_own_remarks_never_leak(self):
         """DN 자체 Remarks(월합 문구)는 컬럼명이 같아도 PO 칸에 새지 않는다
 
@@ -137,7 +140,7 @@ class TestRowRemark:
     """
 
     def test_vessel_fills_empty_remark(self):
-        """일반 DN + 지정 거래처: 행마다 제 호선 (배 3척짜리 문서에서 행 구분이 목적)"""
+        """일반 DN: 행마다 제 호선 (배 3척짜리 문서에서 행 구분이 목적)"""
         item = pd.Series({'Customer PO': 'SCT2605-134', 'SO Remarks': '한화-H4394'})
         assert build_row_remark(item, so_remark_col='SO Remarks') == '한화-H4394'
 
@@ -145,9 +148,9 @@ class TestRowRemark:
         item = pd.Series({'Customer PO': 'PO-1', 'SO Remarks': None})
         assert build_row_remark(item, so_remark_col='SO Remarks') == ''
 
-    def test_non_target_customer_stays_empty(self):
-        """비대상 거래처(so_remark_col=None)는 기존 그대로 빈 비고"""
-        item = pd.Series({'Customer PO': 'PO-1', 'SO Remarks': '내부 메모'})
+    def test_no_remark_column_stays_empty(self):
+        """SO 비고 컬럼이 없는 경로(so_remark_col=None)는 기존 그대로 빈 비고"""
+        item = pd.Series({'Customer PO': 'PO-1', 'SO Remarks': 'H-8327'})
         assert build_row_remark(item, so_remark_col=None) == ''
 
     def test_merged_po_beats_vessel(self):
@@ -166,22 +169,25 @@ class TestRowRemark:
 class TestResolveSoRemarkColumn:
     """하단 병기와 본문 비고가 공유하는 관문"""
 
-    def test_target_customer_dn_path(self):
+    def test_dn_path(self):
         df = items({'Customer PO': 'PO-1', 'SO Remarks': 'H-8327'})
-        assert resolve_so_remark_column(order(), df) == 'SO Remarks'
+        assert resolve_so_remark_column(df) == 'SO Remarks'
 
-    def test_target_customer_adv_path(self):
+    def test_adv_path(self):
         df = items({'Customer PO': 'PO-1', 'Remarks': 'H-8327'})
-        assert resolve_so_remark_column(order(), df, doc_type='ADV') == 'Remarks'
+        assert resolve_so_remark_column(df, doc_type='ADV') == 'Remarks'
 
-    def test_non_target_customer_is_none(self):
-        df = items({'Customer PO': 'PO-1', 'SO Remarks': '내부 메모'})
-        assert resolve_so_remark_column(order(CK), df) is None
+    def test_unknown_doc_type_is_none(self):
+        df = items({'Customer PO': 'PO-1', 'SO Remarks': 'H-8327'})
+        assert resolve_so_remark_column(df, doc_type='PMT') is None
+
+    def test_no_items_is_none(self):
+        assert resolve_so_remark_column(None) is None
 
     def test_dn_path_ignores_dn_own_remarks(self):
         """'SO Remarks' 없이 'Remarks'만 있으면 DN 경로에선 None — 월합 문구이기 때문"""
         df = items({'Customer PO': 'PO-1', 'Remarks': '25일 마감, 월합세금계산서'})
-        assert resolve_so_remark_column(order(), df) is None
+        assert resolve_so_remark_column(df) is None
 
 
 # === 기존 동작 회귀 (호선명과 무관한 PO 나열) ===
@@ -225,11 +231,11 @@ class TestLoadDnDataSoRemarks:
             {'SO_ID': 'SOD-1', 'Line item': 1, 'Customer name': SCANTECH,
              'Customer PO': 'OR26060022', 'Item name': 'IQ3', 'Item qty': 2,
              'Sales Unit Price': 1000, 'Business registration number': '123-45-67890',
-             'Remarks': 'H-8327'},
+             'Remarks': 'H-8327', 'Comment': 'LR 선급 진행 건'},
             {'SO_ID': 'SOD-1', 'Line item': 2, 'Customer name': SCANTECH,
              'Customer PO': 'OR26060022', 'Item name': 'IQ5', 'Item qty': 1,
              'Sales Unit Price': 2000, 'Business registration number': '123-45-67890',
-             'Remarks': None},
+             'Remarks': None, 'Comment': 'Split from line 1'},
         ])
         dn = pd.DataFrame([
             {'DN_ID': 'DND-1', 'SO_ID': 'SOD-1', 'Line item': 1,
@@ -255,3 +261,15 @@ class TestLoadDnDataSoRemarks:
         """DN 자체 Remarks(월합 문구)는 이름 그대로, 값 그대로 남는다"""
         df = po_utils.load_dn_data()
         assert set(df['Remarks']) == {'25일 마감, 월합세금계산서'}
+
+    def test_so_comment_never_loaded(self, fake_workbook):
+        """SO Comment는 내부 메모 칸이다 — 거래명세표 데이터에 아예 실리지 않는다
+
+        Remarks를 전 거래처에 표기하게 된 전제(2026-11-03)가 이것이다. 병합 컬럼을
+        '전부'로 바꾸면 Comment가 어느 이름으로든 따라온다 — 값으로 못박는다.
+        """
+        df = po_utils.load_dn_data()
+        assert not any('Comment' in str(c) for c in df.columns)
+        values = set(df.astype(str).to_numpy().ravel())
+        assert 'LR 선급 진행 건' not in values
+        assert 'Split from line 1' not in values
