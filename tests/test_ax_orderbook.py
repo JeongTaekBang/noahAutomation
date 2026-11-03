@@ -9,6 +9,7 @@ build_ax_orderbook.py) 테스트
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 import openpyxl
@@ -17,6 +18,7 @@ import pytest
 
 import build_ax_orderbook as cli
 from po_generator import ax_orderbook as ax
+from po_generator import ax_orderbook_report as rep
 from po_generator.ax_orderbook_store import BASELINE, CLOSED, MONTHLY, OPEN, OrderbookStore, PeriodError, Plan
 
 
@@ -455,6 +457,7 @@ class TestCli:
         with pd.ExcelFile(out) as x:
             assert {'요약', '기간', 'Raw', '차이_월별', '출고후미청구', '확인목록', '환율'} <= set(x.sheet_names)
             assert len(pd.read_excel(x, sheet_name='Raw')) > 0
+        assert out.with_suffix('.html').stat().st_size > 1_000_000         # 엑셀 옆에 HTML (Plotly 엔진 포함)
 
     def test_reference_orderbook_falls_back_to_last_year(self, tmp_path):
         """1월 계산엔 그 해 회계 파일이 아직 없다 — 지난 해 파일로 매핑·속성만, 대조는 하지 않는다"""
@@ -639,6 +642,7 @@ class TestLifecycle:
         assert cli.main(['P03', *args]) == 1                       # 3월이 끝나기 전 추출본 — 저장 거부
         assert cli.main(['P03', *args, '--dry-run']) == 0           # 미리보기는 된다
         assert (tmp_path / 'out' / 'AX_오더북_2026_P03_미리보기.xlsx').exists()
+        assert (tmp_path / 'out' / 'AX_오더북_2026_P03_미리보기.html').exists()
         assert not (tmp_path / 'store.db').exists()
 
     def test_snapshot_checks(self, tmp_path):
@@ -654,3 +658,78 @@ class TestLifecycle:
         assert not errors and any('8일째' in w for w in warns)
         _, errors, warns = cli.check_snapshot([tmp_path / 'ir.xlsx'], [tmp_path / 'it.xlsx'], 2026, 10)
         assert not errors and warns
+
+
+def unpack(table: dict, strings: list[str]) -> pd.DataFrame:
+    """report_data의 열 단위 표 → DataFrame (사전 열은 문자열로 되돌린다 — 템플릿 JS의 rows()와 같은 일)"""
+    df = pd.DataFrame(table['cols'])
+    for c in table['str']:                      # 빈 값이 섞인 열은 float가 되므로 int로
+        df[c] = df[c].map(lambda i: None if pd.isna(i) else strings[int(i)])
+    return df
+
+
+class TestReport:
+    """결과 HTML — 데이터(report_data)와 파일 쓰기(write_report). 화면 로직(JS)은 실제 브라우저로 확인한다"""
+
+    @pytest.fixture
+    def report(self, scenario):
+        _, ir, _, res = scenario
+        off = res.raw_rows.copy()
+        off['Key'] = off['_key']
+        a = (off['_key'] == '82-00001.001100112') & (off['pn'] == 2)
+        off.loc[a, ['Value Output', 'Value End']] = [0.0, 2_000_000.0]          # 회계는 A를 3월에 청구했다
+        diff = ax.classify_differences(res, off, ir)
+        periods = pd.DataFrame([{'Period': 'P01', '상태': 'Closed', 'Raw 행': 10}])
+        data = rep.report_data(res, diff, off, periods, {'Item requirement': 'ir.xlsx'}, '방식', preview=True)
+        return res, off, diff, data
+
+    def test_totals_match_the_engine(self, report):
+        res, off, _, data = report
+        ours = unpack(data['ours'], data['strings']).groupby('pn')[['S', 'I', 'O', 'V', 'E']].sum()
+        want = res.keys.groupby('pn')[['Sv', 'Iv', 'Ov', 'Vv', 'Ev']].sum()
+        assert abs(ours.to_numpy() - want.to_numpy()).max() < 0.01
+        acct = unpack(data['acct'], data['strings']).groupby('pn')['E'].sum()
+        assert acct.to_dict() == pytest.approx(off.groupby('pn')['Value End'].sum().to_dict())
+
+    def test_keys_carry_filter_attributes(self, report):
+        res, _, _, data = report
+        keys = unpack(data['keys'], data['strings'])
+        ours = unpack(data['ours'], data['strings'])
+        assert set(keys['key']) == set(res.keys['Key'])
+        a = keys.set_index('key').loc['82-00001.001100112']
+        assert (a['project'], a['market'], a['obc'], a['cc']) == ('82-00001.001', 'CP&I', 'IQ3', '10')
+        assert ours['k'].map(keys['key']).tolist() == res.keys['Key'].tolist()      # 번호가 같은 키를 가리킨다
+
+    def test_diff_rows_point_to_keys_and_causes(self, report):
+        _, _, diff, data = report
+        d = unpack(data['diff'], data['strings'])
+        keys = unpack(data['keys'], data['strings'])
+        assert len(d) == len(diff) > 0
+        for row, (_, want) in zip(d.itertuples(), diff.iterrows()):
+            assert keys['key'][int(row.k)] == want['Key']
+            assert data['causes'][int(row.c)]['name'] == want['원인']
+        assert set(ax.DIFF_CAUSE_NOTES) == set(ax.DIFF_CAUSES)
+
+    def test_periods_and_meta(self, report):
+        data = report[3]
+        assert [p['label'] for p in data['periods']] == ['P01', 'P02', 'P03']
+        assert all(p['official'] for p in data['periods'])
+        assert (data['meta']['title'], data['meta']['preview']) == ('AX 오더북 2026 P03', True)
+        json.dumps(data, allow_nan=False)                                     # NaN이 없어야 JS가 읽는다
+
+    def test_write_report_embeds_data_and_engine(self, report, tmp_path):
+        from plotly.offline import get_plotlyjs
+        data = report[3]
+        data['strings'].append('</script><b>x<!--')        # 태그를 닫으려는 문자열도 데이터 안에 갇혀야 한다
+        html = rep.write_report(data, tmp_path / 'r.html').read_text(encoding='utf-8')
+        assert rep.PLACEHOLDER_DATA not in html and rep.PLACEHOLDER_PLOTLY not in html
+        assert '</script><b>x' not in html
+        payload = html.split('<script type="application/json" id="ax-data">')[1].split('</script>')[0]
+        assert json.loads(payload) == data
+        assert get_plotlyjs()[:200] in html
+
+    def test_template_needs_each_placeholder_once(self, tmp_path):
+        bad = tmp_path / 't.html'
+        bad.write_text('<html>__AX_DATA__</html>', encoding='utf-8')
+        with pytest.raises(ValueError, match='자리표시자'):
+            rep.write_report({'a': 1}, tmp_path / 'x.html', template=bad)

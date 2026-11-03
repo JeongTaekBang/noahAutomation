@@ -1052,6 +1052,19 @@ DIFF_CAUSES: tuple[str, ...] = (
     '회계 조정', '취소 주문(회계는 그달 Variance)', '지난 달 차이 이월', '키 갈림', '청구 월',
     '취소 주문(처음부터 제외)', '수주 사후 변경(IR은 지금 값)', '기초 차이', '환율', '기타',
 )
+# 결과 HTML의 원인 설명 — 판정 규칙은 classify_differences 독스트링이 소유하고, 여기는 읽는 사람용 한 줄
+DIFF_CAUSE_NOTES: dict[str, str] = {
+    '회계 조정': '회계가 그 키의 Start를 손으로 고쳤다 (회계 Start ≠ 회계 직전 달 End)',
+    '취소 주문(회계는 그달 Variance)': '그달 흐름은 같고 Start·Variance만 다르다 — 회계는 취소한 달에 빼고 우리는 처음부터 뺐다',
+    '지난 달 차이 이월': '그달 Input·Output·End는 같다 — 지난 달까지의 차이가 Start로 넘어온 것',
+    '키 갈림': '프로젝트 합계는 같고 키(Cost center·부서)만 다르다',
+    '청구 월': 'Output 차이가 앞뒤 달과 상쇄된다 — 우리는 출고월, AX는 청구월(월말 출고·다음 달 청구)',
+    '취소 주문(처음부터 제외)': '우리 End가 작고 그 프로젝트에 취소 라인이 있다 — 우리는 취소 주문을 처음부터 뺀다',
+    '수주 사후 변경(IR은 지금 값)': 'End 차이가 Input 차이로 설명된다 — IR은 바뀐 지금 값, AX는 수주 당시 값으로 넣고 바뀐 달에 고친다',
+    '기초 차이': 'P01 — 회계 P01 Start와 IR·IT가 본 전년 12월 말 잔고의 차이',
+    '환율': '외화 키의 환율 차이',
+    '기타': '위 어디에도 맞지 않는 차이',
+}
 
 
 def classify_differences(result: OrderbookResult, official: pd.DataFrame, ir: pd.DataFrame) -> pd.DataFrame:

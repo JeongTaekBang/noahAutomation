@@ -12,6 +12,8 @@ AX Sales Order Book(Table 50229)처럼 **달마다 계산해 저장**하고, 다
     저장된 마지막 달(Open)  다시 돌리면 다시 계산해 바꿔 넣는다(AX Last calculated). 그 앞 달(Closed)은 거부
 기준선부터 다시 만들려면 저장소 파일을 지운다(또는 --store로 다른 파일).
 회계 오더북은 기준선의 P01 Start와 키 매핑·속성에 쓰고, 같은 달 행이 있으면 대조해 차이와 원인을 붙인다.
+결과는 ax_orderbook/연도/ 아래 엑셀과 같은 이름의 HTML 두 개 — HTML은 Edge에서 더블클릭해 여는 인터랙티브 보고서
+(필터·차트·드릴다운, 인터넷 없이 열린다 — po_generator/ax_orderbook_report.py).
 
 준비물 (ax_orderbook/ 폴더, **마감 직후(다음 달 1~7일) 같은 날** 한 쌍):
     Item requirement_YYYYMMDD.xlsx   AX Item requirement — Show=All, Created date ≥ 01/01/2024 하나만
@@ -48,6 +50,7 @@ from po_generator.ax_orderbook import (
     compare_with_official, empty_official, keys_from_raw, load_fx_book, month_bounds, parse_period,
     read_currency_overrides, read_ir, read_it, read_raw,
 )
+from po_generator.ax_orderbook_report import report_data, write_report
 from po_generator.ax_orderbook_store import BASELINE, MONTHLY, OrderbookStore, Plan
 from po_generator.config import AX_ORDERBOOK_DB, AX_ORDERBOOK_DIR, DB_FILE, FINANCE_HUB_DIR
 from po_generator.logging_config import setup_logging
@@ -333,8 +336,21 @@ def _format_sheet(ws, header: bool = True) -> None:
         ws.column_dimensions[letter].width = width
 
 
+def write_html(res: OrderbookResult, workbook: Path, diff: pd.DataFrame, official: pd.DataFrame,
+               periods: pd.DataFrame, files: dict[str, str], note: str, preview: bool) -> Path | None:
+    """엑셀 옆에 같은 이름의 인터랙티브 HTML — Edge에서 더블클릭으로 연다. HTML은 덤이라 실패해도 엑셀 결과는 그대로 두고
+    경고만 한다(예: Plotly가 없는 PC)."""
+    try:
+        return write_report(report_data(res, diff, official, periods, files, note, preview=preview),
+                            workbook.with_suffix('.html'))
+    except Exception as exc:          # noqa: BLE001 — 어떤 실패든 엑셀 결과를 막지 않는다
+        logger.debug("결과 HTML 실패", exc_info=True)
+        print(f"[경고] 결과 HTML을 못 만들었습니다 (엑셀은 그대로): {exc}")
+        return None
+
+
 def print_summary(res: OrderbookResult, out_path: Path, months: pd.DataFrame, causes: pd.DataFrame,
-                  saved_note: str) -> None:
+                  saved_note: str, html_path: Path | None = None) -> None:
     print(f"\n[{res.year} P01~{res.period}] Raw 행 {len(res.raw_rows):,}개")
     cols = ['Period', '우리 Output', '우리 End'] + [c for c in ('차이 Output', '차이 End', '프로젝트 일치% Output',
                                                                '프로젝트 일치% End') if c in months.columns]
@@ -359,6 +375,8 @@ def print_summary(res: OrderbookResult, out_path: Path, months: pd.DataFrame, ca
         print(f"\n추출 범위: {res.next_filter_note}")
     print(f"\n{saved_note}")
     print(f"결과: {out_path}")
+    if html_path:
+        print(f"      {html_path}  (Edge로 열기)")
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -454,8 +472,10 @@ def main(argv: list[str] | None = None) -> int:
         out_path = out_dir / f"AX_오더북_{year}_P{upto:02d}{'_미리보기' if args.dry_run else ''}.xlsx"
         print("[4/4] 결과 파일 쓰는 중…")
         files['저장소'] = str(store.path)
-        written = write_workbook(res_all, out_path, table, diff, causes, files, periods, method_note(plan, upto))
-        print_summary(res_all, written, table, causes, saved_note)
+        note = method_note(plan, upto)
+        written = write_workbook(res_all, out_path, table, diff, causes, files, periods, note)
+        html_path = write_html(res_all, written, diff, official_y, periods, files, note, preview=args.dry_run)
+        print_summary(res_all, written, table, causes, saved_note, html_path)
         return 0
     except (ValueError, FileNotFoundError, KeyError) as exc:
         print(f"[오류] {exc}")

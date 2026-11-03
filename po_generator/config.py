@@ -600,6 +600,8 @@ AX_ORDERBOOK_DIR: Final[Path] = BASE_DIR / "ax_orderbook"
 # 달마다 계산한 오더북을 쌓는 저장소(우리 판 AX Table 50229) — 지난 달은 바뀌지 않고 다음 달은 저장된 End에서 시작한다.
 # 지우면 다음 실행이 기준선(P01~마감월을 한 번에)부터 다시 만든다.
 AX_ORDERBOOK_DB: Final[Path] = AX_ORDERBOOK_DIR / "ax_orderbook.db"
+# 결과 HTML(엑셀 옆에 같이 쓰는 인터랙티브 보고서) 템플릿 — 데이터와 Plotly 엔진을 끼워 넣어 오프라인 파일 하나로 만든다
+AX_ORDERBOOK_REPORT_TEMPLATE: Final[Path] = TEMPLATE_DIR / "ax_orderbook_report.html"
 # 그룹 월 마감환율 폴더(사용자별 OneDrive 경로). 'FX Rates - Closing rates - P{NN} {YYYY}.xlsx' 한 기간분만 있고
 # 그 파일은 **다음 달** AX 환율이다(P10 파일 = 11월) — 읽은 값을 AX_ORDERBOOK_DIR/fx_history.csv에 쌓는다.
 _finance_hub_dir = _load_user_setting('FINANCE_HUB_DIR', None)

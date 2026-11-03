@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AX 오더북</title>
+<!-- build_ax_orderbook.py가 만드는 결과 HTML의 템플릿 (po_generator/ax_orderbook_report.py가 아래 자리표시자 두 개를 채운다).
+     오프라인 파일 하나로 열려야 해서 외부 자원을 쓰지 않는다 — 차트 엔진(Plotly)과 데이터가 이 파일 안에 들어간다. -->
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1f2328;--sub:#59636e;--muted:#8a929b;--line:#d8dee4;--accent:#1f77b4;--hover:#eef3f8;--sel:#e3eefa;--bad:#cf222e;--warnbg:#fff8c5;--warnink:#7d4e00}
+@media (prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--ink:#e6edf3;--sub:#9da7b3;--muted:#7d8590;--line:#30363d;--accent:#4c9be8;--hover:#1f2937;--sel:#1c2d44;--bad:#f85149;--warnbg:#3b2e00;--warnink:#f2cc60}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 "Malgun Gothic","Segoe UI",sans-serif}
+header{padding:14px 24px 6px}
+h1{font-size:20px;margin:0 0 2px;font-weight:600}
+h2{font-size:17px;margin:0;font-weight:600}
+h3{font-size:14px;margin:16px 0 6px;font-weight:600}
+.meta,.note{color:var(--sub);font-size:12px}
+.banner{margin:8px 24px 0;padding:6px 12px;border-radius:6px;background:var(--warnbg);color:var(--warnink);font-size:13px;display:none}
+.bar{position:sticky;top:0;z-index:5;background:var(--bg);border-bottom:1px solid var(--line);padding:8px 24px;display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.bar label,.ctl label{font-size:12px;color:var(--sub);display:flex;gap:4px;align-items:center}
+select,input[type=search]{font:inherit;font-size:13px;padding:3px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink)}
+input[type=search]{width:230px}
+button.lnk{font:inherit;font-size:12px;border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:3px 10px;cursor:pointer}
+button.lnk:hover{background:var(--hover)}
+.tabs{display:flex;gap:4px;padding:10px 24px 0;flex-wrap:wrap}
+.tabs button{font:inherit;border:1px solid var(--line);border-bottom:none;background:transparent;color:var(--sub);padding:6px 14px;border-radius:8px 8px 0 0;cursor:pointer}
+.tabs button.on{background:var(--card);color:var(--ink);font-weight:600}
+main{padding:0 24px 32px}
+section{display:none;background:var(--card);border:1px solid var(--line);border-radius:0 8px 8px 8px;padding:16px}
+section.on{display:block}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:10px}
+.kpi{background:var(--bg);border-radius:8px;padding:10px 12px}
+.kpi .l{font-size:12px;color:var(--sub)}
+.kpi .v{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.kpi .s{font-size:12px;color:var(--muted)}
+.chart{width:100%;height:380px}
+.row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media (max-width:1100px){.row{grid-template-columns:minmax(0,1fr)}}
+.ctl{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.tw{max-height:520px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:4px 8px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{position:sticky;top:0;background:var(--card);color:var(--sub);font-weight:600;cursor:pointer;z-index:1}
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
+td.wrap{white-space:normal;min-width:260px}
+tr.click{cursor:pointer}
+tr.click:hover{background:var(--hover)}
+tr.sel{background:var(--sel)}
+tr.tot td{font-weight:600;background:var(--bg)}
+.neg{color:var(--bad)}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;vertical-align:-1px}
+.pills{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 10px}
+.pill{border:1px solid var(--line);border-radius:12px;padding:2px 10px;font-size:12px;cursor:pointer;background:var(--card);color:var(--ink)}
+.pill.on{background:var(--sel);border-color:var(--accent)}
+#detail{display:none;border:1px solid var(--accent);border-radius:8px;padding:12px;margin-top:16px}
+.dh{display:flex;gap:12px;align-items:baseline;flex-wrap:wrap}
+.more{margin-top:8px}
+#err{display:none;margin:8px 24px 0;padding:8px 12px;border-radius:6px;background:var(--bad);color:#fff}
+</style>
+</head>
+<body>
+<header><h1 id="title">AX 오더북</h1><div class="meta" id="meta"></div></header>
+<div class="banner" id="preview">미리보기 — 저장하지 않은 계산입니다 (build_ax_orderbook.py --dry-run)</div>
+<div id="err"></div>
+<div class="bar">
+  <label>기간 <select id="f-pn"></select></label>
+  <label>Market <select id="f-market"></select></label>
+  <label>Order Book Code <select id="f-obc"></select></label>
+  <label>Cost center <select id="f-cc"></select></label>
+  <label>검색 <input type="search" id="f-q" placeholder="프로젝트 · 고객 · 키"></label>
+  <button class="lnk" id="f-reset">필터 지우기</button>
+  <span class="note" id="f-note"></span>
+</div>
+<nav class="tabs" id="tabs"></nav>
+<main>
+  <section id="t-sum">
+    <div class="note" id="sum-sub"></div>
+    <div class="kpis" id="sum-kpis"></div>
+    <div class="chart" id="sum-flow"></div>
+    <p class="note">막대·선이나 아래 표의 행을 누르면 그 달로 기간이 바뀝니다. 회계 End는 같은 달 회계 오더북(필터도 같이 걸림).</p>
+    <h3>달별</h3>
+    <div class="tw"><table id="sum-table"></table></div>
+  </section>
+  <section id="t-book">
+    <div class="ctl"><label>묶음 <select id="book-group">
+      <option value="obc">Order Book Code</option><option value="market">Market</option><option value="cc">Cost center</option>
+      <option value="customer">고객</option><option value="project">프로젝트</option></select></label>
+      <span class="note">막대를 누르면 그 값으로 필터, 트리맵은 누르면 한 단계씩 들어가고 프로젝트를 누르면 상세가 열립니다.</span></div>
+    <div class="row"><div class="chart" id="book-bar"></div><div class="chart" id="book-tree"></div></div>
+    <h3>키별 <span class="note" id="book-count"></span></h3>
+    <div class="tw"><table id="book-table"></table></div>
+    <div class="more"><button class="lnk" id="book-more">200개 더 보기</button></div>
+    <div id="detail"></div>
+  </section>
+  <section id="t-diff">
+    <p class="note" id="diff-intro">회계 오더북과 같은 달·같은 키를 대조한 차이(우리 − 회계)를 원인별로 나눴습니다 — 엑셀 '차이_키별'과 같은 판정.
+      막대를 누르면 그 달·원인의 키가, 원인 표의 행을 누르면 전체 기간의 그 원인 키가 아래에 나옵니다.</p>
+    <div class="chart" id="diff-bar"></div>
+    <div class="row">
+      <div><h3>원인</h3><div class="tw" id="diff-legend"></div></div>
+      <div><h3>달별 대조</h3><div class="tw"><table id="diff-months"></table></div></div>
+    </div>
+    <h3 id="diff-sel"></h3>
+    <div class="tw"><table id="diff-table"></table></div>
+  </section>
+  <section id="t-pend">
+    <p class="note">마감월 말 기준으로 출고했지만 청구 전(Item transaction Posted)인 라인 — 크레딧·반품을 상쇄하고 남은 것만. End에 들어 있습니다.</p>
+    <div class="ctl"><span id="pend-sum"></span></div>
+    <div class="chart" id="pend-bar" style="height:300px"></div>
+    <div class="tw"><table id="pend-table"></table></div>
+  </section>
+  <section id="t-review">
+    <p class="note">계산하면서 사람이 확인해야 할 것으로 남긴 목록(엑셀 '확인목록'). 검색 필터만 걸립니다.</p>
+    <div class="pills" id="rv-kinds"></div>
+    <div class="tw"><table id="rv-table"></table></div>
+  </section>
+  <section id="t-info">
+    <h3>계산</h3><div id="info-meta"></div>
+    <h3>저장 기록 (기간)</h3><div id="info-store"></div>
+    <h3>환율</h3><div id="info-fx"></div>
+  </section>
+</main>
+<script>__PLOTLY_JS__</script>
+<script type="application/json" id="ax-data">__AX_DATA__</script>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  window.addEventListener('error', (e) => { const b = $('err'); b.style.display = 'block'; b.textContent = '화면을 그리다 오류가 났습니다: ' + e.message; });
+
+  const D = JSON.parse($('ax-data').textContent);
+  const STR = D.strings;
+  // 열 단위 표 → 행 객체 (사전 열은 문자열로 되돌린다)
+  function rows(t) {
+    const names = Object.keys(t.cols), strs = new Set(t.str || []), out = new Array(t.n);
+    for (let i = 0; i < t.n; i++) {
+      const o = {};
+      for (const c of names) { const v = t.cols[c][i]; o[c] = strs.has(c) ? (v === null ? '' : STR[v]) : v; }
+      out[i] = o;
+    }
+    return out;
+  }
+  const META = D.meta, PERIODS = D.periods, CAUSES = D.causes;
+  const KEYS = rows(D.keys);
+  for (const a of KEYS) a.q = [a.key, a.project, a.customer, a.name, a.account].join(' ').toLowerCase();
+  const OURS = rows(D.ours), ACCT = rows(D.acct), DIFF = rows(D.diff);
+  const LINES = rows(D.lines), PEND = rows(D.pending), REVIEW = rows(D.review);
+  const LAST = PERIODS[PERIODS.length - 1];
+  const byPn = (list) => { const m = new Map(); for (const r of list) { if (!m.has(r.pn)) m.set(r.pn, []); m.get(r.pn).push(r); } return m; };
+  const OURS_PN = byPn(OURS), ACCT_PN = byPn(ACCT), DIFF_PN = byPn(DIFF);
+  const PROJECT_KEYS = new Map();
+  KEYS.forEach((a, k) => { if (!PROJECT_KEYS.has(a.project)) PROJECT_KEYS.set(a.project, []); PROJECT_KEYS.get(a.project).push(k); });
+  const label = (pn) => 'P' + String(pn).padStart(2, '0');
+  const isOfficial = (pn) => PERIODS.some((p) => p.pn === pn && p.official);
+
+  // ---------------------------------------------------------------- 형식
+  const NF0 = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 });
+  const NF1 = new Intl.NumberFormat('ko-KR', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const NFQ = new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 4 });
+  const blank = (v) => v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v));
+  const won = (v) => blank(v) ? '' : NF0.format(Math.round(v));
+  const mil = (v) => blank(v) ? '–' : NF1.format(v / 1e6);
+  const pct = (v) => blank(v) ? '–' : NF1.format(v) + '%';
+  const esc = (t) => String(blank(t) ? '' : t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const num = (v) => blank(v) ? '<td></td>' : `<td class="n${v < -0.5 ? ' neg' : ''}">${won(v)}</td>`;
+  const qty = (v) => `<td class="n">${blank(v) ? '' : NFQ.format(v)}</td>`;
+  const txt = (v) => `<td>${esc(v)}</td>`;
+  const cnt = (n) => Number(n).toLocaleString('ko-KR');
+
+  // ---------------------------------------------------------------- 상태·필터
+  const st = { pn: LAST.pn, market: '', obc: '', cc: '', q: '', tab: 'sum', group: 'obc',
+               sort: { col: 'E', dir: -1 }, limit: 200, keyRows: [], cause: null, rvKind: '' };
+  let OK = [];
+  function refreshOk() {
+    OK = KEYS.map((a) => (!st.market || a.market === st.market) && (!st.obc || a.obc === st.obc)
+                        && (!st.cc || a.cc === st.cc) && (!st.q || a.q.includes(st.q)));
+  }
+  const anyFilter = () => !!(st.market || st.obc || st.cc || st.q);
+  const okK = (k) => k !== null && k !== undefined && OK[k];
+  function sumRows(list, keep) {
+    const t = { S: 0, I: 0, O: 0, V: 0, E: 0 };
+    for (const r of list || []) if (keep(r.k)) { t.S += r.S || 0; t.I += r.I || 0; t.O += r.O || 0; t.V += r.V || 0; t.E += r.E || 0; }
+    return t;
+  }
+  const ours = (pn) => sumRows(OURS_PN.get(pn), okK);
+  const acct = (pn) => isOfficial(pn) ? sumRows(ACCT_PN.get(pn), okK) : null;
+  // 프로젝트 일치율 — compare_with_official과 같은 정의: Output·End 중 하나라도 1원 넘는 프로젝트 중 차이 1원 이하의 비율
+  function matchRate(pn) {
+    const P = new Map();
+    const add = (r, side) => {
+      if (!okK(r.k)) return;
+      const p = KEYS[r.k].project; let o = P.get(p);
+      if (!o) { o = [0, 0, 0, 0]; P.set(p, o); }
+      o[side * 2] += r.O || 0; o[side * 2 + 1] += r.E || 0;
+    };
+    (OURS_PN.get(pn) || []).forEach((r) => add(r, 0));
+    (ACCT_PN.get(pn) || []).forEach((r) => add(r, 1));
+    let n = 0, mo = 0, me = 0;
+    for (const [oO, oE, aO, aE] of P.values()) {
+      if (Math.max(Math.abs(oO), Math.abs(oE), Math.abs(aO), Math.abs(aE)) <= 1) continue;
+      n++; if (Math.abs(oO - aO) <= 1) mo++; if (Math.abs(oE - aE) <= 1) me++;
+    }
+    return n ? { n: n, o: mo / n * 100, e: me / n * 100 } : null;
+  }
+
+  // ---------------------------------------------------------------- 차트
+  const C = { I: '#1f77b4', O: '#ff7f0e', E: '#2ca02c', A: '#7f7f7f', other: '#b0b0b0' };
+  const CAUSE_C = ['#8c564b', '#e377c2', '#17becf', '#bcbd22', '#ff7f0e', '#d62728', '#1f77b4', '#9467bd', '#2ca02c', '#7f7f7f'];
+  const CFG = { displaylogo: false, responsive: true, modeBarButtonsToRemove: ['select2d', 'lasso2d', 'autoScale2d'] };
+  const cssv = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  function merge(a, b) {
+    for (const k of Object.keys(b)) {
+      const v = b[k];
+      if (v && typeof v === 'object' && !Array.isArray(v) && a[k] && typeof a[k] === 'object' && !Array.isArray(a[k])) merge(a[k], v);
+      else a[k] = v;
+    }
+    return a;
+  }
+  function layout(extra) {
+    const ink = cssv('--ink'), grid = cssv('--line');
+    return merge({
+      margin: { l: 60, r: 16, t: 44, b: 40 }, paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+      font: { family: '"Malgun Gothic", "Segoe UI", sans-serif', size: 12, color: ink },
+      xaxis: { gridcolor: grid, linecolor: grid, zerolinecolor: grid, automargin: true },
+      yaxis: { gridcolor: grid, linecolor: grid, zerolinecolor: grid, automargin: true, tickformat: ',.0f' },
+      legend: { orientation: 'h', x: 0, y: 1.12 }, hoverlabel: { namelength: -1 },
+    }, extra || {});
+  }
+  function plot(id, traces, lay, onClick) {
+    const el = $(id);
+    Plotly.react(el, traces, lay, CFG);
+    el._axClick = onClick || null;
+    if (!el._axBound) { el.on('plotly_click', (ev) => { if (el._axClick) el._axClick(ev); }); el._axBound = true; }
+  }
+  const flowTraces = (xs, t, a) => [
+    { type: 'bar', name: 'Input', x: xs, y: t.map((x) => x.I / 1e6), marker: { color: C.I }, hovertemplate: 'Input %{y:,.1f}<extra></extra>' },
+    { type: 'bar', name: 'Output', x: xs, y: t.map((x) => x.O / 1e6), marker: { color: C.O }, hovertemplate: 'Output %{y:,.1f}<extra></extra>' },
+    { type: 'scatter', mode: 'lines+markers', name: 'End', x: xs, y: t.map((x) => x.E / 1e6), line: { color: C.E, width: 2.5 }, hovertemplate: 'End %{y:,.1f}<extra></extra>' },
+    { type: 'scatter', mode: 'lines', name: '회계 End', x: xs, y: a.map((x) => x ? x.E / 1e6 : null), line: { color: C.A, width: 2, dash: 'dash' }, hovertemplate: '회계 End %{y:,.1f}<extra></extra>' },
+  ];
+
+  // ---------------------------------------------------------------- 머리·필터·탭
+  function renderHeader() {
+    document.title = META.title;
+    $('title').textContent = META.title;
+    const f = META.files || {};
+    $('meta').textContent = ['만든 시각 ' + META.generated, f['Item requirement'], f['Item transaction'], f['회계 오더북'] && '회계 ' + f['회계 오더북']]
+      .filter(Boolean).join(' · ');
+    if (META.preview) $('preview').style.display = 'block';
+  }
+  function fillSelect(sel, values) {
+    sel.innerHTML = '<option value="">전체</option>' + values.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('');
+  }
+  const uniq = (f) => [...new Set(KEYS.map(f).filter((v) => v))].sort((a, b) => a.localeCompare(b, 'ko'));
+  function initFilters() {
+    $('f-pn').innerHTML = PERIODS.map((p) => `<option value="${p.pn}">${p.label}${p.official ? '' : ' (회계 없음)'}</option>`).join('');
+    $('f-pn').value = String(st.pn);
+    fillSelect($('f-market'), uniq((a) => a.market));
+    fillSelect($('f-obc'), uniq((a) => a.obc));
+    fillSelect($('f-cc'), uniq((a) => a.cc));
+    $('f-pn').onchange = () => setPn(+$('f-pn').value);
+    for (const key of ['market', 'obc', 'cc']) $('f-' + key).onchange = () => { st[key] = $('f-' + key).value; changed(); };
+    let timer = null;
+    $('f-q').oninput = () => { clearTimeout(timer); timer = setTimeout(() => { st.q = $('f-q').value.trim().toLowerCase(); changed(); }, 200); };
+    $('f-reset').onclick = () => {
+      st.market = st.obc = st.cc = st.q = '';
+      for (const id of ['f-market', 'f-obc', 'f-cc', 'f-q']) $(id).value = '';
+      changed();
+    };
+  }
+  function changed() { refreshOk(); st.limit = 200; st.cause = null; render(); }
+  function setPn(pn) { st.pn = pn; $('f-pn').value = String(pn); st.cause = null; st.limit = 200; render(); }
+  function setFilter(key, value) { st[key] = value; $('f-' + key).value = value; changed(); }
+  const TABS = [['sum', '요약'], ['book', '오더북'], ['diff', '차이 원인'], ['pend', '출고 후 미청구'], ['review', '확인목록'], ['info', '정보']];
+  function initTabs() {
+    $('tabs').innerHTML = TABS.map(([id, name]) => `<button data-tab="${id}">${name}</button>`).join('');
+    $('tabs').onclick = (ev) => { const id = ev.target.dataset && ev.target.dataset.tab; if (id) show(id); };
+  }
+  function show(id) {
+    st.tab = id;
+    for (const [t] of TABS) $('t-' + t).classList.toggle('on', t === id);
+    for (const b of $('tabs').children) b.classList.toggle('on', b.dataset.tab === id);
+    render();
+  }
+  function render() {
+    $('f-note').textContent = anyFilter() ? `필터에 걸린 키 ${cnt(OK.filter(Boolean).length)}개` : '';
+    ({ sum: renderSum, book: renderBook, diff: renderDiff, pend: renderPend, review: renderReview, info: renderInfo })[st.tab]();
+  }
+
+  // ---------------------------------------------------------------- 요약
+  function kpi(lab, value, sub, title) {
+    return `<div class="kpi"><div class="l">${esc(lab)}</div><div class="v"${title ? ` title="${esc(title)}"` : ''}>${value}</div><div class="s">${sub || ''}</div></div>`;
+  }
+  function renderSum() {
+    const pn = st.pn, t = ours(pn), a = acct(pn);
+    const money = (lab, v, k) => kpi(lab, mil(v), a && k ? '회계 ' + mil(a[k]) : '', won(v) + ' 원');
+    let html = money('Start', t.S, 'S') + money('Input', t.I, 'I') + money('Output', t.O, 'O') + money('Variance', t.V, 'V') + money('End', t.E, 'E');
+    if (a) {
+      const m = matchRate(pn);
+      html += kpi('회계와 End 차이', mil(t.E - a.E), '우리 − 회계', won(t.E - a.E) + ' 원');
+      html += kpi('프로젝트 일치 Output / End', m ? `${pct(m.o)} / ${pct(m.e)}` : '–', m ? `프로젝트 ${cnt(m.n)}개` : '');
+    } else {
+      html += kpi('회계 오더북', '없음', `${label(pn)} 회계 행이 없어 대조하지 않음`);
+    }
+    $('sum-kpis').innerHTML = html;
+    $('sum-sub').textContent = `${label(pn)} 기준 · 금액 백만 원 (숫자에 마우스를 올리면 원 단위)`;
+    const xs = PERIODS.map((p) => p.label), tot = PERIODS.map((p) => ours(p.pn)), acs = PERIODS.map((p) => acct(p.pn));
+    const idx = PERIODS.findIndex((p) => p.pn === pn);
+    plot('sum-flow', flowTraces(xs, tot, acs), layout({
+      barmode: 'group', hovermode: 'x unified', title: { text: '월별 흐름 (백만 원)', font: { size: 14 } },
+      shapes: idx < 0 ? [] : [{ type: 'rect', xref: 'x', yref: 'paper', x0: idx - 0.5, x1: idx + 0.5, y0: 0, y1: 1,
+                                fillcolor: 'rgba(31,119,180,0.08)', line: { width: 0 }, layer: 'below' }],
+    }), (ev) => { const p = PERIODS[ev.points[0].pointIndex]; if (p) setPn(p.pn); });
+    const body = PERIODS.map((p, i) => {
+      const x = tot[i], y = acs[i], m = y ? matchRate(p.pn) : null;
+      return `<tr class="click${p.pn === pn ? ' sel' : ''}" data-pn="${p.pn}"><td>${p.label}</td>${num(x.S)}${num(x.I)}${num(x.O)}${num(x.V)}${num(x.E)}`
+        + `${y ? num(y.E) + num(x.E - y.E) : '<td></td><td></td>'}<td class="n">${m ? pct(m.o) : ''}</td><td class="n">${m ? pct(m.e) : ''}</td></tr>`;
+    }).join('');
+    $('sum-table').innerHTML = '<thead><tr><th>Period</th><th class="n">Start</th><th class="n">Input</th><th class="n">Output</th>'
+      + '<th class="n">Variance</th><th class="n">End</th><th class="n">회계 End</th><th class="n">차이</th><th class="n">일치 Output</th>'
+      + `<th class="n">일치 End</th></tr></thead><tbody>${body}</tbody>`;
+  }
+
+  // ---------------------------------------------------------------- 오더북
+  const GROUPS = {
+    obc: ['Order Book Code', (a) => a.obc || '(미지정)'], market: ['Market', (a) => a.market || '(미지정)'],
+    cc: ['Cost center', (a) => a.cc || '(미지정)'], customer: ['고객', (a) => a.customer || '(미지정)'],
+    project: ['프로젝트', (a) => a.project],
+  };
+  function renderBook() {
+    const pn = st.pn, list = (OURS_PN.get(pn) || []).filter((r) => okK(r.k));
+    const [gName, gf] = GROUPS[st.group];
+    const g = new Map();
+    for (const r of list) { const name = gf(KEYS[r.k]); g.set(name, (g.get(name) || 0) + (r.E || 0)); }
+    const items = [...g.entries()].filter((x) => Math.abs(x[1]) >= 0.5).sort((x, y) => y[1] - x[1]);
+    const top = items.slice(0, 15);
+    if (items.length > 15) top.push([`기타 ${items.length - 15}개`, items.slice(15).reduce((s, x) => s + x[1], 0)]);
+    top.reverse();
+    plot('book-bar', [{
+      type: 'bar', orientation: 'h', x: top.map((x) => x[1] / 1e6), y: top.map((x) => x[0]),
+      marker: { color: top.map((x) => x[0].startsWith('기타 ') ? C.other : C.E) },
+      hovertemplate: '%{y}<br>%{x:,.1f} 백만 원<extra></extra>',
+    }], layout({ title: { text: `${label(pn)} End — ${gName}별 상위 15 (백만 원)`, font: { size: 14 } },
+                 margin: { l: 10 }, yaxis: { tickformat: '' }, xaxis: { tickformat: ',.0f' } }),
+    (ev) => {
+      const name = String(ev.points[0].y);
+      if (name.startsWith('기타 ') || name === '(미지정)') return;
+      if (st.group === 'project') showProject(name);
+      else if (st.group === 'customer') { $('f-q').value = name; st.q = name.toLowerCase(); changed(); }
+      else setFilter(st.group, name);
+    });
+    // 트리맵 — 금액은 원 정수로 더해야 부모 = 자식 합이 정확히 맞는다(branchvalues 'total')
+    const tree = new Map();
+    for (const r of list) {
+      if (!(r.E > 0.5)) continue;
+      const a = KEYS[r.k], m = a.market || '(미지정)', o = a.obc || '(미지정)';
+      if (!tree.has(m)) tree.set(m, new Map());
+      const tm = tree.get(m);
+      if (!tm.has(o)) tm.set(o, new Map());
+      const to = tm.get(o);
+      to.set(a.project, (to.get(a.project) || 0) + Math.round(r.E));
+    }
+    const ids = [], labels = [], parents = [], values = [];
+    for (const [m, tm] of tree) {
+      const mi = ids.length; ids.push('m|' + m); labels.push(m); parents.push(''); values.push(0);
+      for (const [o, to] of tm) {
+        const oi = ids.length; ids.push('o|' + m + '|' + o); labels.push(o); parents.push('m|' + m); values.push(0);
+        for (const [p, v] of to) { ids.push('p|' + m + '|' + o + '|' + p); labels.push(p); parents.push('o|' + m + '|' + o); values.push(v); values[oi] += v; }
+        values[mi] += values[oi];
+      }
+    }
+    plot('book-tree', [{
+      type: 'treemap', ids, labels, parents, values, branchvalues: 'total', maxdepth: 2,
+      customdata: values.map((v) => v / 1e6), texttemplate: '%{label}<br>%{customdata:,.1f}',
+      hovertemplate: '%{label}<br>%{customdata:,.1f} 백만 원<br>전체의 %{percentRoot:.1%}<extra></extra>',
+    }], layout({ title: { text: `${label(pn)} End 구성 — Market › Order Book Code › 프로젝트`, font: { size: 14 } },
+                 margin: { l: 4, r: 4, t: 44, b: 4 } }),
+    (ev) => { const id = String(ev.points[0].id || ''); if (id.startsWith('p|')) showProject(ev.points[0].label); });
+    st.keyRows = keyRows(pn);
+    renderKeyTable();
+  }
+  function keyRows(pn) {
+    const m = new Map(), off = isOfficial(pn);
+    const get = (k) => {
+      let o = m.get(k);
+      if (!o) { o = { k, S: 0, I: 0, O: 0, V: 0, E: 0, aE: off ? 0 : null, cause: '' }; m.set(k, o); }
+      return o;
+    };
+    for (const r of OURS_PN.get(pn) || []) if (okK(r.k)) { const o = get(r.k); o.S += r.S || 0; o.I += r.I || 0; o.O += r.O || 0; o.V += r.V || 0; o.E += r.E || 0; }
+    if (off) for (const r of ACCT_PN.get(pn) || []) if (okK(r.k)) get(r.k).aE += r.E || 0;
+    for (const r of DIFF_PN.get(pn) || []) { const o = m.get(r.k); if (o && r.c !== null) o.cause = CAUSES[r.c].name; }
+    return [...m.values()].map((o) => {
+      const a = KEYS[o.k];
+      return Object.assign(o, { project: a.project, customer: a.customer, obc: a.obc, market: a.market, cc: a.cc, key: a.key,
+                                dE: off ? o.E - o.aE : null });
+    });
+  }
+  const KEY_COLS = [['project', '프로젝트'], ['customer', '고객'], ['obc', 'Order Book Code'], ['market', 'Market'], ['cc', 'CC'],
+    ['key', 'Key'], ['S', 'Start', 1], ['I', 'Input', 1], ['O', 'Output', 1], ['V', 'Variance', 1], ['E', 'End', 1],
+    ['aE', '회계 End', 1], ['dE', '차이', 1], ['cause', '차이 원인']];
+  function sortRows(list, sort) {
+    const numeric = !!(KEY_COLS.find((c) => c[0] === sort.col) || [])[2];
+    const empty = (v) => blank(v) || v === '';
+    return list.slice().sort((a, b) => {
+      const x = a[sort.col], y = b[sort.col];
+      if (empty(x) || empty(y)) return empty(x) === empty(y) ? 0 : (empty(x) ? 1 : -1);
+      return (numeric ? x - y : String(x).localeCompare(String(y), 'ko')) * sort.dir;
+    });
+  }
+  function renderKeyTable() {
+    const list = sortRows(st.keyRows, st.sort), shown = list.slice(0, st.limit), off = isOfficial(st.pn);
+    const head = KEY_COLS.map(([c, n, isNum]) => `<th data-col="${c}" class="${isNum ? 'n' : ''}">${n}${st.sort.col === c ? (st.sort.dir < 0 ? ' ▼' : ' ▲') : ''}</th>`).join('');
+    const t = list.reduce((s, o) => { s.S += o.S; s.I += o.I; s.O += o.O; s.V += o.V; s.E += o.E; s.aE += o.aE || 0; return s; }, { S: 0, I: 0, O: 0, V: 0, E: 0, aE: 0 });
+    const total = `<tr class="tot"><td colspan="6">합계 (${cnt(list.length)}개 키)</td>${num(t.S)}${num(t.I)}${num(t.O)}${num(t.V)}${num(t.E)}`
+      + `${off ? num(t.aE) + num(t.E - t.aE) : '<td></td><td></td>'}<td></td></tr>`;
+    const body = shown.map((o) => `<tr class="click" data-project="${esc(o.project)}">${txt(o.project)}${txt(o.customer)}${txt(o.obc)}${txt(o.market)}`
+      + `${txt(o.cc)}${txt(o.key)}${num(o.S)}${num(o.I)}${num(o.O)}${num(o.V)}${num(o.E)}${num(o.aE)}${num(o.dE)}${txt(o.cause)}</tr>`).join('');
+    $('book-table').innerHTML = `<thead><tr>${head}</tr></thead><tbody>${total}${body}</tbody>`;
+    $('book-count').textContent = `${label(st.pn)} · ${cnt(shown.length)} / ${cnt(list.length)}개 키 — 머리글을 누르면 정렬, 행을 누르면 프로젝트 상세`;
+    $('book-more').style.display = list.length > st.limit ? '' : 'none';
+  }
+  function showProject(p) {
+    if (!PROJECT_KEYS.has(p)) return;
+    if (st.tab !== 'book') show('book');
+    const keys = PROJECT_KEYS.get(p), set = new Set(keys), a = KEYS[keys[0]];
+    const inP = (k) => set.has(k);
+    const ms = PERIODS.map((pp) => ({
+      p: pp, t: sumRows(OURS_PN.get(pp.pn), inP), a: pp.official ? sumRows(ACCT_PN.get(pp.pn), inP) : null,
+      causes: [...new Set((DIFF_PN.get(pp.pn) || []).filter((r) => inP(r.k) && r.c !== null).map((r) => CAUSES[r.c].name))].join(', '),
+    }));
+    const lines = LINES.filter((l) => l.project === p);
+    const pend = PEND.filter((x) => x.project === p);
+    const rv = REVIEW.filter((x) => String(x.project || '').split(', ').includes(p));
+    const det = $('detail');
+    det.innerHTML = `<div class="dh"><h2>${esc(p)}</h2><span class="note">${esc(a.customer)}${a.name ? ' · ' + esc(a.name) : ''}</span>`
+      + '<button class="lnk" id="det-close">닫기</button></div>'
+      + '<div class="chart" id="det-chart" style="height:300px"></div>'
+      + `<h3>달별</h3><div class="tw"><table>${monthTable(ms)}</table></div>`
+      + `<h3>키 (${keys.length})</h3><div class="tw"><table><thead><tr><th>Key</th><th>Order Book Code</th><th>Market</th><th>Cost center</th><th>Prod/Dept</th></tr></thead><tbody>`
+      + keys.map((k) => { const x = KEYS[k]; return `<tr>${txt(x.key)}${txt(x.obc)}${txt(x.market)}${txt(x.cc)}${txt(x.dept)}</tr>`; }).join('') + '</tbody></table></div>'
+      + `<h3>라인내역 — ${LAST.label} (${lines.length})</h3>`
+      + (lines.length ? `<div class="tw"><table>${linesTable(lines)}</table></div>` : `<p class="note">${LAST.label}에 이 프로젝트의 라인 기여가 없습니다</p>`)
+      + (pend.length ? `<h3>출고 후 미청구 (${pend.length})</h3><div class="tw"><table>${pendTable(pend, false)}</table></div>` : '')
+      + (rv.length ? `<h3>확인목록 (${rv.length})</h3><div class="tw"><table>${reviewTable(rv)}</table></div>` : '');
+    det.style.display = 'block';
+    $('det-close').onclick = () => { det.style.display = 'none'; };
+    plot('det-chart', flowTraces(PERIODS.map((x) => x.label), ms.map((m) => m.t), ms.map((m) => m.a)),
+         layout({ barmode: 'group', hovermode: 'x unified', yaxis: { tickformat: ',.1f' },
+                  title: { text: `${p} — 월별 흐름 (백만 원, 필터와 관계없이 프로젝트 전체)`, font: { size: 13 } } }));
+    det.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  function monthTable(ms) {
+    return '<thead><tr><th>Period</th><th class="n">Start</th><th class="n">Input</th><th class="n">Output</th><th class="n">Variance</th>'
+      + '<th class="n">End</th><th class="n">회계 End</th><th class="n">차이</th><th>차이 원인</th></tr></thead><tbody>'
+      + ms.map((m) => `<tr><td>${m.p.label}</td>${num(m.t.S)}${num(m.t.I)}${num(m.t.O)}${num(m.t.V)}${num(m.t.E)}`
+        + `${m.a ? num(m.a.E) + num(m.t.E - m.a.E) : '<td></td><td></td>'}${txt(m.causes)}</tr>`).join('') + '</tbody>';
+  }
+  function linesTable(ls) {
+    return '<thead><tr><th>Line</th><th>Item</th><th>Item name</th><th>통화</th><th>상태</th><th>생성(KST)</th><th>출고</th>'
+      + '<th class="n">수량</th><th class="n">금액(통화)</th><th class="n">Input</th><th class="n">Output</th><th class="n">End</th>'
+      + '<th class="n">미출고·미청구 수량</th></tr></thead><tbody>'
+      + ls.map((l) => `<tr>${txt(l.line)}${txt(l.item)}${txt(l.itemName)}${txt(l.cur)}${txt(l.status)}${txt(l.created)}${txt(l.ship)}`
+        + `${qty(l.qty)}${num(l.net)}${num(l.inV)}${num(l.outV)}${num(l.endV)}${qty(l.endQ)}</tr>`).join('') + '</tbody>';
+  }
+  function pendTable(list, withProject) {
+    return `<thead><tr>${withProject ? '<th>프로젝트</th><th>Key</th>' : ''}<th>Line</th><th>Item name</th><th>첫 출고</th><th>마지막 출고</th>`
+      + '<th class="n">경과 개월</th><th class="n">수량</th><th>통화</th><th class="n">금액(통화)</th><th class="n">금액(원)</th></tr></thead><tbody>'
+      + list.map((x) => `<tr${withProject ? ` class="click" data-project="${esc(x.project)}"` : ''}>${withProject ? txt(x.project) + txt(x.key) : ''}`
+        + `${txt(x.line)}${txt(x.itemName)}${txt(x.first)}${txt(x.last)}<td class="n">${blank(x.months) ? '' : x.months}</td>${qty(x.qty)}`
+        + `${txt(x.cur)}${num(x.net)}${num(x.krw)}</tr>`).join('') + '</tbody>';
+  }
+  function reviewTable(list) {
+    return '<thead><tr><th>구분</th><th>Key</th><th>프로젝트</th><th>고객</th><th class="n">금액</th><th>내용</th></tr></thead><tbody>'
+      + list.map((r) => `<tr>${txt(r.kind)}${txt(r.key)}${txt(r.project)}${txt(r.customer)}${num(r.amount)}<td class="wrap">${esc(r.detail)}</td></tr>`).join('')
+      + '</tbody>';
+  }
+
+  // ---------------------------------------------------------------- 차이 원인
+  function renderDiff() {
+    const months = PERIODS.filter((p) => p.official);
+    if (!months.length) {
+      $('diff-intro').textContent = '회계 오더북 행이 있는 달이 없어 대조하지 않았습니다.';
+      return;
+    }
+    const xs = months.map((p) => p.label), traces = [];
+    CAUSES.forEach((c, ci) => {
+      const ys = months.map((p) => (DIFF_PN.get(p.pn) || []).reduce((s, r) => s + (r.c === ci && okK(r.k) ? (r.dE || 0) : 0), 0) / 1e6);
+      if (ys.some((v) => Math.abs(v) >= 0.05)) {
+        traces.push({ type: 'bar', name: c.name, x: xs, y: ys, marker: { color: CAUSE_C[ci % CAUSE_C.length] },
+                      customdata: months.map((p) => [p.pn, ci]), hovertemplate: `${esc(c.name)}<br>%{x} %{y:,.1f} 백만 원<extra></extra>` });
+      }
+    });
+    plot('diff-bar', traces, layout({ barmode: 'relative', hovermode: 'closest', margin: { b: 90 },
+      legend: { orientation: 'h', x: 0, y: -0.14, yanchor: 'top' },   // 원인이 많아 줄이 넘친다 — 제목과 겹치지 않게 아래로
+      title: { text: '회계와의 End 차이 — 원인별 (백만 원, 우리 − 회계)', font: { size: 14 } } }),
+    (ev) => { const cd = ev.points[0].customdata; if (cd) { st.cause = { pn: cd[0], c: cd[1] }; renderDiffTable(); $('diff-sel').scrollIntoView({ behavior: 'smooth' }); } });
+    const keysBy = CAUSES.map(() => new Set());
+    for (const r of DIFF) if (okK(r.k) && r.c !== null) keysBy[r.c].add(r.k);
+    $('diff-legend').innerHTML = '<table><thead><tr><th>원인</th><th class="n">키</th><th>뜻</th></tr></thead><tbody>'
+      + CAUSES.map((c, ci) => `<tr class="click" data-c="${ci}"><td><span class="sw" style="background:${CAUSE_C[ci % CAUSE_C.length]}"></span>${esc(c.name)}</td>`
+        + `<td class="n">${cnt(keysBy[ci].size)}</td><td class="wrap">${esc(c.note)}</td></tr>`).join('') + '</tbody></table>';
+    $('diff-months').innerHTML = '<thead><tr><th>Period</th><th class="n">우리 End</th><th class="n">회계 End</th><th class="n">차이</th>'
+      + '<th class="n">일치 Output</th><th class="n">일치 End</th></tr></thead><tbody>'
+      + months.map((p) => { const t = ours(p.pn), a = acct(p.pn), m = matchRate(p.pn);
+        return `<tr><td>${p.label}</td>${num(t.E)}${num(a.E)}${num(t.E - a.E)}<td class="n">${m ? pct(m.o) : ''}</td><td class="n">${m ? pct(m.e) : ''}</td></tr>`; }).join('')
+      + '</tbody>';
+    renderDiffTable();
+  }
+  function renderDiffTable() {
+    const sel = st.cause, offMonths = PERIODS.filter((p) => p.official);
+    let list = DIFF.filter((r) => okK(r.k)), title;
+    if (sel) {
+      list = list.filter((r) => r.c === sel.c && (sel.pn === null || r.pn === sel.pn));
+      title = `${sel.pn === null ? '전체 기간' : label(sel.pn)} · ${CAUSES[sel.c].name}`;
+    } else {
+      const pn = isOfficial(st.pn) ? st.pn : (offMonths.length ? offMonths[offMonths.length - 1].pn : st.pn);
+      list = list.filter((r) => r.pn === pn);
+      title = `${label(pn)} · 모든 원인`;
+    }
+    list.sort((x, y) => Math.abs(y.dE || 0) - Math.abs(x.dE || 0));
+    const shown = list.slice(0, 300);
+    $('diff-sel').innerHTML = `키 — ${esc(title)} <span class="note">(${cnt(list.length)}개${list.length > 300 ? ', End 차이가 큰 300개만' : ''}, 행을 누르면 프로젝트 상세)</span>`
+      + (sel ? ' <button class="lnk" id="diff-clear">선택 지우기</button>' : '');
+    if (sel) $('diff-clear').onclick = () => { st.cause = null; renderDiffTable(); };
+    $('diff-table').innerHTML = '<thead><tr><th>Period</th><th>원인</th><th>프로젝트</th><th>고객</th><th>Key</th><th class="n">End 차이</th>'
+      + '<th class="n">Output 차이</th><th class="n">Input 차이</th><th class="n">Start 차이</th><th class="n">Variance 차이</th>'
+      + '<th class="n">우리 End</th><th class="n">회계 End</th></tr></thead><tbody>'
+      + shown.map((r) => { const a = KEYS[r.k] || {};
+        return `<tr class="click" data-project="${esc(a.project)}"><td>${label(r.pn)}</td>${txt(r.c === null ? '' : CAUSES[r.c].name)}${txt(a.project)}`
+          + `${txt(a.customer)}${txt(a.key)}${num(r.dE)}${num(r.dO)}${num(r.dI)}${num(r.dS)}${num(r.dV)}${num(r.oE)}${num(r.aE)}</tr>`; }).join('')
+      + '</tbody>';
+  }
+
+  // ---------------------------------------------------------------- 출고 후 미청구·확인목록·정보
+  const BUCKETS = ['당월', '1~2개월', '3~5개월', '6~11개월', '12개월 이상'];
+  const bucketOf = (m) => m <= 0 ? 0 : m <= 2 ? 1 : m <= 5 ? 2 : m <= 11 ? 3 : 4;
+  function pendOk(x) {
+    if (!blank(x.k)) return OK[x.k];
+    return !(st.market || st.obc || st.cc) && (!st.q || (x.project + ' ' + x.key).toLowerCase().includes(st.q));
+  }
+  function renderPend() {
+    const list = PEND.filter(pendOk).sort((x, y) => (y.months || 0) - (x.months || 0) || (y.krw || 0) - (x.krw || 0));
+    const agg = BUCKETS.map(() => ({ n: 0, v: 0 }));
+    for (const x of list) { const g = agg[bucketOf(x.months || 0)]; g.n++; g.v += x.krw || 0; }
+    plot('pend-bar', [{ type: 'bar', x: BUCKETS, y: agg.map((g) => g.v / 1e6), text: agg.map((g) => g.n + '건'), textposition: 'outside',
+                        marker: { color: C.O }, hovertemplate: '%{x}<br>%{y:,.1f} 백만 원 · %{text}<extra></extra>' }],
+         layout({ title: { text: `${LAST.label} 말 — 첫 출고부터 지난 개월별 (백만 원)`, font: { size: 14 } } }));
+    $('pend-sum').textContent = `${cnt(list.length)}라인 · ${won(list.reduce((s, x) => s + (x.krw || 0), 0))} 원`;
+    $('pend-table').innerHTML = pendTable(list, true);
+  }
+  function renderReview() {
+    const q = st.q;
+    const inQ = REVIEW.filter((r) => !q || [r.kind, r.key, r.project, r.customer, r.detail].join(' ').toLowerCase().includes(q));
+    const counts = new Map();
+    for (const r of inQ) counts.set(r.kind, (counts.get(r.kind) || 0) + 1);
+    $('rv-kinds').innerHTML = `<span class="pill${st.rvKind ? '' : ' on'}" data-kind="">전체 ${cnt(inQ.length)}</span>`
+      + [...counts.entries()].map(([k, n]) => `<span class="pill${st.rvKind === k ? ' on' : ''}" data-kind="${esc(k)}">${esc(k)} ${cnt(n)}</span>`).join('');
+    $('rv-table').innerHTML = reviewTable(inQ.filter((r) => !st.rvKind || r.kind === st.rvKind));
+  }
+  function recTable(recs) {
+    if (!recs || !recs.length) return '<p class="note">없음</p>';
+    const cols = Object.keys(recs[0]);
+    return '<div class="tw"><table><thead><tr>' + cols.map((c) => `<th>${esc(c)}</th>`).join('') + '</tr></thead><tbody>'
+      + recs.map((r) => '<tr>' + cols.map((c) => typeof r[c] === 'number' ? `<td class="n">${NFQ.format(r[c])}</td>` : txt(r[c])).join('') + '</tr>').join('')
+      + '</tbody></table></div>';
+  }
+  function renderInfo() {
+    const items = [['만든 시각', META.generated], ...Object.entries(META.files || {}), ['계산 방식', META.note], ['추출 범위', META.filter_note]];
+    $('info-meta').innerHTML = '<div class="tw"><table><tbody>'
+      + items.filter((x) => x[1]).map(([k, v]) => `<tr><th style="cursor:default">${esc(k)}</th><td class="wrap">${esc(v)}</td></tr>`).join('') + '</tbody></table></div>';
+    $('info-store').innerHTML = recTable(D.store);
+    $('info-fx').innerHTML = recTable(D.fx);
+  }
+
+  // ---------------------------------------------------------------- 연결
+  function wire() {
+    $('sum-table').onclick = (ev) => { const tr = ev.target.closest('tr[data-pn]'); if (tr) setPn(+tr.dataset.pn); };
+    $('book-group').onchange = () => { st.group = $('book-group').value; renderBook(); };
+    $('book-more').onclick = () => { st.limit += 200; renderKeyTable(); };
+    $('book-table').onclick = (ev) => {
+      const th = ev.target.closest('th[data-col]');
+      if (th) {
+        const c = th.dataset.col, isNum = !!(KEY_COLS.find((x) => x[0] === c) || [])[2];
+        st.sort = { col: c, dir: st.sort.col === c ? -st.sort.dir : (isNum ? -1 : 1) };
+        renderKeyTable();
+        return;
+      }
+      const tr = ev.target.closest('tr[data-project]');
+      if (tr) showProject(tr.dataset.project);
+    };
+    $('diff-legend').onclick = (ev) => { const tr = ev.target.closest('tr[data-c]'); if (tr) { st.cause = { pn: null, c: +tr.dataset.c }; renderDiffTable(); } };
+    $('diff-table').onclick = (ev) => { const tr = ev.target.closest('tr[data-project]'); if (tr) showProject(tr.dataset.project); };
+    $('pend-table').onclick = (ev) => { const tr = ev.target.closest('tr[data-project]'); if (tr) showProject(tr.dataset.project); };
+    $('rv-kinds').onclick = (ev) => { const p = ev.target.closest('[data-kind]'); if (p) { st.rvKind = p.dataset.kind; renderReview(); } };
+  }
+
+  renderHeader();
+  initFilters();
+  initTabs();
+  refreshOk();
+  wire();
+  show('sum');
+})();
+</script>
+</body>
+</html>
