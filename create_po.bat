@@ -447,8 +447,8 @@ echo ----------------------------------------
 echo   AX 오더북 (IR + Item transaction)
 echo ----------------------------------------
 echo.
-echo   ax_orderbook 폴더의 최신 Item requirement / Item transaction으로
-echo   그 달 오더북을 계산해 저장합니다 (AX Sales Order Book처럼 달마다).
+echo   그 달 폴더(예: ax_orderbook\2026\P11)의 Item requirement / Item transaction으로
+echo   그 달 오더북을 계산해 저장하고, 결과(엑셀·HTML)도 그 폴더에 씁니다 (AX Sales Order Book처럼 달마다).
 echo   두 파일은 마감 직후(다음 달 1~7일) 같은 날 뽑고, 이름 끝에 추출일을 붙입니다.
 echo   저장소가 비어 있으면 P01부터 그 달까지 한 번에 만듭니다 (기준선).
 echo   NOAH FX 시트 환율을 고쳤다면 먼저 [8] DB Sync를 실행하세요.

@@ -12,14 +12,19 @@ AX Sales Order Book(Table 50229)처럼 **달마다 계산해 저장**하고, 다
     저장된 마지막 달(Open)  다시 돌리면 다시 계산해 바꿔 넣는다(AX Last calculated). 그 앞 달(Closed)은 거부
 기준선부터 다시 만들려면 저장소 파일을 지운다(또는 --store로 다른 파일).
 회계 오더북은 기준선의 P01 Start와 키 매핑·속성에 쓰고, 같은 달 행이 있으면 대조해 차이와 원인을 붙인다.
-결과는 ax_orderbook/연도/ 아래 엑셀과 같은 이름의 HTML 두 개 — HTML은 Edge에서 더블클릭해 여는 인터랙티브 보고서
+결과는 그 달 폴더에 엑셀과 같은 이름의 HTML 두 개 — HTML은 Edge에서 더블클릭해 여는 인터랙티브 보고서
 (필터·차트·드릴다운, 인터넷 없이 열린다 — po_generator/ax_orderbook_report.py).
 
-준비물 (ax_orderbook/ 폴더, **마감 직후(다음 달 1~7일) 같은 날** 한 쌍):
+폴더 — 달마다 ax_orderbook/연도/P월/ (예: ax_orderbook/2026/P11/)에 그 달 입력을 넣고 결과도 거기 쓴다.
+여러 달이 같이 쓰는 것(ax_orderbook.db, fx_history.csv, 통화지정.csv)은 ax_orderbook/ 바로 아래.
+
+준비물 (그 달 폴더, 없으면 ax_orderbook/ 바로 아래 — **마감 직후(다음 달 1~7일) 같은 날** 한 쌍):
     Item requirement_YYYYMMDD.xlsx   AX Item requirement — Show=All, Created date ≥ 01/01/2024 하나만
     Item transaction_YYYYMMDD.xlsx   AX Item transaction(프로젝트 품목 거래) — Project date ≥ 01/01/2024 하나만
-    Sales order book_MM_YYYY.xlsx    회계 오더북 (기준선은 P01 행 필수, 그 뒤엔 키 매핑·속성용 — 지난 해 파일도 된다)
-    환율: NOAH_SO_PO_DN FX 시트(sync_db.py로 DB에) + Finance Hub 마감환율 파일(fx_history.csv에 쌓는다)
+    Sales order book_MM_YYYY.xlsx    회계 오더북 (ax_orderbook/ 아래 어디든 가장 새 것 — 기준선은 P01 행 필수, 그 뒤엔
+                                     키 매핑·속성용이라 지난 해 파일도 된다)
+    환율: NOAH_SO_PO_DN FX 시트(sync_db.py로 DB에) + Finance Hub 마감환율 파일(그 달 폴더에 둔 사본도 읽는다 —
+          fx_history.csv에 쌓는다)
 
 사용법:
     python build_ax_orderbook.py P10                  # 저장소가 비었으면 P01~P10 기준선, 아니면 P10 한 달
@@ -35,6 +40,7 @@ import argparse
 import getpass
 import logging
 import re
+import shutil
 import sys
 import warnings
 from dataclasses import replace
@@ -57,9 +63,10 @@ from po_generator.logging_config import setup_logging
 
 logger = logging.getLogger(__name__)
 
-FX_HISTORY_FILE = AX_ORDERBOOK_DIR / 'fx_history.csv'
+# 여러 달이 같이 쓰는 파일 — ax_orderbook/ 바로 아래에 둔다
+FX_HISTORY_NAME = 'fx_history.csv'
 # 외화 거래처 목록에 없는 외화 주문 — `코드,통화` (거래처 C번호 또는 프로젝트 번호). 확인 목록 '통화 확인'을 보고 추가
-CURRENCY_OVERRIDE_FILE = AX_ORDERBOOK_DIR / '통화지정.csv'
+CURRENCY_OVERRIDE_NAME = '통화지정.csv'
 _ORDERBOOK_RE = re.compile(r'Sales order book_(\d{1,2})_(\d{4})', re.IGNORECASE)
 _DATED_RE = re.compile(r'_(\d{8})$')
 # 다음 달 이 날짜까지 뽑은 추출본을 그 달 마감 자료로 본다 — 더 늦으면 다음 달 청구·취소가 이 달로 섞인다
@@ -102,20 +109,40 @@ def _latest_dated(folder: Path, prefix: str) -> list[Path]:
     return [max(files, key=stamp)]
 
 
-def find_ir_files(folder: Path) -> list[Path]:
-    return _latest_dated(folder, 'Item requirement')
+def period_dir(root: Path, year: int, month: int) -> Path:
+    """그 달 폴더 — 입력을 넣고 결과를 쓰는 곳 (ax_orderbook/2026/P11)"""
+    return root / str(year) / f"P{month:02d}"
 
 
-def find_it_files(folder: Path) -> list[Path]:
-    return _latest_dated(folder, 'Item transaction')
+def find_ir_files(root: Path, year: int, month: int) -> list[Path]:
+    """그 달 폴더의 최신 추출본, 없으면 ax_orderbook 바로 아래 — 다른 달 폴더는 보지 않는다(그 달 추출본이어야 한다)"""
+    return _latest_dated(period_dir(root, year, month), 'Item requirement') or _latest_dated(root, 'Item requirement')
 
 
-def find_orderbooks(folder: Path) -> list[Path]:
-    files = [p for p in folder.glob('Sales order book_*.xlsx') if not p.name.startswith('~$')]
+def find_it_files(root: Path, year: int, month: int) -> list[Path]:
+    return _latest_dated(period_dir(root, year, month), 'Item transaction') or _latest_dated(root, 'Item transaction')
+
+
+def _outside_old(root: Path, p: Path) -> bool:
+    return 'Old' not in p.relative_to(root).parts
+
+
+def find_orderbooks(root: Path) -> list[Path]:
+    """회계 오더북 — ax_orderbook 아래 어디든(달 폴더 포함, Old 제외). 파일 이름의 (연, 월)이 새것부터, 같으면 최근 수정부터"""
+    files = [p for p in root.rglob('Sales order book_*.xlsx') if not p.name.startswith('~$') and _outside_old(root, p)]
     def stamp(p: Path):
         m = _ORDERBOOK_RE.search(p.stem)
-        return (int(m.group(2)), int(m.group(1))) if m else (0, 0)
+        return ((int(m.group(2)), int(m.group(1))) if m else (0, 0), p.stat().st_mtime)
     return sorted(files, key=stamp, reverse=True)
+
+
+def shared_file(root: Path, name: str) -> tuple[Path, Path | None]:
+    """여러 달이 같이 쓰는 파일의 자리(ax_orderbook 바로 아래)와, 거기 없을 때 달 폴더에 들어간 가장 최근 사본"""
+    home = root / name
+    if home.exists():
+        return home, None
+    copies = [p for p in root.glob(f'*/P*/{name}') if _outside_old(root, p)]
+    return home, max(copies, key=lambda p: p.stat().st_mtime) if copies else None
 
 
 def load_official(paths: list[Path], year: int, upto: int) -> tuple[pd.DataFrame, Path]:
@@ -385,14 +412,14 @@ def create_argument_parser() -> argparse.ArgumentParser:
         epilog=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('period', help='계산할 달 (예: P10) — 저장소가 비었으면 P01부터 이 달까지 기준선')
     parser.add_argument('--year', type=int, help='연도 (생략 시 마감월 기준 올해/작년)')
-    parser.add_argument('--ir', nargs='+', type=Path, help='Item requirement export (생략 시 폴더의 최신 파일)')
-    parser.add_argument('--it', nargs='+', type=Path, help='Item transaction export (생략 시 폴더의 최신 파일)')
-    parser.add_argument('--orderbook', nargs='+', type=Path, help='회계 오더북 파일 (생략 시 폴더에서 찾음)')
+    parser.add_argument('--ir', nargs='+', type=Path, help='Item requirement export (생략 시 그 달 폴더의 최신 파일)')
+    parser.add_argument('--it', nargs='+', type=Path, help='Item transaction export (생략 시 그 달 폴더의 최신 파일)')
+    parser.add_argument('--orderbook', nargs='+', type=Path, help='회계 오더북 파일 (생략 시 ax_orderbook 아래에서 찾음)')
     parser.add_argument('--fx', action='append', default=[], metavar='CUR=RATE',
                         help='환율 직접 입력 — 마감월이면 JPY=8.6157, 다른 달이면 JPY=2026-09=8.6968 (여러 번 가능)')
     parser.add_argument('--store', type=Path, help=f'저장소 파일 (기본: {AX_ORDERBOOK_DB.name})')
     parser.add_argument('--dry-run', action='store_true', help='계산하고 결과 파일(_미리보기)만 — 저장하지 않는다')
-    parser.add_argument('--out', type=Path, help='결과 폴더 (기본: ax_orderbook/연도)')
+    parser.add_argument('--out', type=Path, help='결과 폴더 (기본: 그 달 폴더 ax_orderbook/연도/P월)')
     parser.add_argument('-v', '--verbose', action='store_true', help='상세 로그')
     return parser
 
@@ -406,16 +433,18 @@ def main(argv: list[str] | None = None) -> int:
         close_ym = f"{year}-{upto:02d}"
         store = OrderbookStore(args.store or AX_ORDERBOOK_DB)
         plan = store.plan(year, upto)
-        ir_paths = args.ir or find_ir_files(AX_ORDERBOOK_DIR)
-        it_paths = args.it or find_it_files(AX_ORDERBOOK_DIR)
-        ob_paths = args.orderbook or find_orderbooks(AX_ORDERBOOK_DIR)
-        needed = [('Item requirement', ir_paths, 'Item requirement_YYYYMMDD.xlsx'),
-                  ('Item transaction', it_paths, 'Item transaction_YYYYMMDD.xlsx')]
+        root = AX_ORDERBOOK_DIR
+        here = period_dir(root, year, upto)
+        ir_paths = args.ir or find_ir_files(root, year, upto)
+        it_paths = args.it or find_it_files(root, year, upto)
+        ob_paths = args.orderbook or find_orderbooks(root)
+        needed = [('Item requirement', ir_paths, 'Item requirement_YYYYMMDD.xlsx', f"{here} (없으면 {root})"),
+                  ('Item transaction', it_paths, 'Item transaction_YYYYMMDD.xlsx', f"{here} (없으면 {root})")]
         if plan.kind == 'baseline':
-            needed.append(('회계 오더북', ob_paths, 'Sales order book_MM_YYYY.xlsx — 기준선은 P01 행 필수'))
-        for label, paths, name in needed:
+            needed.append(('회계 오더북', ob_paths, 'Sales order book_MM_YYYY.xlsx — 기준선은 P01 행 필수', f"{root} 아래"))
+        for label, paths, name, where in needed:
             if not paths:
-                print(f"[오류] {label} 파일이 없습니다 ({name}): {AX_ORDERBOOK_DIR}")
+                print(f"[오류] {label} 파일이 없습니다 ({name}): {where}")
                 return 1
 
         day, errors, warns = check_snapshot(list(ir_paths), list(it_paths), year, upto)
@@ -437,8 +466,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[2/4] IR·IT 읽는 중… ({', '.join(p.name for p in [*ir_paths, *it_paths])})")
         ir = read_ir(list(ir_paths))
         it = read_it(list(it_paths))
-        fx = load_fx_book(DB_FILE, FX_HISTORY_FILE, FINANCE_HUB_DIR, parse_fx_overrides(args.fx, close_ym))
-        overrides = read_currency_overrides(CURRENCY_OVERRIDE_FILE)
+        fx_file, fx_copy = shared_file(root, FX_HISTORY_NAME)
+        if fx_copy:              # 환율 이력은 달마다 이어 쓰는 파일 — 자리로 복사해 거기서 이어 간다
+            shutil.copy2(fx_copy, fx_file)
+            print(f"[안내] {FX_HISTORY_NAME}를 {fx_copy.parent}에서 {root}로 복사해 이어 씁니다 (여러 달이 같이 쓰는 파일)")
+        hub_dirs = [d for d in (FINANCE_HUB_DIR, here) if d is not None]   # 그 달 폴더에 둔 마감환율 파일도 읽는다
+        fx = load_fx_book(DB_FILE, fx_file, hub_dirs, parse_fx_overrides(args.fx, close_ym))
+        currency_file, currency_copy = shared_file(root, CURRENCY_OVERRIDE_NAME)
+        if currency_copy:
+            print(f"[경고] {CURRENCY_OVERRIDE_NAME}가 {root}에 없어 {currency_copy}를 씁니다 — 여러 달이 같이 쓰는 "
+                  f"파일이라 {root}로 옮기세요")
+            currency_file = currency_copy
+        overrides = read_currency_overrides(currency_file)
 
         print("[3/4] 계산 중…")
         if plan.kind == 'baseline':
@@ -468,7 +507,7 @@ def main(argv: list[str] | None = None) -> int:
         diff = classify_differences(res_all, official_y, ir)
         table = month_table(res_all, official_y)
         causes = cause_table(diff)
-        out_dir = args.out or (AX_ORDERBOOK_DIR / str(year))
+        out_dir = args.out or here
         out_path = out_dir / f"AX_오더북_{year}_P{upto:02d}{'_미리보기' if args.dry_run else ''}.xlsx"
         print("[4/4] 결과 파일 쓰는 중…")
         files['저장소'] = str(store.path)

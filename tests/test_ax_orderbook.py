@@ -138,7 +138,7 @@ def write_inputs(folder, monkeypatch, stamp: str = '20260401', ir_lines=None, it
     if not ob_p.exists():
         official_df(OFFICIAL)[list(ax.RAW_COLUMNS)].to_excel(ob_p, sheet_name='Raw', index=False)
     monkeypatch.setattr(cli, 'load_fx_book', lambda *a, **kw: make_fx())
-    monkeypatch.setattr(cli, 'CURRENCY_OVERRIDE_FILE', folder / 'none.csv')
+    monkeypatch.setattr(cli, 'AX_ORDERBOOK_DIR', folder)          # 통화지정·환율 이력도 이 폴더에서만 찾는다
     return ['--year', '2026', '--ir', str(ir_p), '--it', str(it_p), '--orderbook', str(ob_p),
             '--store', str(folder / 'store.db'), '--out', str(folder / 'out')]
 
@@ -384,6 +384,18 @@ class TestFx:
         assert ax.load_fx_book(None, history, None).get('USD', '2026-11') == 1_410.0
         assert (pd.read_csv(history)['source'] == ax.MANUAL_FX_SOURCE).sum() == 1
 
+    def test_closing_file_copy_in_period_folder_is_read(self, tmp_path):
+        """Finance Hub에 그 달 파일이 없어도 달 폴더에 둔 사본에서 읽는다 — 같은 파일이 둘이어도 한 번만 쌓인다"""
+        hub, here = tmp_path / 'hub', tmp_path / '2026' / 'P10'
+        hub.mkdir()
+        here.mkdir(parents=True)
+        self._closing_file(here)
+        book = ax.load_fx_book(None, tmp_path / 'fx_history.csv', [hub, here, tmp_path / 'none'])
+        assert book.get('USD', '2026-11') == pytest.approx(1776.7799 / 1.3401)
+        self._closing_file(hub)
+        ax.load_fx_book(None, tmp_path / 'fx_history.csv', [hub, here])
+        assert (pd.read_csv(tmp_path / 'fx_history.csv')['ym'] == '2026-11').sum() == 3      # USD·JPY·GBP 한 벌
+
     def test_override_beats_everything(self):
         book = ax.load_fx_book(None, None, None, {('JPY', '2026-10'): 8.6157})
         assert book.get('JPY', '2026-10') == 8.6157
@@ -439,8 +451,51 @@ class TestCli:
     def test_latest_extract_by_file_date(self, tmp_path):
         for name in ('Item transaction_20261001.xlsx', 'Item transaction_20261102.xlsx', 'Item requirement_20261102.xlsx'):
             (tmp_path / name).write_bytes(b'')
-        assert [p.name for p in cli.find_it_files(tmp_path)] == ['Item transaction_20261102.xlsx']
-        assert [p.name for p in cli.find_ir_files(tmp_path)] == ['Item requirement_20261102.xlsx']
+        assert [p.name for p in cli.find_it_files(tmp_path, 2026, 10)] == ['Item transaction_20261102.xlsx']
+        assert [p.name for p in cli.find_ir_files(tmp_path, 2026, 10)] == ['Item requirement_20261102.xlsx']
+
+    def test_extracts_come_from_the_period_folder(self, tmp_path):
+        """그 달 폴더(연도/P월)가 먼저, 없으면 바로 아래 — 다른 달 폴더의 추출본은 집지 않는다"""
+        p11 = cli.period_dir(tmp_path, 2026, 11)
+        p11.mkdir(parents=True)
+        (tmp_path / 'Item requirement_20261102.xlsx').write_bytes(b'')
+        (p11 / 'Item requirement_20261202.xlsx').write_bytes(b'')
+        assert cli.find_ir_files(tmp_path, 2026, 11) == [p11 / 'Item requirement_20261202.xlsx']
+        assert cli.find_ir_files(tmp_path, 2026, 10) == [tmp_path / 'Item requirement_20261102.xlsx']
+        assert cli.find_ir_files(tmp_path, 2026, 12) == [tmp_path / 'Item requirement_20261102.xlsx']   # P11 것 아님
+        assert cli.find_it_files(tmp_path, 2026, 11) == []
+
+    def test_orderbooks_found_in_period_folders_but_not_old(self, tmp_path):
+        for rel in ('2026/P10/Sales order book_10_2026.xlsx', 'Sales order book_09_2026.xlsx',
+                    'Old/Sales order book_11_2026.xlsx', '2026/P10/~$Sales order book_10_2026.xlsx'):
+            (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / rel).write_bytes(b'')
+        assert [p.relative_to(tmp_path).as_posix() for p in cli.find_orderbooks(tmp_path)] == [
+            '2026/P10/Sales order book_10_2026.xlsx', 'Sales order book_09_2026.xlsx']
+
+    def test_shared_files_live_at_the_root(self, tmp_path):
+        """fx_history·통화지정은 여러 달이 같이 쓴다 — 자리는 바로 아래, 거기 없으면 달 폴더의 최근 사본을 알려 준다"""
+        copy = tmp_path / '2026' / 'P10' / cli.CURRENCY_OVERRIDE_NAME
+        copy.parent.mkdir(parents=True)
+        copy.write_text('코드,통화\n82-1.001,EUR\n', encoding='utf-8-sig')
+        assert cli.shared_file(tmp_path, cli.CURRENCY_OVERRIDE_NAME) == (tmp_path / cli.CURRENCY_OVERRIDE_NAME, copy)
+        (tmp_path / cli.CURRENCY_OVERRIDE_NAME).write_text('코드,통화\n', encoding='utf-8-sig')
+        assert cli.shared_file(tmp_path, cli.CURRENCY_OVERRIDE_NAME) == (tmp_path / cli.CURRENCY_OVERRIDE_NAME, None)
+        assert cli.shared_file(tmp_path, cli.FX_HISTORY_NAME) == (tmp_path / cli.FX_HISTORY_NAME, None)
+
+    def test_main_reads_and_writes_the_period_folder(self, tmp_path, monkeypatch, capsys):
+        """파일 지정 없이 — 입력은 2026/P03에서 찾고 결과도 거기 쓴다. 공유 파일이 달 폴더에만 있어도 빠뜨리지 않는다"""
+        here = cli.period_dir(tmp_path, 2026, 3)
+        here.mkdir(parents=True)
+        write_inputs(here, monkeypatch)
+        monkeypatch.setattr(cli, 'AX_ORDERBOOK_DIR', tmp_path)
+        (here / cli.FX_HISTORY_NAME).write_text('ym,currency,rate,source\n2026-03,USD,1460,test\n', encoding='utf-8-sig')
+        (here / cli.CURRENCY_OVERRIDE_NAME).write_text('코드,통화\n82-00099.001,EUR\n', encoding='utf-8-sig')
+        assert cli.main(['P03', '--year', '2026', '--store', str(tmp_path / 'store.db')]) == 0
+        out = capsys.readouterr().out
+        assert (here / 'AX_오더북_2026_P03.xlsx').exists() and (here / 'AX_오더북_2026_P03.html').exists()
+        assert (tmp_path / cli.FX_HISTORY_NAME).exists()                       # 환율 이력은 바로 아래로 옮겨 이어 쓴다
+        assert f"{cli.CURRENCY_OVERRIDE_NAME}가" in out and '옮기세요' in out   # 통화지정은 쓰되 옮기라고 알린다
 
     def test_official_needs_p01(self, tmp_path):
         p = tmp_path / 'Sales order book_02_2026.xlsx'

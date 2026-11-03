@@ -31,6 +31,7 @@ import logging
 import re
 import sqlite3
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -351,10 +352,11 @@ def _read_noah_fx(db_file: Path) -> pd.DataFrame:
         mem.close()
 
 
-def load_fx_book(db_file: Path | None, history_csv: Path | None, hub_dir: Path | None,
+def load_fx_book(db_file: Path | None, history_csv: Path | None, hub_dir: Path | Sequence[Path] | None,
                  overrides: dict[tuple[str, str], float] | None = None) -> FxBook:
     """우선순위(높은 쪽이 이긴다): 직접 입력 > 마감환율 파일·이력 > NOAH FX 시트 > 역산 시드.
 
+    hub_dir = 마감환율 파일을 찾을 폴더 — Finance Hub, 그리고 사용자가 사본을 넣어 두는 그 달 폴더(여럿이면 리스트).
     Finance Hub 폴더엔 현재 기간 파일만 남으므로, 읽은 값을 이력 CSV에 쌓아 다음 달에도 쓰게 한다. 직접 입력(--fx)도
     이력에 남긴다 — 저장한 달의 End는 라인을 수주월 환율로 매긴 값이라, 다음 달에 그 환율이 빠지면 같은 라인이 다른
     환율로 다시 매겨져 가짜 Variance가 생긴다(10월 JPY를 --fx로만 넣었더니 11월에 82-15517.001이 +1.1M).
@@ -371,20 +373,22 @@ def load_fx_book(db_file: Path | None, history_csv: Path | None, hub_dir: Path |
     if history_csv is not None and history_csv.exists():
         history = pd.read_csv(history_csv, dtype={'ym': str, 'currency': str, 'source': str})
     changed = False
-    if hub_dir is not None and hub_dir.is_dir():
-        for path in sorted(hub_dir.glob('FX Rates - Closing rates - P* *.xlsx')):
-            try:
-                applies, rates = parse_closing_rates(path)
-            except (ValueError, OSError) as exc:
-                logger.warning("마감환율 파일을 못 읽었습니다: %s (%s)", path.name, exc)
-                continue
-            if (history['ym'].eq(applies) & history['source'].ne(MANUAL_FX_SOURCE)).any():
-                continue
-            new = pd.DataFrame([{'ym': applies, 'currency': c, 'rate': r, 'source': path.name}
-                                for c, r in sorted(rates.items())])
-            history = new if history.empty else pd.concat([history, new], ignore_index=True)
-            changed = True
-            logger.info("마감환율 이력에 %s 환율을 추가했습니다 (%s)", applies, path.name)
+    hub_dirs = [hub_dir] if isinstance(hub_dir, Path) else list(hub_dir or [])
+    closing_files = {p for d in hub_dirs if d is not None and d.is_dir()
+                     for p in d.glob('FX Rates - Closing rates - P* *.xlsx') if not p.name.startswith('~$')}
+    for path in sorted(closing_files, key=lambda p: p.name):      # 같은 파일이 두 폴더에 있어도 그 달은 한 번만 쌓인다
+        try:
+            applies, rates = parse_closing_rates(path)
+        except (ValueError, OSError) as exc:
+            logger.warning("마감환율 파일을 못 읽었습니다: %s (%s)", path.name, exc)
+            continue
+        if (history['ym'].eq(applies) & history['source'].ne(MANUAL_FX_SOURCE)).any():
+            continue
+        new = pd.DataFrame([{'ym': applies, 'currency': c, 'rate': r, 'source': path.name}
+                            for c, r in sorted(rates.items())])
+        history = new if history.empty else pd.concat([history, new], ignore_index=True)
+        changed = True
+        logger.info("마감환율 이력에 %s 환율을 추가했습니다 (%s)", applies, path.name)
     if overrides:
         manual = pd.DataFrame([{'ym': m, 'currency': c, 'rate': r, 'source': MANUAL_FX_SOURCE}
                                for (c, m), r in sorted(overrides.items())])
