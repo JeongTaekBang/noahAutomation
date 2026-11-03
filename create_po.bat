@@ -48,6 +48,7 @@ echo   [D] 대시보드
 echo   [R] PO 매입대사 (Reconciliation)
 echo   [S] SO 매출대사 (Sales Reconciliation)
 echo   [I] Industry Code 대사
+echo   [A] AX 오더북 (IR + Item transaction)
 echo.
 echo   [기타]
 echo   [C] 거래처 납기현황 조회 (미출고 회신용)
@@ -75,6 +76,7 @@ if /i "%CHOICE%"=="D" goto dashboard
 if /i "%CHOICE%"=="R" goto reconcile
 if /i "%CHOICE%"=="S" goto reconcile_so
 if /i "%CHOICE%"=="I" goto reconcile_ind
+if /i "%CHOICE%"=="A" goto ax_orderbook
 
 if /i "%CHOICE%"=="C" goto delivery_status
 if /i "%CHOICE%"=="H" goto view_history
@@ -434,6 +436,66 @@ echo Sector 검증 실행 중...
 echo.
 
 "%PYTHON_PATH%" "%~dp0reconcile_ind.py" --sector-only
+
+echo.
+pause
+goto menu
+
+:ax_orderbook
+echo.
+echo ----------------------------------------
+echo   AX 오더북 (IR + Item transaction)
+echo ----------------------------------------
+echo.
+echo   ax_orderbook 폴더의 최신 Item requirement / Item transaction으로
+echo   그 달 오더북을 계산해 저장합니다 (AX Sales Order Book처럼 달마다).
+echo   두 파일은 마감 직후(다음 달 1~7일) 같은 날 뽑고, 이름 끝에 추출일을 붙입니다.
+echo   저장소가 비어 있으면 P01부터 그 달까지 한 번에 만듭니다 (기준선).
+echo   NOAH FX 시트 환율을 고쳤다면 먼저 [8] DB Sync를 실행하세요.
+echo.
+echo   [1] 미리보기만 (저장하지 않음)
+echo   [2] 계산하고 저장
+echo   [0] 메뉴로 돌아가기
+echo.
+
+set /p AX_MODE="선택: "
+
+if "%AX_MODE%"=="1" goto ax_dry
+if "%AX_MODE%"=="2" goto ax_save
+if "%AX_MODE%"=="0" goto menu
+echo [오류] 올바른 번호를 입력하세요.
+pause
+goto ax_orderbook
+
+:ax_dry
+echo.
+:ax_dry_input
+set /p AX_PERIOD="계산할 달 입력 (예: P11): "
+if "%AX_PERIOD%"=="" (
+    echo [오류] 기간 코드를 입력하세요.
+    goto ax_dry_input
+)
+
+echo.
+"%PYTHON_PATH%" "%~dp0build_ax_orderbook.py" %AX_PERIOD% --dry-run
+
+echo.
+pause
+goto menu
+
+:ax_save
+echo.
+echo   마지막 달(Open)만 다시 계산할 수 있고, 저장하면 그 앞 달은 닫힙니다.
+echo.
+:ax_save_input
+set /p AX_PERIOD="계산할 달 입력 (예: P11): "
+if "%AX_PERIOD%"=="" (
+    echo [오류] 기간 코드를 입력하세요.
+    goto ax_save_input
+)
+
+echo.
+"%PYTHON_PATH%" "%~dp0build_ax_orderbook.py" %AX_PERIOD%
 
 echo.
 pause
