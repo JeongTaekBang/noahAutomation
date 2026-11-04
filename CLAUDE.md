@@ -334,6 +334,10 @@ AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — AX Sales Order
   `load_dn_data()`가 SO 쪽을 `SO Remarks`로 개명해 병합하고 `ts_generator.build_po_cell_text()`가
   경로별 컬럼(DN=`SO Remarks`, 선수금=`Remarks`)을 명시로 고른다. 컬럼 유무로 추측하면
   월합 문구가 발주번호 옆에 샌다 (`tests/test_ts_generator.py`가 감시)
+- **거래명세표 품명 = `SO_국내.Model code`(고객 품번) + 품목명** (2026-11-04 사용자 요청, 첫 사례 에스제이브이
+  `SOD-2026-1139`). 품번이 빈 행은 품목명만 (`ts_generator.build_item_description`). Model code는 **`dtype=str`로**
+  읽고(빈칸 섞인 숫자 열이라 float → `.0`), **별칭 키 `model_code`로 찾지 않는다** — 그 별칭 목록의
+  `AX Project number`가 Model code 없는 경로(ADV 아이템은 SO 행 전체)에서 품명 앞에 찍힌다
 - **Order Book Output = 매출 인식 기준**이다 (출고 기준이 아니다) — `AX_매출대사`와 동일 산식.
   국내 = 세금계산서 발행월(미발행이면 **미인식 = Backlog 잔류**), 해외 = 선적월 + 선적월 환율 재환산.
   환율 재평가분은 `Value_Variance_amount`로 빠져 **Ending은 재환산 도입 전과 동일** —

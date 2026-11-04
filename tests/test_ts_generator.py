@@ -12,14 +12,17 @@ Remarks는 고객에게 보이는 칸이고 내부 메모는 `SO_국내.Comment`
 - **DN 자체 Remarks(월합 세금계산서 문구)는 절대 PO 칸에 새지 않는다** — 이름이 같아서
   헷갈리기 쉬운 자리다 (`load_dn_data()`가 SO 쪽을 'SO Remarks'로 개명하는 이유).
 
-`build_po_cell_text()`는 COM 없는 순수 함수라 Excel 없이 검증한다.
+품명(B열)에는 `SO_국내.Model code`(고객 품번)를 앞에 붙인다 (2026-11-04 — 에스제이브이).
+
+`build_po_cell_text()`·`build_item_description()`은 COM 없는 순수 함수라 Excel 없이 검증한다.
 """
 
 import pandas as pd
 import pytest
 
-from po_generator.config import DN_DOMESTIC_SHEET, SO_DOMESTIC_SHEET
+from po_generator.config import DN_DOMESTIC_SHEET, PMT_DOMESTIC_SHEET, SO_DOMESTIC_SHEET
 from po_generator.ts_generator import (
+    build_item_description,
     build_po_cell_text,
     build_row_remark,
     resolve_so_remark_column,
@@ -190,6 +193,48 @@ class TestResolveSoRemarkColumn:
         assert resolve_so_remark_column(df) is None
 
 
+# === 품명(B열)의 고객 품번 ===
+
+SJV = '주식회사 에스제이브이'
+
+
+class TestItemDescription:
+    """품명 = '고객 품번 + 품명' (OC·CI·PL의 Model number 앞붙임과 같은 모양)"""
+
+    def test_model_code_prefixed(self):
+        """실측 SOD-2026-1139 L1"""
+        item = pd.Series({'Customer name': SJV, 'Model code': '66853010035',
+                          'Item name': 'HS02-S180HI-N FAIL CLOSE SBWG-01DCM'})
+        assert build_item_description(item) == '66853010035 HS02-S180HI-N FAIL CLOSE SBWG-01DCM'
+
+    @pytest.mark.parametrize('blank', [None, float('nan'), '', '   '])
+    def test_blank_model_code_keeps_item_name(self, blank):
+        """품번 없는 행(지금은 거의 전부)은 예전 그대로 품명만"""
+        item = pd.Series({'Model code': blank, 'Item name': 'IQ3'})
+        assert build_item_description(item) == 'IQ3'
+
+    def test_no_model_code_column_keeps_item_name(self):
+        item = pd.Series({'Item name': 'IQ3'})
+        assert build_item_description(item) == 'IQ3'
+
+    def test_float_model_code_has_no_trailing_zero(self):
+        """dtype을 놓친 경로에서 float로 읽혀도 '66853010035.0'이 찍히지 않는다"""
+        item = pd.Series({'Model code': 66853010035.0, 'Item name': 'HS01-D140-N'})
+        assert build_item_description(item) == '66853010035 HS01-D140-N'
+
+    def test_ax_project_number_never_used(self):
+        """별칭('model_code')에 AX Project number가 있다 — 그게 품명 앞에 찍히면 안 된다
+
+        ADV 경로 아이템은 SO_국내 행 전체라 AX Project number를 갖고 있다.
+        """
+        item = pd.Series({'AX Project number': '82-17677', 'Item name': 'IQ3'})
+        assert build_item_description(item) == 'IQ3'
+
+    def test_model_code_without_item_name(self):
+        item = pd.Series({'Model code': '66853010035', 'Item name': None})
+        assert build_item_description(item) == '66853010035'
+
+
 # === 기존 동작 회귀 (호선명과 무관한 PO 나열) ===
 
 class TestExistingPoBehavior:
@@ -227,13 +272,16 @@ class TestLoadDnDataSoRemarks:
 
     @pytest.fixture
     def fake_workbook(self, tmp_path, monkeypatch):
+        # Model code는 시트 실물처럼 **숫자 셀**로 쓴다 (빈칸이 섞여 dtype 없이 읽으면 float)
         so = pd.DataFrame([
             {'SO_ID': 'SOD-1', 'Line item': 1, 'Customer name': SCANTECH,
-             'Customer PO': 'OR26060022', 'Item name': 'IQ3', 'Item qty': 2,
+             'Customer PO': 'OR26060022', 'Model code': 66853010035,
+             'Item name': 'IQ3', 'Item qty': 2,
              'Sales Unit Price': 1000, 'Business registration number': '123-45-67890',
              'Remarks': 'H-8327', 'Comment': 'LR 선급 진행 건'},
             {'SO_ID': 'SOD-1', 'Line item': 2, 'Customer name': SCANTECH,
-             'Customer PO': 'OR26060022', 'Item name': 'IQ5', 'Item qty': 1,
+             'Customer PO': 'OR26060022', 'Model code': None,
+             'Item name': 'IQ5', 'Item qty': 1,
              'Sales Unit Price': 2000, 'Business registration number': '123-45-67890',
              'Remarks': None, 'Comment': 'Split from line 1'},
         ])
@@ -243,10 +291,12 @@ class TestLoadDnDataSoRemarks:
             {'DN_ID': 'DND-1', 'SO_ID': 'SOD-1', 'Line item': 2,
              'Remarks': '25일 마감, 월합세금계산서'},
         ])
+        pmt = pd.DataFrame([{'선수금_ID': 'ADV-1', 'SO_ID': 'SOD-1'}])
         path = tmp_path / 'NOAH_SO_PO_DN.xlsx'
         with pd.ExcelWriter(path) as writer:
             so.to_excel(writer, sheet_name=SO_DOMESTIC_SHEET, index=False)
             dn.to_excel(writer, sheet_name=DN_DOMESTIC_SHEET, index=False)
+            pmt.to_excel(writer, sheet_name=PMT_DOMESTIC_SHEET, index=False)
         monkeypatch.setattr(po_utils, 'NOAH_SO_PO_DN_FILE', path)
         return path
 
@@ -273,3 +323,24 @@ class TestLoadDnDataSoRemarks:
         values = set(df.astype(str).to_numpy().ravel())
         assert 'LR 선급 진행 건' not in values
         assert 'Split from line 1' not in values
+
+    def test_model_code_loaded_as_text(self, fake_workbook):
+        """고객 품번은 DN 경로에 문자열로 실린다 — float로 오면 '66853010035.0'이 찍힐 수 있다"""
+        df = po_utils.load_dn_data()
+        by_line = df.set_index('Line item')['Model code']
+        assert by_line[1] == '66853010035'
+        assert pd.isna(by_line[2])
+
+    def test_dn_path_description_end_to_end(self, fake_workbook):
+        """로더 → 품명: 품번 있는 라인만 앞에 붙는다"""
+        df = po_utils.load_dn_data().set_index('Line item')
+        assert build_item_description(df.loc[1]) == '66853010035 IQ3'
+        assert build_item_description(df.loc[2]) == 'IQ5'
+
+    def test_advance_path_model_code_loaded_as_text(self, fake_workbook):
+        """선수금(ADV) 거래명세표도 같은 품번이 같은 모양으로 실린다"""
+        _, so_items = po_utils.load_so_for_advance('ADV-1')
+        so_items = so_items.set_index('Line item')
+        assert so_items.loc[1, 'Model code'] == '66853010035'
+        assert build_item_description(so_items.loc[1]) == '66853010035 IQ3'
+        assert build_item_description(so_items.loc[2]) == 'IQ5'

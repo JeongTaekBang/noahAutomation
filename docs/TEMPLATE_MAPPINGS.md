@@ -27,8 +27,8 @@ F(단가)·H(세액)는 본문 기준으로는 과폭이지만 상단 공급자 
 | 열 | 필드명 | 설명 |
 |----|--------|------|
 | A | 월/일 | 출고일 (MM/DD) |
-| B | 품명 | 품목명 (item_name) |
-| C | 비고 | 월합=행별 Customer PO > 선수금='선수금' > 조선 기자재 5사=행별 호선명(SO_국내.Remarks) > 빈 값 (`build_row_remark`) |
+| B | 품명 | **고객 품번 + 품목명** — `"{SO_국내.Model code} {item_name}"`, 품번 없으면 품목명만 (`build_item_description`). Model code는 문자열로 읽는다(숫자로 읽으면 `.0`·앞 0 손실) |
+| C | 비고 | 월합=행별 Customer PO > 선수금='선수금' > 행별 호선명·현장명(SO_국내.Remarks, 모든 거래처) > 빈 값 (`build_row_remark`) |
 | D | 규격 | 고정값 "EA" |
 | E | 수량 | item_qty |
 | F | 단가 | unit_price |

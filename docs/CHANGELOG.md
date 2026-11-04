@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-11-04: 거래명세표 품명 앞에 고객 품번(SO_국내.Model code)
+
+사용자 요청: SO_국내 `Model code`에 적은 고객 품번을 거래명세표 품명(DESCRIPTION) 칸에. 첫 사례는 에스제이브이
+`SOD-2026-1139`(10라인, 11자리 품번 `66853010035` 등). 모양은 OC·CI·PL이 Model number를 붙이는 것과 같은 **앞붙임**
+— `66853010035 HS02-S180HI-N FAIL CLOSE`. 품번이 빈 행은 예전 그대로 품명만.
+
+- `ts_generator.build_item_description()` — DN·선수금(ADV)·월합 경로가 모두 `_fill_items_batch`를 지나므로 한 곳
+- `load_dn_data()`가 SO 명시 컬럼에 `Model code`를 추가, `load_so_for_advance()`와 함께 `dtype=str`로 읽는다
+  (빈칸이 섞인 숫자 열은 float로 읽혀 `66853010035.0`이 된다)
+- 별칭 키 `model_code`로 찾지 않는다 — 별칭 목록의 `AX Project number`가 Model code 없는 경로에서 품명 앞에 찍힌다
+- 검증: `SOD-2026-1139` 실데이터로 생성 — 품번이 붙어 행이 2줄(33pt)이 되지만 1쪽 그대로
+
+---
+
 ## 2026-10-14: COO 표를 No.(순번) + Customer PO로
 
 사용자 제안: 본문 표의 Order No. 대신 Customer PO. 업체가 아는 번호이고 CI의 PO No.와 같다. 같이 Line도 바꿨다 —

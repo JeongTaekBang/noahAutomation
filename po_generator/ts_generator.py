@@ -26,7 +26,7 @@ from po_generator.config import (
     ITEM_START_ROW_FALLBACK,
     VAT_RATE_DOMESTIC,
 )
-from po_generator.utils import get_value
+from po_generator.utils import get_value, to_text
 from po_generator.excel_helpers import (
     XlConstants,
     xlwings_app_context,
@@ -61,6 +61,12 @@ BASE_TOTAL_ROW = 25        # 합계 행 (폴백값)
 # 컬럼 유무로 추측하면 안 된다 — DN 아이템에도 'Remarks'는 있는데 그건 월합 문구다.
 SO_REMARK_COLUMNS = {'DN': 'SO Remarks', 'ADV': 'Remarks'}
 
+# 고객 품번 컬럼 — SO_국내.Model code (DN·ADV 두 경로 모두 이 이름 그대로 실린다).
+# 별칭 키 'model_code'로 찾지 않는다: 그 별칭 목록에 'AX Project number'가 있어서
+# Model code 컬럼이 빠진 경로에서는 AX 프로젝트 번호가 품명 앞에 찍힌다
+# (ADV 경로 아이템은 SO_국내 행 전체라 'AX Project number'를 갖고 있다).
+MODEL_CODE_COLUMN = 'Model code'
+
 
 def resolve_so_remark_column(
     items_df: pd.DataFrame | None,
@@ -79,6 +85,20 @@ def resolve_so_remark_column(
     if remark_col is not None and remark_col in items_df.columns:
         return remark_col
     return None
+
+
+def build_item_description(item: pd.Series) -> str:
+    """아이템 행 품명(B열) — 고객 품번(SO_국내.Model code)이 있으면 품명 앞에 붙인다
+
+    '66853010035 HS02-S180HI-N FAIL CLOSE SBWG-01DCM' (2026-11 에스제이브이 요청 —
+    거래처가 자기 품번으로 입고를 맞춘다). OC·CI·PL이 Model number를 품명 앞에 붙이는
+    것과 같은 모양이다. 품번이 빈 행은 품명 그대로.
+    """
+    item_name = to_text(get_value(item, 'item_name', '')).strip()
+    model_code = to_text(item.get(MODEL_CODE_COLUMN)).strip()
+    if not model_code:
+        return item_name
+    return f"{model_code} {item_name}" if item_name else model_code
 
 
 def build_row_remark(
@@ -481,7 +501,7 @@ def _fill_items_batch(
         # 행 데이터: A(월/일), B(품명), C(비고), D(규격), E(수량), F(단가), G(금액), H(세액)
         data_2d.append([
             date_str,
-            get_value(item, 'item_name', ''),
+            build_item_description(item),   # 고객 품번(Model code)이 있으면 앞에 붙는다
             row_remark,
             "EA",
             qty,

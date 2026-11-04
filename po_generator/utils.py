@@ -415,7 +415,8 @@ def load_dn_data() -> pd.DataFrame:
         # DN_국내 로드 (DN 고유 정보만: DN_ID, SO_ID, 납품일 등)
         df_dn = pd.read_excel(xl, sheet_name=DN_DOMESTIC_SHEET)
         # SO_국내에서 품목/금액/고객 정보 가져오기
-        df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
+        # Model code(고객 품번)는 문자열로 — 숫자로 읽히면 빈칸 섞인 열이 float이 되고 앞 0이 사라진다
+        df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET, dtype={'Model code': str})
 
     df_dn = df_dn[df_dn['DN_ID'].notna()].copy()
     so_cols = [
@@ -423,6 +424,7 @@ def load_dn_data() -> pd.DataFrame:
         'Line item',            # 복합키용
         'Customer name',        # 고객명
         'Customer PO',          # PO No.
+        'Model code',           # 고객 품번 — 거래명세표 품명 앞에 붙는다 (ts_generator.build_item_description)
         'Item name',            # 품목명
         'Item qty',             # 수량
         'Sales Unit Price',     # 판매단가
@@ -585,8 +587,8 @@ def load_so_for_advance(advance_id: str) -> tuple[pd.Series, pd.DataFrame] | Non
     with pd.ExcelFile(NOAH_SO_PO_DN_FILE) as xl:
         # 1. PMT_국내에서 선수금_ID로 SO_ID 찾기
         df_pmt = pd.read_excel(xl, sheet_name=PMT_DOMESTIC_SHEET)
-        # 2. SO_국내 로드
-        df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET)
+        # 2. SO_국내 로드 (Model code = 고객 품번은 문자열로 — load_dn_data와 같은 이유)
+        df_so = pd.read_excel(xl, sheet_name=SO_DOMESTIC_SHEET, dtype={'Model code': str})
 
     df_pmt = df_pmt[df_pmt['선수금_ID'].notna()].copy()
 
