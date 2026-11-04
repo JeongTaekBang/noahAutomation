@@ -214,13 +214,18 @@ def check_snapshot(ir_paths: list[Path], it_paths: list[Path], year: int, month:
     return day, errors, warns
 
 
-def describe_plan(plan: Plan, year: int, upto: int) -> str:
+def describe_plan(plan: Plan, year: int, upto: int, preview: bool = False) -> str:
+    """[1/4] 줄 — 이번 실행이 무엇을 하고 Start를 어디서 가져오는지. 기간 뒤에 조사를 붙이지 않는다(P10을/P12를이 갈린다)"""
+    this = f"{year} P{upto:02d}"
     if plan.kind == 'baseline':
-        return f"기준선 — {year} P01~P{upto:02d}을 IR·IT 한 벌로 계산 (Start(P01) = 회계 P01 Start)"
+        return (f"기준선 — 저장소가 비어 있어 {year} P01~P{upto:02d} 전체를 한 번에 계산 (P01 Start = 회계 P01 Start) · "
+                + ('미리보기: 저장 안 함' if preview else f"저장 뒤 마지막 달 P{upto:02d}만 Open"))
     prev = f"{plan.prev[0]} P{plan.prev[1]:02d}"
     if plan.kind == 'next':
-        return f"월 계산 — {year} P{upto:02d}, 저장된 {prev}의 End·청구 누계에서 시작 ({prev}은 Closed로)"
-    return f"다시 계산 — {year} P{upto:02d}(Open)을 저장된 {prev}에서 다시 계산해 바꿔 넣는다"
+        return (f"새 달 {this} 계산 — Start = 저장된 {prev} End · "
+                + ('미리보기: 저장 안 함' if preview else f"저장하면 {prev} 닫힘(Closed)"))
+    return (f"마지막 달 {this} 다시 계산 — Start = 저장된 {prev} End ({prev}까지는 그대로) · "
+            + ('미리보기: 바꿔 넣지 않음' if preview else f"{this} 자리에 바꿔 넣음"))
 
 
 def method_note(plan: Plan, upto: int) -> str:
@@ -456,7 +461,7 @@ def main(argv: list[str] | None = None) -> int:
             print("저장하지 않았습니다 — 계산만 보려면 --dry-run")
             return 1
 
-        print(f"[1/4] {describe_plan(plan, year, upto)}")
+        print(f"[1/4] {describe_plan(plan, year, upto, preview=args.dry_run)}")
         if plan.kind == 'baseline':
             official, ob_path = load_official(list(ob_paths), year, upto)
         else:

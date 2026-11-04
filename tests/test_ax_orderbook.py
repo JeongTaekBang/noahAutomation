@@ -454,6 +454,14 @@ class TestCli:
         assert [p.name for p in cli.find_it_files(tmp_path, 2026, 10)] == ['Item transaction_20261102.xlsx']
         assert [p.name for p in cli.find_ir_files(tmp_path, 2026, 10)] == ['Item requirement_20261102.xlsx']
 
+    def test_plan_messages_say_where_start_comes_from(self):
+        """'P10부터 시작인데?'(2026-11-04 사용자) — 저장된 앞 달과 그대로인 범위가 문구에 보여야 한다"""
+        assert cli.describe_plan(Plan('recompute', (2026, 9)), 2026, 10) == (
+            '마지막 달 2026 P10 다시 계산 — Start = 저장된 2026 P09 End (2026 P09까지는 그대로) · 2026 P10 자리에 바꿔 넣음')
+        assert cli.describe_plan(Plan('recompute', (2026, 9)), 2026, 10, preview=True).endswith('미리보기: 바꿔 넣지 않음')
+        assert cli.describe_plan(Plan('next', (2026, 12)), 2027, 1).endswith('저장하면 2026 P12 닫힘(Closed)')
+        assert 'P01~P10 전체' in cli.describe_plan(Plan('baseline', None), 2026, 10)
+
     def test_extracts_come_from_the_period_folder(self, tmp_path):
         """그 달 폴더(연도/P월)가 먼저, 없으면 바로 아래 — 다른 달 폴더의 추출본은 집지 않는다"""
         p11 = cli.period_dir(tmp_path, 2026, 11)
