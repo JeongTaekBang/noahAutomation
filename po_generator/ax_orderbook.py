@@ -473,7 +473,7 @@ def line_frame(ir: pd.DataFrame, official: pd.DataFrame, currency_overrides: dic
                ) -> pd.DataFrame:
     """계산에 쓰는 IR 라인 — Cancelled 제외, 키·통화·단가·수주월을 붙인다.
 
-    키로 거르지 않는다: 우리 매핑이 공식과 다른 키를 만들어도 라인은 남고 '키 갈림'으로 보인다
+    키로 거르지 않는다: 우리 매핑이 공식과 다른 키를 만들어도 라인은 남고 '부서·CC 귀속 차이'로 보인다
     (예전엔 공식 Start에 없는 키를 대상에서 뺐다가 P10에서 크레인·MOD6N2 등 라인 5개 9.4M이 조용히 빠졌다).
     """
     dept_map = learn_dept_map(official, ir)
@@ -1053,7 +1053,7 @@ def compare_with_official(keys: pd.DataFrame, official_rows: pd.DataFrame) -> di
 
 
 DIFF_CAUSES: tuple[str, ...] = (
-    '회계 조정', '취소 주문(회계는 그달 Variance)', '지난 달 차이 이월', '키 갈림', '청구 월',
+    '회계 조정', '취소 주문(회계는 그달 Variance)', '지난 달 차이 이월', '부서·CC 귀속 차이', '청구 월',
     '취소 주문(처음부터 제외)', '수주 사후 변경(IR은 지금 값)', '기초 차이', '환율', '기타',
 )
 # 결과 HTML의 원인 설명 — 판정 규칙은 classify_differences 독스트링이 소유하고, 여기는 읽는 사람용 한 줄
@@ -1061,7 +1061,7 @@ DIFF_CAUSE_NOTES: dict[str, str] = {
     '회계 조정': '회계가 그 키의 Start를 손으로 고쳤다 (회계 Start ≠ 회계 직전 달 End)',
     '취소 주문(회계는 그달 Variance)': '그달 흐름은 같고 Start·Variance만 다르다 — 회계는 취소한 달에 빼고 우리는 처음부터 뺐다',
     '지난 달 차이 이월': '그달 Input·Output·End는 같다 — 지난 달까지의 차이가 Start로 넘어온 것',
-    '키 갈림': '프로젝트 합계는 같고 키(Cost center·부서)만 다르다',
+    '부서·CC 귀속 차이': '프로젝트 합계는 같고, 금액이 귀속된 키(Cost center·부서)만 다르다',
     '청구 월': 'Output 차이가 앞뒤 달과 상쇄된다 — 우리는 출고월, AX는 청구월(월말 출고·다음 달 청구)',
     '취소 주문(처음부터 제외)': '우리 End가 작고 그 프로젝트에 취소 라인이 있다 — 우리는 취소 주문을 처음부터 뺀다',
     '수주 사후 변경(IR은 지금 값)': 'End 차이가 Input 차이로 설명된다 — IR은 바뀐 지금 값, AX는 수주 당시 값으로 넣고 바뀐 달에 고친다',
@@ -1077,7 +1077,7 @@ def classify_differences(result: OrderbookResult, official: pd.DataFrame, ir: pd
     회계 조정        공식 Start ≠ 공식 직전 달 End (회계가 키를 손으로 고쳤다)
     (그달은 맞음)    Input·Output·End는 같고 Start·Variance만 다르다 — 지난 달 차이가 넘어온 것.
                      그 프로젝트에 취소 라인이 있으면 '취소 주문(회계는 그달 Variance)', 아니면 '지난 달 차이 이월'
-    키 갈림          프로젝트 합계는 맞는데 키(부서·CC)만 다르다
+    부서·CC 귀속 차이  프로젝트 합계는 맞는데 금액이 귀속된 키(부서·CC)만 다르다
     청구 월          Output 차이가 앞뒤 달 Output 차이와 상쇄된다 — 출고월 인식 vs AX 청구월(월말 출고·다음 달 청구)
     취소 주문        우리 End가 작고 그 프로젝트에 월말 전 생성된 취소 라인이 있다 — 우리는 처음부터 뺀다
     수주 사후 변경   End 차이가 그 키의 지금까지 Input 차이로 설명된다 — IR은 수량·단가·삭제가 반영된 지금 값이고,
@@ -1120,7 +1120,7 @@ def classify_differences(result: OrderbookResult, official: pd.DataFrame, ir: pd
         elif max(abs(r.d_Input), abs(r.d_Output), abs(r.d_End)) <= 1:
             causes.append('취소 주문(회계는 그달 Variance)' if has_cancel and r.d_Start < 0 else '지난 달 차이 이월')
         elif proj_split.get((m, project), False):
-            causes.append('키 갈림')
+            causes.append('부서·CC 귀속 차이')
         elif abs(r.d_Output) > 1 and any(
                 abs(proj_out.get((m, project), 0.0) + proj_out.get((m + s, project), 0.0))
                 <= max(1.0, 0.01 * abs(proj_out.get((m, project), 0.0))) for s in (-1, 1)):

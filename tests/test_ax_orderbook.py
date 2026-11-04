@@ -232,8 +232,8 @@ class TestLinesAndKeys:
         assert '82-00013.001100112' not in set(res.keys.loc[res.keys['pn'] == 1, 'Key'])
         assert k(res, '82-00013.001100112', 2)['Iv'] == 50_000                  # UTC 1/31 16:00 = KST 2/1
 
-    def test_line_with_unmapped_dept_is_kept_as_key_split(self, scenario):
-        """매핑이 다른 라인도 빠지지 않는다 — 프로젝트 합계는 회계와 같고 키만 갈린다"""
+    def test_line_with_unmapped_dept_is_kept_under_other_key(self, scenario):
+        """매핑이 다른 라인도 빠지지 않는다 — 프로젝트 합계는 회계와 같고 금액이 귀속된 키(부서·CC)만 다르다"""
         res = scenario[3]
         p = res.keys[(res.keys['Project'] == '82-00007.001') & (res.keys['pn'] == 1)]
         assert p['Ev'].sum() == pytest.approx(1_000_000)
