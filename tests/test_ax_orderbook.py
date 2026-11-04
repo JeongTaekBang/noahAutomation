@@ -10,7 +10,9 @@ build_ax_orderbook.py) 테스트
 from __future__ import annotations
 
 import json
+import re
 from datetime import date
+from pathlib import Path
 
 import openpyxl
 import pandas as pd
@@ -317,6 +319,13 @@ class TestCompareAndClassify:
         assert cause[('P02', '82-00001.001100112')] == '청구 월'
         assert cause[('P03', '82-00001.001100112')] == '청구 월'
         assert cause[('P02', '82-00002.001500849')] == '회계 조정'
+
+    def test_guide_lists_causes_in_judging_order(self):
+        """컨셉 문서의 '차이 원인' 표 = DIFF_CAUSES, 순서까지 — 문서가 '위에서부터 처음 맞는 원인'이라고 읽히니
+        원인을 더하거나 순서를 바꾸고 문서를 빠뜨리면 여기서 걸린다"""
+        guide = Path(ax.__file__).resolve().parent.parent / 'docs' / 'AX오더북_가이드.md'
+        section = guide.read_text(encoding='utf-8').split('\n## 차이 원인\n', 1)[1].split('\n## ', 1)[0]
+        assert re.findall(r'^\| \*\*(.+?)\*\* \|', section, flags=re.M) == list(ax.DIFF_CAUSES)
 
 
 class TestDeptMapping:
