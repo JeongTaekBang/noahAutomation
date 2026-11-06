@@ -131,8 +131,9 @@ PL_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_pl"
 DEFAULT_HS_CODE: Final[str] = '8481.90.0000'
 
 # 자기네 수입통관 코드를 따로 요구한 거래처 (고객명 부분일치 — 시트 표기가 흔들린다).
-# 이들만 수출신고용에 더해 **고객 제출용을 한 장 더**
-# 만든다 (`CI-HS_*`/`PL-HS_*`). 두 장의 양식은 완전히 같고 D열 값만 다르다.
+# 이들의 CI·PL·COO는 기본값 대신 **고객 코드로 한 장만** 만든다 (파일명도 `CI_*`/`PL_*`
+# 그대로). 예전엔 수출신고용 + 고객 제출용(`CI-HS_*`/`PL-HS_*`) 두 장이었는데
+# 2026-11-06 사용자 지시로 고객 코드판 하나로 줄였다.
 HS_LINE_CUSTOMERS: Final[tuple[str, ...]] = ('SECTORIEL',)
 
 # 라인별 HS 열(D)은 **템플릿 파일을 늘리지 않고** 임시 사본을 런타임에 고쳐 만든다
@@ -148,8 +149,8 @@ HS_LINE_CUSTOMERS: Final[tuple[str, ...]] = ('SECTORIEL',)
 # 맞추고, CI와 같은 서명 이미지로 완성본 PDF를 낸다). 수출자가 생산자가 아니므로 **NOAH가 RCK에
 # 원산지확인서로 원산지를 보증**해 줘야 하고 RCK가 그것을 보관한다. 회사 정보·선언문·서명은
 # 템플릿 고정 텍스트(CI의 Seller 블록과 같은 규약)다.
-# HS는 CI 규칙(기본 = 수출신고 코드)을 따르되 `HS_LINE_CUSTOMERS`는 **고객 코드 한 장만**
-# 낸다 — COO는 수출신고에 쓰이지 않고 고객의 수입통관에만 쓰여서 CI-HS와 맞아야 한다.
+# HS는 CI·PL과 같은 판단이다(기본 = 수출신고 코드, `HS_LINE_CUSTOMERS`는 고객 코드) —
+# 같이 제출되는 CI와 코드가 맞아야 한다 (`document_service._attach_hs_codes`).
 COO_TEMPLATE_FILE: Final[Path] = TEMPLATE_DIR / "certificate_of_origin.xlsx"
 COO_OUTPUT_DIR: Final[Path] = _OUT_BASE / "generated_coo"
 

@@ -9,7 +9,6 @@ CLI에서 비즈니스 로직을 분리하여 재사용 가능하게 합니다.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
@@ -159,67 +158,41 @@ class DocumentService:
 
         return items_df
 
-    def _generate_hs_line_copy(
-        self,
-        *,
-        doc_type: str,
-        template: Path,
-        output_dir: Path,
-        creator: Callable[..., None],
-        dn_id: str,
-        customer_name: str,
+    @staticmethod
+    def _attach_hs_codes(
         items_df: pd.DataFrame,
-    ) -> tuple[Path | None, list[str], list[str]]:
-        """라인별 HS CODE 판을 한 장 더 만든다 (고객 제출용)
+        customer_name: str,
+    ) -> tuple[pd.DataFrame | None, list[str], str]:
+        """선적서류(CI·PL·COO)에 실을 라인별 HS를 정한다 — 세 문서가 같은 판단을 쓴다
 
-        기존 문서(수출신고용)는 손대지 않는다 — **같은 템플릿**에 HS 열이 붙은
-        items_df만 넘긴다. 격자 변형(A:D → A:C + D열)은 생성기가 임시 사본 위에서
-        하므로 템플릿 파일이 둘로 갈라지지 않는다 (`excel_helpers.apply_hs_layout`).
-
-        Args:
-            doc_type: 파일명 접두사 ('CI-HS' / 'PL-HS')
-            template: 표준 템플릿 (수출신고용과 같은 파일)
-            output_dir: 출력 폴더 (기존 문서와 같은 곳)
-            creator: `create_ci_xlwings` / `create_pl_xlwings`
-            dn_id: DN_ID
-            customer_name: 고객명
-            items_df: 아이템 (Model number·OS name 보강된 상태)
+        자기네 수입통관 코드를 요구한 거래처(`HS_LINE_CUSTOMERS`)는 **그 코드로 한 장만**,
+        나머지는 우리 수출신고 코드(`DEFAULT_HS_CODE`)다. 예전엔 SECTORIEL CI·PL을
+        수출신고용 + 고객 제출용(`CI-HS_*`) 두 장으로 냈는데 고객 코드판 하나로 줄였다
+        (2026-11-06 사용자 지시). 세 문서가 한 곳에서 정해야 같은 봉투의 CI·PL·COO가
+        서로 다른 코드를 주장하지 않는다.
 
         Returns:
-            (생성된 파일 경로 또는 None, 경고 목록, 오류 목록)
+            (`_hs_code` 열이 붙은 사본, 경고 목록, 오류 메시지).
+            오류 메시지가 있으면 사본은 None이고 **문서를 만들지 않는다**
         """
-        # OS name이 통째로 없으면 전 행이 조용히 미지정으로 떨어진다 — 한 줄 미지정과
-        # 컬럼 자체 부재는 다른 사건이다. 빈 D열 문서를 성공으로 내보내지 않는다.
-        if OS_NAME_COLUMN not in items_df.columns:
-            return None, [], [
-                f"SO 조인 실패로 '{OS_NAME_COLUMN}'가 없어 라인별 HS 판을 만들지 않았습니다"
-            ]
+        if not is_hs_line_customer(customer_name):
+            enriched, _ = enrich_hs_codes(items_df, default_code=DEFAULT_HS_CODE)
+            return enriched, [], ''
 
-        hs_items_df, unmatched = enrich_hs_codes(items_df)
+        # OS name이 통째로 없으면 전 행이 조용히 미지정으로 떨어진다 — 한 줄 미지정과
+        # 컬럼 자체 부재는 다른 사건이다. 빈 HS 열 문서를 성공으로 내보내지 않는다.
+        # 수출신고 기본값으로 메우지도 않는다 — 고객이 받기로 한 코드가 아니다.
+        if OS_NAME_COLUMN not in items_df.columns:
+            return None, [], (
+                f"SO 조인 실패로 '{OS_NAME_COLUMN}'가 없어 고객 HS 코드를 정할 수 없습니다"
+            )
+
+        enriched, unmatched = enrich_hs_codes(items_df)
         warnings = [
             f"HS 코드 미지정 {len(unmatched)}줄 (추측하지 않고 비워 둠 — 고객 확인 필요): "
             + ', '.join(unmatched)
         ] if unmatched else []
-
-        try:
-            output_file = generate_output_filename(
-                doc_type, dn_id, customer_name, output_dir,
-            )
-            if not validate_output_path(output_file, output_dir):
-                return None, warnings, ["라인별 HS 판 출력 경로 검증 실패"]
-
-            creator(
-                template_path=template,
-                output_path=output_file,
-                order_data=hs_items_df.iloc[0],
-                items_df=hs_items_df,
-            )
-            logger.info(f"{doc_type} 생성 완료: {output_file}")
-            return output_file, warnings, []
-
-        except Exception as e:
-            logger.exception(f"{doc_type} 생성 중 오류 발생")
-            return None, warnings, [f"라인별 HS 판 생성 실패: {e}"]
+        return enriched, warnings, ''
 
     def _enrich_with_weight(self, items_df: pd.DataFrame) -> pd.DataFrame:
         """PO_해외 Model+옵션 기반으로 Net Weight (Weight per unit) 보강
@@ -531,15 +504,16 @@ class DocumentService:
 
         # SO_해외에서 Model number 보강
         items_df = self._enrich_from_so_lines(order_data)
-        # 라인별 HS는 이제 모든 CI/PL 공통 양식이다 — 거래처 고유 코드를 받지 않은
-        # 문서는 우리 수출신고 코드를 물품 줄에 일괄로 넣는다 (운임 줄은 빈칸)
-        base_items_df, _ = enrich_hs_codes(items_df, default_code=DEFAULT_HS_CODE)
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        # 라인별 HS — 고객 코드를 받은 거래처는 그 코드, 나머지는 수출신고 기본값
+        hs_items_df, warnings, hs_error = self._attach_hs_codes(items_df, customer_name)
+        if hs_error:
+            return DocumentResult.file_error_result(order_no=dn_id, error_message=hs_error)
 
         # 출력 디렉토리 생성
         CI_OUTPUT_DIR.mkdir(exist_ok=True)
 
         # 파일명 생성
-        customer_name = order_data.get_value('customer_name', 'Unknown')
         output_file = generate_output_filename("CI", dn_id, customer_name, CI_OUTPUT_DIR)
 
         if not validate_output_path(output_file, CI_OUTPUT_DIR):
@@ -553,8 +527,8 @@ class DocumentService:
             create_ci_xlwings(
                 template_path=CI_TEMPLATE_FILE,
                 output_path=output_file,
-                order_data=base_items_df.iloc[0],
-                items_df=base_items_df,
+                order_data=hs_items_df.iloc[0],
+                items_df=hs_items_df,
             )
             logger.info(f"CI 생성 완료: {output_file}")
 
@@ -575,40 +549,20 @@ class DocumentService:
                 error_message=str(e),
             )
 
-        # Sectoriel 등 라인별 HS CODE를 요구하는 거래처는 고객 제출용을 한 장 더 만든다
-        extra_files: list[Path] = []
-        warnings: list[str] = []
-        errors: list[str] = []
-        if is_hs_line_customer(customer_name):
-            hs_file, warnings, errors = self._generate_hs_line_copy(
-                doc_type="CI-HS",
-                template=CI_TEMPLATE_FILE,
-                output_dir=CI_OUTPUT_DIR,
-                creator=create_ci_xlwings,
-                dn_id=dn_id,
-                customer_name=customer_name,
-                items_df=items_df,
-            )
-            if hs_file:
-                extra_files.append(hs_file)
-
-        result = DocumentResult.success_result(
+        return DocumentResult.success_result(
             output_file=output_file,
             order_no=dn_id,
             customer_name=customer_name,
             item_count=order_data.item_count,
             warnings=warnings,
         )
-        result.extra_files = extra_files
-        result.errors = errors
-        return result
 
     def generate_coo(self, dn_id: str) -> DocumentResult:
         """Certificate of Origin 생성 (xlsx + PDF)
 
-        HS는 CI 규칙을 따르되, 자기네 코드를 요구한 거래처(`HS_LINE_CUSTOMERS`)는
-        **고객 코드 한 장만** 만든다 — COO는 수출신고가 아니라 고객의 수입통관에 쓰이므로
-        같이 제출되는 CI-HS와 코드가 맞아야 한다 (`config.COO_TEMPLATE_FILE` 주석).
+        HS는 CI·PL과 같은 판단(`_attach_hs_codes`)이다 — 자기네 코드를 요구한 거래처
+        (`HS_LINE_CUSTOMERS`)는 고객 코드, 나머지는 수출신고 기본값. 같이 제출되는 CI와
+        코드가 맞아야 한다.
 
         PDF는 고객에게 보내는 본, xlsx는 손볼 원본이라 둘 다 남긴다. PDF 변환이 실패하면
         xlsx는 그대로 두고 `errors`로 알린다 — CLI는 실패로 집계한다(보낼 본이 없다).
@@ -634,25 +588,9 @@ class DocumentService:
         items_df = self._enrich_from_so_lines(order_data)
         customer_name = order_data.get_value('customer_name', 'Unknown')
 
-        warnings: list[str] = []
-        if is_hs_line_customer(customer_name):
-            # OS name이 통째로 없으면 전 행이 미지정으로 떨어진다 — 빈 HS 열 증명서를
-            # 내보내지 않는다 (`_generate_hs_line_copy`와 같은 판단)
-            if OS_NAME_COLUMN not in items_df.columns:
-                return DocumentResult.file_error_result(
-                    order_no=dn_id,
-                    error_message=(
-                        f"SO 조인 실패로 '{OS_NAME_COLUMN}'가 없어 고객 HS 코드를 정할 수 없습니다"
-                    ),
-                )
-            coo_items_df, unmatched = enrich_hs_codes(items_df)
-            if unmatched:
-                warnings.append(
-                    f"HS 코드 미지정 {len(unmatched)}줄 (추측하지 않고 비워 둠 — 고객 확인 필요): "
-                    + ', '.join(unmatched)
-                )
-        else:
-            coo_items_df, _ = enrich_hs_codes(items_df, default_code=DEFAULT_HS_CODE)
+        coo_items_df, warnings, hs_error = self._attach_hs_codes(items_df, customer_name)
+        if hs_error:
+            return DocumentResult.file_error_result(order_no=dn_id, error_message=hs_error)
 
         COO_OUTPUT_DIR.mkdir(exist_ok=True)
         output_file = generate_output_filename("COO", dn_id, customer_name, COO_OUTPUT_DIR)
@@ -920,12 +858,14 @@ class DocumentService:
         # SO_해외에서 Model number/Model code 보강
         items_df = self._enrich_from_so_lines(order_data)
         items_df = self._enrich_with_weight(items_df)
-        # CI와 같은 양식 — 라인별 HS, 거래처 고유 코드가 없으면 수출신고 기본값
-        base_items_df, _ = enrich_hs_codes(items_df, default_code=DEFAULT_HS_CODE)
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        # CI와 같은 판단 — 고객 코드를 받은 거래처는 그 코드, 나머지는 수출신고 기본값
+        hs_items_df, warnings, hs_error = self._attach_hs_codes(items_df, customer_name)
+        if hs_error:
+            return DocumentResult.file_error_result(order_no=dn_id, error_message=hs_error)
 
         PL_OUTPUT_DIR.mkdir(exist_ok=True)
 
-        customer_name = order_data.get_value('customer_name', 'Unknown')
         output_file = generate_output_filename("PL", dn_id, customer_name, PL_OUTPUT_DIR)
 
         if not validate_output_path(output_file, PL_OUTPUT_DIR):
@@ -938,8 +878,8 @@ class DocumentService:
             create_pl_xlwings(
                 template_path=PL_TEMPLATE_FILE,
                 output_path=output_file,
-                order_data=base_items_df.iloc[0],
-                items_df=base_items_df,
+                order_data=hs_items_df.iloc[0],
+                items_df=hs_items_df,
             )
             logger.info(f"PL 생성 완료: {output_file}")
 
@@ -960,33 +900,13 @@ class DocumentService:
                 error_message=str(e),
             )
 
-        # Sectoriel 등 라인별 HS CODE를 요구하는 거래처는 고객 제출용을 한 장 더 만든다
-        extra_files: list[Path] = []
-        warnings: list[str] = []
-        errors: list[str] = []
-        if is_hs_line_customer(customer_name):
-            hs_file, warnings, errors = self._generate_hs_line_copy(
-                doc_type="PL-HS",
-                template=PL_TEMPLATE_FILE,
-                output_dir=PL_OUTPUT_DIR,
-                creator=create_pl_xlwings,
-                dn_id=dn_id,
-                customer_name=customer_name,
-                items_df=items_df,
-            )
-            if hs_file:
-                extra_files.append(hs_file)
-
-        result = DocumentResult.success_result(
+        return DocumentResult.success_result(
             output_file=output_file,
             order_no=dn_id,
             customer_name=customer_name,
             item_count=order_data.item_count,
             warnings=warnings,
         )
-        result.extra_files = extra_files
-        result.errors = errors
-        return result
 
     def generate_oc(self, so_id: str) -> DocumentResult:
         """Order Confirmation 생성

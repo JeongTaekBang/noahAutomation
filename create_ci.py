@@ -112,16 +112,9 @@ def generate_ci(dn_id: str, df_dn: pd.DataFrame) -> tuple[bool, list[str]]:
     # 4. 결과 처리
     if result.success:
         print(f"  -> Commercial Invoice 생성 완료: {result.output_file.name}")
-        # 라인별 HS 판(고객 제출용)은 대상 거래처에서만 나온다
-        for extra in result.extra_files:
-            print(f"  -> 고객 제출용(라인별 HS) 생성 완료: {extra.name}")
         for warning in result.warnings:
             print(f"  [확인 필요] {warning}")
-        for error in result.errors:
-            print(f"  [실패] {error}")
-        # 두 장을 다 요구한 건에서 한 장이 빠지면 성공으로 보고하지 않는다 —
-        # 사람이 다 있다고 믿고 하나만 보낸다
-        return not result.errors, result.warnings + result.errors
+        return True, result.warnings
     else:
         if result.status == GenerationStatus.FILE_ERROR:
             print(f"  [오류] {result.errors[0] if result.errors else result.message}")

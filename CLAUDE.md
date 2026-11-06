@@ -33,7 +33,7 @@ python create_fi.py --po                # 사용 가능한 발주번호 목록 �
 python create_oc.py SOO-2026-0001        # Order confirmation (생성 후 "이메일 발송?" y/N → 영문 메일)
 python create_oc.py SOO-2026-0001 --mail    # 확인 없이 메일 초안
 python create_oc.py SOO-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
-python create_ci.py DNO-2026-0001        # Commercial invoice (라인별 HS CODE, SECTORIEL은 고객용 한 장 더)
+python create_ci.py DNO-2026-0001        # Commercial invoice (라인별 HS CODE, SECTORIEL은 고객 코드로)
 python create_pl.py DNO-2026-0001        # Packing list (동일)
 python create_coo.py DNO-2026-0001       # Certificate of Origin — RCK 수출자 원산지 선언서, 제조 NOAH (xlsx + PDF)
 
@@ -255,10 +255,12 @@ AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — AX Sales Order
     **운임 줄은 여기서도 비운다** — 물품이 아니라 HS가 애초에 없다
   - 표기가 문서마다 다른 게 정상이다: 기본값은 10자리 점 구분(우리 관세청 신고 형식),
     SECTORIEL 코드는 8자리(EU 형식). D 폭은 그 문서에 실릴 **가장 긴 코드**로 잰다
-- **SECTORIEL은 CI·PL을 2장씩 낸다 — 수출신고용과 고객 제출용**
-  (`config.HS_LINE_CUSTOMERS`, 고객명 부분일치 — 2026-09-02 사용자 지시).
-  두 장의 **양식은 완전히 같고 D열 값만 다르다** (기본값 vs 고객 코드).
-  `CI-HS_*`/`PL-HS_*`가 고객 제출용이다. 판정은 `hs_code.py`가 소유하고
+- **SECTORIEL의 CI·PL·COO는 고객 코드로 한 장만 낸다** (`config.HS_LINE_CUSTOMERS`,
+  고객명 부분일치). 양식은 같고 D열 값만 기본값 대신 고객 코드다. 파일명도 `CI_*`/`PL_*`
+  그대로. 처음엔(2026-09-02) 수출신고용 + 고객 제출용(`CI-HS_*`/`PL-HS_*`) 2장씩이었는데
+  2026-11-06 사용자 지시로 고객 코드판 하나로 줄였다. 어느 코드를 쓸지는
+  `document_service._attach_hs_codes()` **한 곳**이 정한다 — CI·PL·COO는 같은 봉투에 들어가
+  서로 다른 코드를 주장하면 안 된다. 판정은 `hs_code.py`가 소유하고
   **우선순위가 곧 안전장치**다 — 운임 → 모델번호 → 품목텍스트 → OS 제품군 → 미매칭:
   - **운임(`FEDEX COST` 등)은 HS가 없는 것이 정상**이라 빈칸이고 **경고 대상도 아니다**.
     실측 3줄의 `OS name`이 `Noah NA`/`SA`/`Electric Spares`로 제각각 찍혀 있어,
@@ -272,8 +274,9 @@ AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — AX Sales Order
   - **모르는 것은 추측하지 않는다** — 빈칸 + 생성 시 경고(품목명·모델번호 나열).
     2026년 실적에선 전기모터(980737/980739)와 스템커버(980800)가 여기 걸린다.
     코드를 받으면 `SPARE_HS_BY_MODEL`에 한 줄 추가
-  - `OS name` 컬럼 자체가 없으면(SO 조인 실패) **HS 판을 아예 만들지 않는다** — 한 줄
-    미지정과 전 행 빈칸은 다른 사건이다. 이때는 경고가 아니라 오류로 보고한다
+  - `OS name` 컬럼 자체가 없으면(SO 조인 실패) **문서를 아예 만들지 않는다** — 한 줄
+    미지정과 전 행 빈칸은 다른 사건이다. 이때는 경고가 아니라 오류로 보고한다.
+    수출신고 기본값으로 메우지도 않는다 — 고객이 받기로 한 코드가 아니다
 - **CI/PL 양식은 템플릿 파일이 소유한다** (2026-09-07). 품목명 병합이 `A:C`이고 `D18`이
   `HS CODE`이며 문서 단위 HS(`H12`/`I12`)는 **비어 있다** — 한 장이 서로 다른 두 HS를
   주장하면 통관에서 어느 쪽을 믿을지 알 수 없다. 구 양식은 `templates/Old/`에 있다.
@@ -286,7 +289,7 @@ AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — AX Sales Order
   복제하면 갈라지니 그럴 만했는데, 양식이 하나로 통일되면서 근거가 사라졌다.)
   **아래 폭 이야기는 왜 템플릿이 지금 모양인지의 근거다** — 템플릿을 손볼 때 지킬 것.
   **품목명 폭(A:C)은 구 양식 A:D와 같고, 나머지 열은 한 칸도 건드리지 않았다.**
-  그냥 떼면 200줄이 406 → 505줄(+24%)로 늘어 SECTORIEL 두 장의 쪽수가 갈린다(실측).
+  그냥 떼면 200줄이 406 → 505줄(+24%)로 늘어 쪽수가 늘어난다(실측).
   폭 숫자는 코드에 박지 않는다: COM `ColumnWidth`와 파일의 width가 열 패딩(0.83자)만큼
   다르고, 병합 칸은 걸친 열 수만큼 패딩이 더 붙는다 — **시트를 재서** 맞춘다.
   **초과분(약 12자)은 인쇄 배율(`FitToPagesWide=1` → 실측 89%)로 흡수한다.**
@@ -310,8 +313,8 @@ AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — AX Sales Order
     'PO / Line 1'이 다섯 번 나온다. 정렬은 Customer PO → SO → SO 라인, 우리 SO 번호는 헤더 `Order No.`에 남는다
   - **운임 줄은 싣지 않는다** (`hs_code.is_non_goods` — CI의 HS 빈칸 판정과 같은 함수). 수량을 못 읽으면
     1로 메우지 않고 멈춘다 — 증명서에 추정치를 찍지 않는다
-  - HS는 CI 규칙(기본 = `DEFAULT_HS_CODE`). **SECTORIEL은 고객 코드 한 장만** — COO는 수출신고가 아니라
-    고객의 수입통관에 쓰여 같이 제출되는 CI-HS와 맞아야 한다. `OS name`이 없으면 만들지 않는다(CI-HS와 같은 판단)
+  - HS는 CI·PL과 같은 판단(`_attach_hs_codes` — 기본 = `DEFAULT_HS_CODE`, SECTORIEL = 고객 코드). 같이
+    제출되는 CI와 코드가 맞아야 한다. `OS name`이 없으면 만들지 않는다(CI·PL과 같은 판단)
   - 출력은 **xlsx + PDF 둘 다** (PDF = 보낼 본, xlsx = 손볼 원본). PDF 변환이 실패하면 xlsx는 남기고 실패로 집계
   - **맺음 블록(Total~서명)은 한 장에 모은다** — 자동 나누기가 그 안에 걸리면 마지막 품목 행 앞에 수동
     나누기. 이게 먹으려면 인쇄가 **폭만 1장·높이 자동**이어야 한다(높이까지 고정하면 수동 나누기 무시, 100% 고정은

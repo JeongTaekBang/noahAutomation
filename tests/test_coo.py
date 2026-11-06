@@ -350,8 +350,8 @@ class TestService:
         assert list(captured['items_df'][HS_COLUMN]) == [DEFAULT_HS_CODE, '']
 
     def test_SECTORIEL은_고객_코드_한_장만(self, make_service):
-        """COO는 고객 수입통관용 — 같이 제출되는 CI-HS와 코드가 같아야 한다.
-        수출신고용 판을 따로 만들지 않는다 (xlsx 1 + PDF 1)"""
+        """같이 제출되는 CI와 코드가 같아야 한다 (CI·PL도 고객 코드 한 장 —
+        `tests/test_ci_pl_hs.py`). 수출신고용 판을 따로 만들지 않는다 (xlsx 1 + PDF 1)"""
         make, captured = make_service
         result = make([dn_row(customer=SECTORIEL)]).generate_coo('DNO-2026-0190')
         assert result.success and not result.errors
