@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-11-06: Final Invoice — Invoice Date = 선적일, PDF도 생성
+
+사용자 요청: 메뉴의 Final Invoice 생성 시 Invoice 날짜를 선적일 컬럼으로, PDF까지.
+
+- **원인**: 코드는 `dispatch_date` 별칭을 읽었는데 그 별칭은 `출고일`을 먼저 찾는다 — DN_해외에서는 `출고일`(공장
+  출고)과 `선적일`이 따로 있어 **공장 출고일이 찍히고 있었다** (실측 중앙값 16일 이르다). `TEMPLATE_MAPPINGS.md`는
+  처음부터 "H8 = 선적일"이라 적혀 있었다
+- `config.COLUMN_ALIASES['ship_date']` 신설, `fi_generator.resolve_invoice_date()` — 실린 라인의 선적일. 여럿이면
+  가장 늦은 날 + 경고(실측 `DNO-2026-0015`·`0090`, `--po` 통합), 일부 공란이면 경고, 전부 공란이면 오늘 + 경고
+  (출고일로 메우지 않는다)
+- PDF: `DocumentService._create_fi()` — DN 기준·발주번호 기준 두 경로가 공유. COO와 같은 규약(`extra_files`=PDF,
+  변환 실패는 xlsx를 남기고 `errors` → CLI는 실패로 집계). `create_fi.py`가 PDF 이름과 날짜 경고를 출력하고 요약에
+  경고를 한 번 더 보여 준다
+- 검증: `tests/test_fi_invoice_date.py` 10건, 전체 1186 passed. 실데이터 + 실제 Excel — `DNO-2026-0208`(출고 11/03,
+  선적 11/05) H8 = 11/05, `0209`(선적 전, 발주번호 2개 분리) 오늘 + 경고, `0090` 6/05 + 경고, `0174`(27줄) PDF 3쪽,
+  `--po WGDBS2601233` — 모두 xlsx + PDF
+- **CI·PL·COO는 `출고일` 그대로** (사용자 결정) — 같은 선적의 FI와 날짜가 다른 것은 의도다.
+  `TEMPLATE_MAPPINGS.md`의 CI·PL 행이 "선적일"로 적혀 있던 것(FI 버그를 가린 것과 같은 오기)을 "출고일"로 고쳤다
+
+---
+
 ## 2026-11-06: SECTORIEL CI·PL을 고객 코드판 한 장으로
 
 사용자 지시: SECTORIEL CI·PL이 수출신고용(`CI_*`, 기본값 `8481.90.0000`) + 고객 제출용(`CI-HS_*`, 고객 코드) 두 장씩

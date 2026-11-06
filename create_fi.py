@@ -4,7 +4,7 @@ Final Invoice 생성기 (대금 청구용)
 ===================================
 
 DN_ID를 입력하면 NOAH_SO_PO_DN.xlsx의 DN_해외 시트에서 해당 데이터를 읽어
-자동으로 Final Invoice를 생성합니다.
+자동으로 Final Invoice를 생성합니다 (xlsx + PDF). Invoice Date = DN_해외 선적일.
 
 사용법:
     python create_fi.py DNO-2026-0001              # DN_ID로 단일 생성
@@ -124,7 +124,32 @@ def print_available_customer_pos(df_dn: pd.DataFrame, limit: int = 20) -> None:
     print("=" * 60)
 
 
-def generate_fi_by_po(customer_po: str) -> bool:
+def _report(result, label: str = '') -> tuple[bool, list[str]]:
+    """생성 결과 출력 — (성공 여부, 요약에 다시 보여줄 알림)
+
+    xlsx와 PDF를 같이 만든다. PDF가 빠지면 보낼 본이 없으므로 성공으로 치지 않는다
+    (create_coo.py와 같은 규약). 경고는 Invoice Date 판단(선적일 공란·라인마다 다름)이다.
+    """
+    suffix = f" ({label})" if label else ''
+    if not result.success:
+        if result.status == GenerationStatus.FILE_ERROR:
+            print(f"  [오류]{suffix} {result.errors[0] if result.errors else result.message}")
+        else:
+            print(f"  [오류]{suffix} {result.message}")
+        logger.error(f"Final Invoice 생성 실패{suffix}: {result.message}")
+        return False, []
+
+    print(f"  -> Final Invoice 생성 완료{suffix}: {result.output_file.name}")
+    for extra in result.extra_files:
+        print(f"  -> PDF: {extra.name}")
+    for warning in result.warnings:
+        print(f"  [확인 필요] {warning}")
+    for error in result.errors:
+        print(f"  [실패] {error}")
+    return not result.errors, result.warnings + result.errors
+
+
+def generate_fi_by_po(customer_po: str) -> tuple[bool, list[str]]:
     """발주번호(Customer PO) 기준 Final Invoice 생성
 
     복수 DN에 걸친 동일 발주번호 아이템을 통합하여 FI를 생성합니다.
@@ -133,7 +158,7 @@ def generate_fi_by_po(customer_po: str) -> bool:
         customer_po: 고객 발주번호
 
     Returns:
-        성공 여부
+        (성공 여부, 알림 목록)
     """
     print(f"\n{'=' * 60}")
     print(f"Final Invoice 생성 (발주번호): {customer_po}")
@@ -145,7 +170,7 @@ def generate_fi_by_po(customer_po: str) -> bool:
     order_data = service.finder.find_dn_export_by_customer_po(customer_po)
     if order_data is None:
         print(f"  [오류] 발주번호 '{customer_po}'를 찾을 수 없습니다.")
-        return False
+        return False, []
 
     # 2. 매칭된 DN 정보 출력
     items_df = order_data.all_items
@@ -158,20 +183,10 @@ def generate_fi_by_po(customer_po: str) -> bool:
     _print_item_info(order_data, label='')
 
     # 3. FI 생성
-    result = service.generate_fi_by_customer_po(customer_po)
-    if result.success:
-        print(f"  -> Final Invoice 생성 완료: {result.output_file.name}")
-        return True
-    else:
-        if result.status == GenerationStatus.FILE_ERROR:
-            print(f"  [오류] {result.errors[0] if result.errors else result.message}")
-        else:
-            print(f"  [오류] {result.message}")
-        logger.error(f"Final Invoice 생성 실패 (발주번호: {customer_po}): {result.message}")
-        return False
+    return _report(service.generate_fi_by_customer_po(customer_po))
 
 
-def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
+def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> tuple[bool, list[str]]:
     """Final Invoice 생성
 
     DocumentService를 사용하여 Final Invoice를 생성합니다.
@@ -182,7 +197,7 @@ def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
         df_dn: DN 해외 데이터 (하위 호환용, 실제로는 사용하지 않음)
 
     Returns:
-        성공 여부
+        (성공 여부, 알림 목록)
     """
     print(f"\n{'=' * 60}")
     print(f"Final Invoice 생성: {dn_id}")
@@ -194,7 +209,7 @@ def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
     order_data = service.finder.find_dn_export(dn_id)
     if order_data is None:
         print(f"  [오류] '{dn_id}'를 찾을 수 없습니다.")
-        return False
+        return False, []
 
     # 2. 기본 정보 출력
     print(f"  고객: {order_data.get_value('customer_name', 'N/A')}")
@@ -219,17 +234,7 @@ def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
 
     # 4. 단일 PO (또는 PO 컬럼 없음) → 기존 방식
     if len(rck_pos) <= 1:
-        result = service.generate_fi(dn_id)
-        if result.success:
-            print(f"  -> Final Invoice 생성 완료: {result.output_file.name}")
-            return True
-        else:
-            if result.status == GenerationStatus.FILE_ERROR:
-                print(f"  [오류] {result.errors[0] if result.errors else result.message}")
-            else:
-                print(f"  [오류] {result.message}")
-            logger.error(f"Final Invoice 생성 실패: {result.message}")
-            return False
+        return _report(service.generate_fi(dn_id))
 
     # 5. 복수 PO → 발주번호별 분리 생성
     print(f"\n  [발주번호 분리] {len(rck_pos)}개 RCK PO 발견 → 발주번호별 FI 생성")
@@ -247,17 +252,24 @@ def generate_fi(dn_id: str, df_dn: pd.DataFrame) -> bool:
         print(f"    {po}: {len(po_items)}개 아이템")
 
     all_success = True
+    notices: list[str] = []
     for po in sorted(rck_pos):
         print(f"\n  --- {po} ---")
-        result = service.generate_fi(dn_id, rck_po=po)
-        if result.success:
-            print(f"  -> FI 생성 완료 ({po}): {result.output_file.name}")
-        else:
-            print(f"  [오류] FI 생성 실패 ({po}): {result.message}")
-            logger.error(f"Final Invoice 생성 실패 ({po}): {result.message}")
-            all_success = False
+        ok, po_notices = _report(service.generate_fi(dn_id, rck_po=po), label=po)
+        all_success = all_success and ok
+        notices.extend(f"{po}  {note}" for note in po_notices)
 
-    return all_success
+    return all_success, notices
+
+
+def _print_summary(headline: str, notices: list[str]) -> None:
+    """마지막 요약 — 경고는 문서가 길면 스크롤 위로 사라지므로 한 번 더 보여 준다"""
+    print(f"\n{'=' * 60}")
+    print(headline)
+    for note in notices:
+        print(f"[확인 필요] {note}")
+    print(f"출력 폴더: {FI_OUTPUT_DIR} (xlsx + PDF)")
+    print('=' * 60)
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -271,7 +283,8 @@ Final Invoice 생성기 (대금 청구용)
 ===================================
 
 NOAH_SO_PO_DN.xlsx의 DN_해외 시트에서 데이터를 읽어
-Final Invoice를 자동 생성합니다.
+Final Invoice를 xlsx + PDF로 자동 생성합니다.
+Invoice Date는 DN_해외의 선적일입니다 (공란이면 오늘 날짜 + 경고).
 
 두 가지 모드를 지원합니다:
   1. DN_ID 기준: DN 단위로 FI 생성 (기본)
@@ -353,15 +366,15 @@ def main() -> int:
         print(f"DN 해외: {len(df_dn)}건 로드 완료")
 
         success_count = 0
+        notices: list[str] = []
         for rck_po in args.po:
-            if generate_fi_by_po(rck_po):
+            ok, po_notices = generate_fi_by_po(rck_po)
+            if ok:
                 success_count += 1
+            notices.extend(f"{rck_po}  {note}" for note in po_notices)
 
-        print(f"\n{'=' * 60}")
-        print(f"완료: {success_count}/{len(args.po)}건 Final Invoice 생성 (RCK PO 기준)")
-        print(f"출력 폴더: {FI_OUTPUT_DIR}")
-        print('=' * 60)
-
+        _print_summary(f"완료: {success_count}/{len(args.po)}건 Final Invoice 생성 (RCK PO 기준)",
+                       notices)
         return 0 if success_count == len(args.po) else 1
 
     # DN_ID 모드 (기본)
@@ -374,16 +387,14 @@ def main() -> int:
 
     # 각 DN_ID에 대해 Final Invoice 생성
     success_count = 0
+    notices: list[str] = []
     for dn_id in args.dn_ids:
-        if generate_fi(dn_id, df_dn):
+        ok, dn_notices = generate_fi(dn_id, df_dn)
+        if ok:
             success_count += 1
+        notices.extend(f"{dn_id}  {note}" for note in dn_notices)
 
-    # 결과 출력
-    print(f"\n{'=' * 60}")
-    print(f"완료: {success_count}/{len(args.dn_ids)}건 Final Invoice 생성")
-    print(f"출력 폴더: {FI_OUTPUT_DIR}")
-    print('=' * 60)
-
+    _print_summary(f"완료: {success_count}/{len(args.dn_ids)}건 Final Invoice 생성", notices)
     return 0 if success_count == len(args.dn_ids) else 1
 
 

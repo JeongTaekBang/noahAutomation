@@ -376,6 +376,11 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     # DN (납품) 필드
     'dn_id': ('DN_ID', 'DN ID', 'dn_id', '납품번호'),
     'dispatch_date': ('출고일', 'Dispatch Date', 'dispatch_date', '출하일', '선적일'),
+    # DN_해외는 '출고일'(공장 출고)과 '선적일'이 따로 있다 — 실측 중앙값 16일 차이.
+    # 위 dispatch_date는 '출고일'을 먼저 찾으므로 해외에서도 공장 출고일로 풀린다.
+    # 선적일이 필요한 곳(FI Invoice Date)은 이 키를 쓴다. CI·PL·COO 날짜는 출고일 그대로다
+    # (2026-11-06 사용자 결정 — FI와 다른 건 의도)
+    'ship_date': ('선적일', 'Ship Date', 'Shipping Date', 'ship_date'),
     'unit_price': ('Unit Price', 'unit price', '단가'),
     'total_sales': ('Total Sales', 'total sales', '판매금액'),
     'tax_invoice_no': ('세금계산서', '세금계산서번호', 'Tax Invoice No'),

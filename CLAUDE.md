@@ -27,7 +27,7 @@ python create_ts.py --date 2026-08-06 --customer 씨앤케이  # 그날 그 거�
 python create_ts.py --date 2026-08-06                     # 그날 전체 → 거래처별 1통씩
 python create_ts.py DND-2026-0742 DND-2026-0743 --one-mail # 명시 ID를 묶어 1통
 python create_pi.py NO-0001              # Proforma invoice
-python create_fi.py DNO-2026-0001        # Final invoice (복수 RCK PO 시 발주번호별 자동 분리)
+python create_fi.py DNO-2026-0001        # Final invoice — xlsx + PDF, Invoice Date = DN_해외 선적일 (복수 RCK PO 시 발주번호별 자동 분리)
 python create_fi.py --po 26KPO00144     # 발주번호 기준 FI 생성 (복수 DN 통합)
 python create_fi.py --po                # 사용 가능한 발주번호 목록 표시
 python create_oc.py SOO-2026-0001        # Order confirmation (생성 후 "이메일 발송?" y/N → 영문 메일)

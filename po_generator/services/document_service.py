@@ -44,7 +44,7 @@ from po_generator.excel_generator import create_po_workbook
 from po_generator.ts_generator import create_ts_xlwings
 from po_generator.pi_generator import create_pi_xlwings
 from po_generator.ci_generator import create_ci_xlwings
-from po_generator.fi_generator import create_fi_xlwings
+from po_generator.fi_generator import create_fi_xlwings, resolve_invoice_date
 from po_generator.pl_generator import create_pl_xlwings
 from po_generator.oc_generator import create_oc_xlwings
 from po_generator.coo_generator import create_coo_xlwings
@@ -714,39 +714,73 @@ class DocumentService:
                 error_message="출력 경로 검증 실패",
             )
 
-        # 문서 생성
+        return self._create_fi(dn_id, order_data, output_file, customer_name)
+
+    @staticmethod
+    def _create_fi(
+        order_no: str,
+        order_data: OrderData,
+        output_file: Path,
+        customer_name: str,
+    ) -> DocumentResult:
+        """FI xlsx + PDF — DN 기준·발주번호 기준 두 경로가 공유한다
+
+        Invoice Date는 실린 라인의 선적일(`resolve_invoice_date`)이고, 그 판단의 경고
+        (선적일 공란·라인마다 다름)는 `warnings`로 돌려준다.
+
+        PDF는 고객에게 보내는 본, xlsx는 손볼 원본이라 둘 다 남긴다(COO와 같은 규약).
+        PDF 변환이 실패하면 xlsx는 그대로 두고 `errors`로 알린다 — CLI는 실패로 집계한다.
+
+        Returns:
+            DocumentResult — `output_file`=xlsx, `extra_files`=[PDF]
+        """
+        invoice_date, warnings = resolve_invoice_date(order_data.all_items)
+
         try:
             create_fi_xlwings(
                 template_path=FI_TEMPLATE_FILE,
                 output_path=output_file,
                 order_data=order_data.first_item,
                 items_df=order_data.items_df,
+                invoice_date=invoice_date,
             )
             logger.info(f"FI 생성 완료: {output_file}")
 
         except FileNotFoundError as e:
             return DocumentResult.file_error_result(
-                order_no=dn_id,
+                order_no=order_no,
                 error_message=str(e),
             )
         except PermissionError:
             return DocumentResult.file_error_result(
-                order_no=dn_id,
+                order_no=order_no,
                 error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
             )
         except Exception as e:
             logger.exception("FI 생성 중 오류 발생")
             return DocumentResult.file_error_result(
-                order_no=dn_id,
+                order_no=order_no,
                 error_message=str(e),
             )
 
-        return DocumentResult.success_result(
+        extra_files: list[Path] = []
+        errors: list[str] = []
+        try:
+            extra_files.append(export_pdf(output_file))
+        except Exception as e:
+            logger.exception("FI PDF 변환 실패")
+            errors.append(f"PDF 변환 실패 (xlsx는 생성됨): {e}")
+
+        result = DocumentResult.success_result(
             output_file=output_file,
-            order_no=dn_id,
+            order_no=order_no,
             customer_name=customer_name,
             item_count=order_data.item_count,
+            warnings=warnings,
         )
+        result.extra_files = extra_files
+        result.errors = errors
+        return result
 
     def generate_fi_by_customer_po(self, customer_po: str) -> DocumentResult:
         """Customer PO(발주번호) 기준 Final Invoice 생성
@@ -799,39 +833,7 @@ class DocumentService:
                 error_message="출력 경로 검증 실패",
             )
 
-        # 문서 생성
-        try:
-            create_fi_xlwings(
-                template_path=FI_TEMPLATE_FILE,
-                output_path=output_file,
-                order_data=order_data.first_item,
-                items_df=order_data.items_df,
-            )
-            logger.info(f"FI 생성 완료 (Customer PO): {output_file}")
-
-        except FileNotFoundError as e:
-            return DocumentResult.file_error_result(
-                order_no=customer_po,
-                error_message=str(e),
-            )
-        except PermissionError:
-            return DocumentResult.file_error_result(
-                order_no=customer_po,
-                error_message=f"파일이 열려있거나 권한 없음: {output_file.name}",
-            )
-        except Exception as e:
-            logger.exception("FI 생성 중 오류 발생 (Customer PO)")
-            return DocumentResult.file_error_result(
-                order_no=customer_po,
-                error_message=str(e),
-            )
-
-        return DocumentResult.success_result(
-            output_file=output_file,
-            order_no=customer_po,
-            customer_name=customer_name,
-            item_count=order_data.item_count,
-        )
+        return self._create_fi(customer_po, order_data, output_file, customer_name)
 
     def generate_pl(self, dn_id: str) -> DocumentResult:
         """Packing List 생성

@@ -150,7 +150,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | G4 | Invoice No | DN_ID | DN_해외.DN_ID |
 | G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
 | G16 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
-| I4 | Invoice date | 선적일 | DN_해외.dispatch_date |
+| I4 | Invoice date | **출고일** (없으면 오늘) — FI(선적일)와 다른 건 의도 (2026-11-06 사용자 결정) | DN_해외.출고일 (`dispatch_date`) |
 | I5 | Payment Terms | 결제 조건 | Customer_해외.Payment terms |
 | I12 | HS CODE | **비움** (라인별 D열로 이동) | — |
 | I16 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
@@ -220,7 +220,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | A11 | Bill to 3 | 청구처 주소 3행 | Customer_해외.Bill to 3 |
 | G4 | Invoice No | DN_ID | DN_해외.DN_ID |
 | G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
-| I4 | Invoice date | 선적일 | DN_해외.dispatch_date |
+| I4 | Invoice date | **출고일** (없으면 오늘) — FI(선적일)와 다른 건 의도 (2026-11-06 사용자 결정) | DN_해외.출고일 (`dispatch_date`) |
 | I12 | HS CODE | **비움** (라인별 D열로 이동) | — |
 | G16 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
 | I16 | PO Date (Customer) | 고객 PO 일자 | DN_해외.PO receipt date |
@@ -259,7 +259,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 
 ## Final Invoice (`templates/final_invoice.xlsx`)
 
-**생성기**: `fi_generator.py` (xlwings)
+**생성기**: `fi_generator.py` (xlwings) — 출력은 xlsx + PDF (COO와 같은 규약: PDF 변환 실패는 xlsx를 남기고 실패로 집계)
 **데이터 소스**: DN_해외 + SO_해외 + Customer_해외 (3-way JOIN)
 
 ### 고정 필드 (Header)
@@ -269,7 +269,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | C7 | Customer PO | 고객 PO 번호 (C7:E7 병합) | SO_해외.Customer PO |
 | H7 | Invoice No | 인보이스 번호 = DN_ID (H7:I7 병합) | DN_해외.DN_ID |
 | C8 | PO Date | 고객 PO 일자 (C8:E8 병합) | SO_해외.PO receipt date |
-| H8 | Invoice Date | 인보이스 발행일 = 선적일 (H8:I8 병합) | DN_해외.선적일 (dispatch_date) |
+| H8 | Invoice Date | 인보이스 발행일 = 선적일 (H8:I8 병합) | DN_해외.선적일 (`ship_date` — `resolve_invoice_date()`: 라인마다 다르면 가장 늦은 날, 공란이면 오늘 + 경고). **`dispatch_date`가 아니다** — 그 별칭은 `출고일`로 풀린다 |
 | H9 | Payment Terms | 결제 조건 (H9:I9 병합) | Customer_해외.Payment terms |
 | H10 | Delivery Terms | 인코텀즈 (H10:I10 병합) | SO_해외.Incoterms (DN merge 시 SO 우선) |
 | A12 | Customer Address 1 | 청구처 주소 1행 | Customer_해외.Bill to 1 |

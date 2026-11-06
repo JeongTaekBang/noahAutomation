@@ -1,3 +1,29 @@
+# Final Invoice — Invoice Date = 선적일, PDF도 생성 (2026-11-06) — 완료
+
+사용자 요청: "CLI 메뉴 5번 Final Invoice 생성할 때 Invoice 날짜를 선적일 컬럼으로 해주고, pdf까지 생성되게 해줘."
+(메뉴에서 FI는 [4], [5]는 OC — 'Final Invoice'라고 명시했으므로 FI로 진행)
+
+- [x] 원인: `dispatch_date` 별칭이 DN_해외에서 `출고일`로 풀린다 (선적일은 그 별칭의 마지막 후보)
+- [x] `ship_date` 별칭 + `fi_generator.resolve_invoice_date()` (순수 함수) — 서비스가 정하고 생성기는 쓰기만
+- [x] `DocumentService._create_fi()` — 두 경로 공통: 날짜 → xlsx → PDF(`export_pdf`, COO와 같은 규약)
+- [x] `create_fi.py` — `_report()`로 세 출력 경로를 하나로, PDF·경고 출력 + 요약 반복
+- [x] `tests/test_fi_invoice_date.py` 10건, `test_fi_filename.py` 대역 갱신 — 전체 1186 passed, 2 skipped
+- [x] 실데이터 + 실제 Excel (출력은 `%TEMP%i_shipdate_check`, 확인 후 삭제)
+- [x] CLAUDE.md / docs/TEMPLATE_MAPPINGS.md / docs/CHANGELOG.md
+
+## 리뷰
+
+**고른 것**: (1) 선적일이 라인마다 다르면 **가장 늦은 날** — 인보이스는 마지막 선적 뒤에 끊는다. 대표(첫) 라인 값을
+쓰면 Invoice No와는 맞지만 아직 안 실린 날짜가 찍힐 수 있다. (2) 공란이면 오늘 + 경고 — 출고일로 메우면 바로 이 버그를
+다시 만든다. (3) 날짜 판단을 서비스로 올렸다 — 생성기 안에 두면 경고를 결과에 실을 길이 없다.
+
+**결정**: CI·PL·COO는 출고일 유지 (사용자 결정 — FI와 날짜가 다른 것은 의도). TEMPLATE_MAPPINGS CI·PL 행의 "선적일" 오기도 고쳤다.
+
+**보류**: 긴 FI(27줄)는 은행 정보 블록만 3쪽에 홀로 넘어간다 — 템플릿 Total과 은행 정보
+사이 빈 15행 때문이고 이번 변경 전부터 같다.
+
+---
+
 # AX 오더북 — 차이 원인 '키 갈림' → '부서·CC 귀속 차이' (2026-11-04) — 완료
 
 사용자 요청: "키 갈림을 다른 표현으로 바꿔줘. 문서든 html든." — '갈림'만 봐서는 무엇이 갈렸는지 안 읽힌다. 이 원인은

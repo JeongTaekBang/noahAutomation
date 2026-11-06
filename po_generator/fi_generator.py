@@ -12,14 +12,14 @@ from __future__ import annotations
 
 import logging
 import shutil
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 import xlwings as xw
 
 from po_generator.config import FI_TEMPLATE_FILE
-from po_generator.utils import get_value, to_text
+from po_generator.utils import get_value, resolve_column, to_text
 from po_generator.excel_helpers import (
     XlConstants,
     xlwings_app_context,
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 CELL_PO_NO = 'C7'               # Customer PO (C7:E7 병합)
 CELL_INVOICE_NO = 'H7'          # Invoice No = DN_ID (H7:I7 병합)
 CELL_PO_DATE = 'C8'             # Customer PO Date (C8:E8 병합)
-CELL_INVOICE_DATE = 'H8'        # Invoice Date = 선적일 (H8:I8 병합)
+CELL_INVOICE_DATE = 'H8'        # Invoice Date = 선적일 (H8:I8 병합) — resolve_invoice_date()
 CELL_PAYMENT_TERMS = 'H9'       # Payment Terms (H9:I9 병합)
 CELL_DELIVERY_TERMS = 'H10'     # Delivery Terms = Incoterms (H10:I10 병합)
 # Customer Address (A12~14)
@@ -63,11 +63,52 @@ COL_CURRENCY = 'G'      # 통화 (신규)
 COL_AMOUNT = 'I'        # 금액 (I 유지, H:I는 헤더만 병합)
 
 
+def resolve_invoice_date(items: pd.DataFrame, today: date | None = None) -> tuple[str, list[str]]:
+    """Invoice Date = 인보이스에 실린 라인의 `DN_해외.선적일` — (YYYY-MM-DD, 경고)
+
+    `출고일`(공장 출고)이 아니다. 예전엔 `dispatch_date` 별칭이 `출고일`을 먼저 찾아
+    공장 출고일이 찍혔다 (실측 중앙값 16일 이르다).
+
+    - 선적일이 하나면 그 날짜
+    - 여럿이면 **가장 늦은 날** + 경고 — 인보이스는 마지막 선적 뒤에 끊는다.
+      발주번호(`--po`) 통합이 여러 DN에 걸칠 때, 한 DN을 두 번에 나눠 실을 때
+      (실측 `DNO-2026-0015`·`0090`)
+    - 일부 라인만 공란이면 경고 — 아직 안 실은 물건이 청구서에 들어 있다
+    - 전부 공란(아직 선적 전)이거나 컬럼이 없으면 **오늘** + 경고
+
+    Args:
+        items: 인보이스에 실리는 라인 전체 (`OrderData.all_items`)
+        today: 공란일 때 쓸 날짜 (기본: 오늘 — 테스트용 주입)
+    """
+    fallback = (today or date.today()).strftime("%Y-%m-%d")
+    col = resolve_column(items.columns, 'ship_date')
+    if col is None:
+        return fallback, [f"선적일 컬럼이 없어 Invoice Date를 오늘({fallback})로 넣었습니다"]
+
+    dates = pd.to_datetime(items[col], errors='coerce')
+    shipped = sorted({d.strftime("%Y-%m-%d") for d in dates.dropna()})
+    if not shipped:
+        return fallback, [f"선적일이 비어 있어 Invoice Date를 오늘({fallback})로 넣었습니다"]
+
+    warnings = []
+    if len(shipped) > 1:
+        warnings.append(
+            f"라인마다 선적일이 다릅니다({', '.join(shipped)}) — "
+            f"Invoice Date는 가장 늦은 {shipped[-1]}"
+        )
+    n_blank = int(dates.isna().sum())
+    if n_blank:
+        warnings.append(f"선적일이 빈 라인 {n_blank}건이 실려 있습니다 (아직 선적 전?)")
+    return shipped[-1], warnings
+
+
 def create_fi_xlwings(
     template_path: Path,
     output_path: Path,
     order_data: pd.Series,
     items_df: pd.DataFrame | None = None,
+    *,
+    invoice_date: str,
 ) -> None:
     """xlwings로 Final Invoice 생성
 
@@ -76,6 +117,8 @@ def create_fi_xlwings(
         output_path: 출력 파일 경로
         order_data: 주문 데이터 (첫 번째 아이템 또는 단일 아이템)
         items_df: 다중 아이템인 경우 전체 아이템 DataFrame
+        invoice_date: H8에 쓸 날짜 — 호출부가 `resolve_invoice_date()`로 정한다
+            (경고를 결과에 실으려면 판단이 호출부에 있어야 한다)
     """
     # 템플릿 준비 (임시 폴더로 복사)
     temp_template, temp_output = prepare_template(template_path, "fi")
@@ -88,7 +131,7 @@ def create_fi_xlwings(
             ws = wb.sheets[0]
 
             # 1. 헤더 정보 채우기
-            _fill_header(ws, order_data)
+            _fill_header(ws, order_data, invoice_date)
 
             # 2. 아이템 데이터 채우기
             inserted_rows = _fill_items(ws, order_data, items_df)
@@ -106,12 +149,13 @@ def create_fi_xlwings(
     logger.info(f"Final Invoice 저장 완료: {output_path}")
 
 
-def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
+def _fill_header(ws: xw.Sheet, order_data: pd.Series, invoice_date: str) -> None:
     """헤더 정보 채우기
 
     Args:
         ws: xlwings Sheet 객체
         order_data: 주문 데이터
+        invoice_date: Invoice Date (선적일 — `resolve_invoice_date()`)
     """
     # Customer PO → C7
     customer_po = get_value(order_data, 'customer_po', '')
@@ -130,14 +174,7 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series) -> None:
             ws.range(CELL_PO_DATE).value = str(po_date)
 
     # Invoice Date (선적일) → H8
-    dispatch_date = get_value(order_data, 'dispatch_date', '')
-    if dispatch_date and pd.notna(dispatch_date):
-        if isinstance(dispatch_date, datetime):
-            ws.range(CELL_INVOICE_DATE).value = dispatch_date.strftime("%Y-%m-%d")
-        else:
-            ws.range(CELL_INVOICE_DATE).value = str(dispatch_date)
-    else:
-        ws.range(CELL_INVOICE_DATE).value = datetime.now().strftime("%Y-%m-%d")
+    ws.range(CELL_INVOICE_DATE).value = invoice_date
 
     # Payment Terms → H9
     payment_terms = get_value(order_data, 'payment_terms', '')
