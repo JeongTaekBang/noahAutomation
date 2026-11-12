@@ -45,6 +45,12 @@ from po_generator.ts_generator import create_ts_xlwings
 from po_generator.pi_generator import create_pi_xlwings
 from po_generator.ci_generator import create_ci_xlwings
 from po_generator.fi_generator import create_fi_xlwings, resolve_invoice_date
+from po_generator.fi_invoice import (
+    build_fi_references,
+    check_invoice_lines,
+    invoice_numbers,
+    unique_texts,
+)
 from po_generator.pl_generator import create_pl_xlwings
 from po_generator.oc_generator import create_oc_xlwings
 from po_generator.coo_generator import create_coo_xlwings
@@ -660,8 +666,26 @@ class DocumentService:
             parts.append(str(customer_po))
         return '_'.join(parts)
 
+    @staticmethod
+    def _numbered_lines_error(order_no: str, items: pd.DataFrame) -> DocumentResult | None:
+        """INV 번호가 있는 라인은 DN 번호로 내지 않는다 — 있으면 거부 결과, 없으면 None
+
+        같은 라인이 DN 번호와 INV 번호 두 가지로 나가면 업체는 서로 다른 청구 두 건으로
+        본다. `create_fi.py`는 `invoices_of()`로 미리 갈라 `generate_fi_by_invoice()`를
+        부르므로, 이 가드는 다른 호출부가 그 갈래를 건너뛸 때만 걸린다.
+        """
+        numbers = sorted(set(invoice_numbers(items)) - {''})
+        if not numbers:
+            return None
+        return DocumentResult.validation_error_result(
+            order_no=order_no,
+            errors=[f"INV 번호가 있는 라인입니다 ({', '.join(numbers)}) — INV 번호로 생성하세요"],
+        )
+
     def generate_fi(self, dn_id: str, rck_po: str | None = None) -> DocumentResult:
-        """Final Invoice 생성 (대금 청구용)
+        """Final Invoice 생성 — INV 번호를 넣기 전 방식 (Invoice No = DN_ID)
+
+        INV 번호가 있는 DN은 `generate_fi_by_invoice()`로 만든다.
 
         Args:
             dn_id: DN_ID (예: DNO-2026-0001)
@@ -699,6 +723,10 @@ class DocumentService:
             else:
                 logger.warning("RCK PO 컬럼을 찾을 수 없음 — 전체 아이템으로 생성")
 
+        refused = self._numbered_lines_error(dn_id, order_data.all_items)
+        if refused:
+            return refused
+
         # 출력 디렉토리 생성
         FI_OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -722,19 +750,26 @@ class DocumentService:
         order_data: OrderData,
         output_file: Path,
         customer_name: str,
+        invoice_no: str | None = None,
     ) -> DocumentResult:
-        """FI xlsx + PDF — DN 기준·발주번호 기준 두 경로가 공유한다
+        """FI xlsx + PDF — INV 번호·DN·발주번호 세 경로가 공유한다
 
-        Invoice Date는 실린 라인의 선적일(`resolve_invoice_date`)이고, 그 판단의 경고
-        (선적일 공란·라인마다 다름)는 `warnings`로 돌려준다.
+        Invoice Date는 실린 라인의 선적일(`resolve_invoice_date`), 헤더 번호(Invoice No·
+        Customer PO·DN 번호)는 `build_fi_references`가 정하고, 두 판단의 경고(선적일
+        공란·라인마다 다름, 여러 DN·여러 PO)는 `warnings`로 돌려준다.
 
         PDF는 고객에게 보내는 본, xlsx는 손볼 원본이라 둘 다 남긴다(COO와 같은 규약).
         PDF 변환이 실패하면 xlsx는 그대로 두고 `errors`로 알린다 — CLI는 실패로 집계한다.
+
+        Args:
+            invoice_no: INV 번호. None이면 예전 방식(Invoice No = 첫 라인의 DN_ID)
 
         Returns:
             DocumentResult — `output_file`=xlsx, `extra_files`=[PDF]
         """
         invoice_date, warnings = resolve_invoice_date(order_data.all_items)
+        refs, ref_warnings = build_fi_references(order_data.all_items, invoice_no)
+        warnings = warnings + ref_warnings
 
         try:
             create_fi_xlwings(
@@ -743,6 +778,7 @@ class DocumentService:
                 order_data=order_data.first_item,
                 items_df=order_data.items_df,
                 invoice_date=invoice_date,
+                refs=refs,
             )
             logger.info(f"FI 생성 완료: {output_file}")
 
@@ -782,10 +818,60 @@ class DocumentService:
         result.errors = errors
         return result
 
+    def generate_fi_by_invoice(self, invoice_no: str) -> DocumentResult:
+        """INV 번호 기준 Final Invoice 생성 — 그 번호가 적힌 `DN_해외` 행 전부가 한 장
+
+        DN·발주번호를 가리지 않는다: 번호를 어떻게 묶어 넣었는지가 곧 인보이스 단위다
+        (`fi_invoice`). 거래처나 통화가 섞였으면 만들지 않는다.
+
+        Args:
+            invoice_no: INV 번호 (예: INV-2026-0001)
+
+        Returns:
+            DocumentResult
+        """
+        logger.info(f"FI 생성 시작 (INV): {invoice_no}")
+
+        if not FI_TEMPLATE_FILE.exists():
+            return DocumentResult.file_error_result(
+                order_no=invoice_no,
+                error_message=f"템플릿 파일 없음: {FI_TEMPLATE_FILE}",
+            )
+
+        order_data = self._finder.find_dn_export_by_invoice(invoice_no)
+        if order_data is None:
+            return DocumentResult.not_found_result(invoice_no)
+
+        items = order_data.all_items
+        errors = check_invoice_lines(items)
+        if errors:
+            return DocumentResult.validation_error_result(order_no=invoice_no, errors=errors)
+
+        # 입력 표기(소문자·공백)가 아니라 시트에 적힌 번호를 찍는다
+        number = invoice_numbers(items).iloc[0]
+
+        FI_OUTPUT_DIR.mkdir(exist_ok=True)
+
+        # 파일명: FI_{INV}_{NO-XXXX}[_{Customer PO}]_… — Customer PO는 하나일 때만
+        customer_name = order_data.get_value('customer_name', 'Unknown')
+        customer_pos = unique_texts(items, 'customer_po')
+        order_label = self._fi_order_label(
+            number, items, customer_pos[0] if len(customer_pos) == 1 else '')
+        output_file = generate_output_filename("FI", order_label, customer_name, FI_OUTPUT_DIR)
+
+        if not validate_output_path(output_file, FI_OUTPUT_DIR):
+            return DocumentResult.file_error_result(
+                order_no=number,
+                error_message="출력 경로 검증 실패",
+            )
+
+        return self._create_fi(number, order_data, output_file, customer_name, invoice_no=number)
+
     def generate_fi_by_customer_po(self, customer_po: str) -> DocumentResult:
-        """Customer PO(발주번호) 기준 Final Invoice 생성
+        """Customer PO(발주번호) 기준 Final Invoice 생성 — INV 번호를 넣기 전 방식
 
         복수 DN에 걸친 동일 Customer PO 아이템을 통합하여 FI를 생성합니다.
+        INV 번호가 있는 라인은 `generate_fi_by_invoice()`로 만든다.
 
         Args:
             customer_po: 고객 발주번호 (예: 26KPO00144)
@@ -806,6 +892,10 @@ class DocumentService:
         order_data = self._finder.find_dn_export_by_customer_po(customer_po)
         if order_data is None:
             return DocumentResult.not_found_result(customer_po)
+
+        refused = self._numbered_lines_error(customer_po, order_data.all_items)
+        if refused:
+            return refused
 
         # 복수 DN 통합 시 Invoice No는 대표(첫) DN만 표기됨(헤더가 first_item 기준).
         # 청구 라인이 여러 DN에 걸치면 송장번호와 실제 청구물품이 불일치할 수 있어 경고.

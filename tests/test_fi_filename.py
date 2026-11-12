@@ -46,7 +46,7 @@ def make_service(tmp_path, monkeypatch):
     monkeypatch.setattr(document_service, 'FI_OUTPUT_DIR', tmp_path / 'generated_fi')
     monkeypatch.setattr(
         document_service, 'create_fi_xlwings',
-        lambda template_path, output_path, order_data, items_df, invoice_date:
+        lambda template_path, output_path, order_data, items_df, invoice_date, refs:
             output_path.write_bytes(b'dummy'),
     )
     monkeypatch.setattr(document_service, 'export_pdf',

@@ -27,9 +27,11 @@ python create_ts.py --date 2026-08-06 --customer 씨앤케이  # 그날 그 거�
 python create_ts.py --date 2026-08-06                     # 그날 전체 → 거래처별 1통씩
 python create_ts.py DND-2026-0742 DND-2026-0743 --one-mail # 명시 ID를 묶어 1통
 python create_pi.py NO-0001              # Proforma invoice
-python create_fi.py DNO-2026-0001        # Final invoice — xlsx + PDF, Invoice Date = DN_해외 선적일 (복수 RCK PO 시 발주번호별 자동 분리)
-python create_fi.py --po 26KPO00144     # 발주번호 기준 FI 생성 (복수 DN 통합)
+python create_fi.py INV-2026-0001        # Final invoice — xlsx + PDF. INV 번호 한 건 = 인보이스 한 장 (DN_해외에서 그 번호를 넣은 행 전부)
+python create_fi.py DNO-2026-0001        # 그 DN의 인보이스 전부 (INV 번호별). INV 번호가 없으면 Invoice No = DN_ID, 복수 RCK PO는 발주번호별 분리
+python create_fi.py --po 26KPO00144     # 발주번호 기준 — 그 발주가 실린 인보이스 (INV 번호가 없으면 복수 DN 통합 1장)
 python create_fi.py --po                # 사용 가능한 발주번호 목록 표시
+python create_fi.py                     # DN_ID 목록 + INV 번호 현황
 python create_oc.py SOO-2026-0001        # Order confirmation (생성 후 "이메일 발송?" y/N → 영문 메일)
 python create_oc.py SOO-2026-0001 --mail    # 확인 없이 메일 초안
 python create_oc.py SOO-2026-0001 --no-mail # 묻지 않고 문서만 (배치용)
@@ -176,6 +178,7 @@ AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — AX Sales Order
 | `dashboard_dist/build_portable_dashboard.py` | 대시보드 배포판 — `dashboard.py`를 **무수정으로** 담고 `po_generator/`·`sql/`을 동봉한다. 예전 `build_dist.py`는 import를 문자열 치환해 standalone 파일을 만들었는데, import 한 줄이 바뀌자 패턴이 안 맞아 빌드가 죽었고 배포본이 4개월 낡았다 — 그래서 재작성을 아예 없앴다. `verify()`가 streamlit을 **실제로 띄워** 실제 DB 사본으로 페이지를 받아 본다(import만으로는 트리밍 사고를 못 잡는다). pyarrow는 flight/parquet/dataset/substrait를 잘라내되 `arrow_compute`는 남긴다 (streamlit이 로드한다 — 실측) |
 | `noah_config.ini` | 배포판 경로 설정 (git-ignored). GUI 마법사가 생성. `user_settings.py`가 있으면 그쪽이 우선 |
 | `po_generator/hs_code.py` | SECTORIEL 라인별 HS CODE 판정 — 규칙 사다리(운임 → 모델번호 → 품목텍스트 → OS 제품군 → 미매칭)와 고객 제공 코드표. **COM 없는 순수 판정**이라 실데이터 전수로 테스트한다(`dn_recorder`/`dn_writer`를 가른 것과 같은 이유). 결과는 `_hs_code` **열**로 items_df에 붙는다 — 생성기가 Model number로 재정렬하므로 리스트로 넘기면 코드가 남의 품목에 붙는다(8자리 숫자라 눈으로 안 보인다). 새 스페어 코드는 `SPARE_HS_BY_MODEL`에 한 줄 |
+| `po_generator/fi_invoice.py` | FI의 인보이스 단위(INV 번호) 판정 — 라인별 번호, 고른 라인(DN·발주)이 실린 인보이스 목록, 한 인보이스 검증(거래처·통화 하나), 헤더 번호(`FiReferences`: Invoice No·Customer PO·DN 번호), 넣을 번호 권하기(DN 번호를 따른다). **COM 없는 순수 판정**(`hs_code`와 같은 이유)이고 조회 서비스가 이것을 임포트하므로 xlwings를 끌어오면 안 된다. Excel 쪽은 `fi_generator`, 규칙은 아래 Business Rules |
 | `po_generator/coo_generator.py` | 원산지증명서(COO) — **수출자(RCK) 원산지 선언서**(제조사 NOAH 명시)를 DN_해외 한 건에서 xlsx + PDF로. 값 정하기(`build_coo_lines`/`build_coo_header`)는 COM 없는 순수 함수, Excel 쪽은 값 쓰기·행 높이·**맺음 블록 한 장 유지**(`_keep_closing_block`). 셀 매핑은 `docs/TEMPLATE_MAPPINGS.md` COO 절, 규칙은 아래 Business Rules |
 | `po_generator/mailer.py` | 고객 메일 발송 — 고객 마스터에서 수신자 조회, xlsx→PDF 변환, 2가지 백엔드(Outlook COM / `.eml` 초안). **첨부는 여러 장일 수 있다** — `as_paths()`가 단건/복수를 흡수하고 `export_pdfs()`가 Excel **1회 기동**으로 N장을 변환한다(8장 실측 24초; 장마다 띄우면 그 두 배). **조인키가 국내/해외로 갈린다**: `find_recipient()`는 사업자번호로 `Customer_국내`, `find_recipient_overseas()`는 고객코드로 `Customer_해외` — 둘 다 `_build_recipient()` 하나를 공유한다. **`auto` = 초안은 `.eml`(사용자 기본 메일 앱 — 새 Outlook 포함), 즉시 발송(--send)만 COM** — COM 초안은 항상 클래식 Outlook 창을 띄우므로 초안에 쓰지 않는다. `create_document_mail()`이 일반형이고 `create_ts_mail()`은 TS 상수를 넘기는 래퍼 — 제목/본문 템플릿·첨부형식·고정 CC·HTML 본문이 전부 인자 |
 | `po_generator/mail_cli.py` | 메일 CLI 공통 배선 — `MailMode`/`MailOptions`/`resolve_mail_mode`/`add_mail_arguments`/`prepare_mail_options`/`confirm_recipient`(수신자 조회→표시→y/N 관문)/`collect_customer_po`/`format_mail_date`. `create_ts.py`·`delivery_status.py`·`create_oc.py`가 공유(복사하면 갈라지고, 그 갈라짐이 고객 발송 경로에서 터진다). 어느 마스터를 읽을지는 `MailOptions.loader`/`sheet_label` **짝**으로 주입 — 기본은 국내, OC만 해외. **`loader` 기본값에 함수를 박지 말 것**: 클래스 정의 시점에 굳어 모듈 속성 교체(테스트 monkeypatch)가 무시된다 |
@@ -323,6 +326,42 @@ AX orderbook (RCK AX 오더북을 IR + Item transaction으로 — AX Sales Order
     나눴다. 또 `HPageBreaks`의 **첫 열거는 부분 결과**라([] → [47]) 두 번 같을 때까지 읽는다 (`read_page_breaks`)
   - 템플릿 기본(Normal) 글꼴은 Arial 10 — 빈 칸 글꼴이 행 높이 하한이라, 테마 글꼴(한글 Excel에서 맑은 고딕 11)이면
     헤더 행이 전부 18.5pt로 부푼다
+- **FI의 Invoice No는 DN 번호가 아니라 INV 번호다 — `DN_해외`에서 같은 번호를 넣은 행 전부가 인보이스 한 장**
+  (2026-11-11 사용자 요청, `fi_invoice.py`). DN 하나에 PO가 여럿이면 FI를 발주번호별로 나눠 내는데 그 전부에 같은
+  DN 번호가 찍혀, 업체 AP가 서로 다른 청구를 같은 번호로 받았다 (실측 DN 215건 중 39건, `DNO-2026-0020`은 9장).
+  - **INV 번호가 단위이고 DN·발주번호는 입구다** — `create_fi.py`에 INV·DN_ID·`--po` 어느 것을 넣어도 같은 번호는
+    같은 문서가 나온다(다른 DN에 있는 행까지 실린다). 그래서 묶는 방법은 코드가 아니라 **번호를 어떻게 넣느냐**다:
+    한 Customer PO를 SO 여러 개로 받은 건(`DNO-2026-0020`의 `WGDBS2601233` = SO 5개)에 같은 번호를 넣으면 한 장
+  - **번호는 사람이 시트에 값으로 넣는다** (`INV-2026-0001` 형식, 컬럼은 `DN_해외.INV_ID` —
+    `COLUMN_ALIASES['invoice_no']`).
+    수식으로 매기면 행 추가·정렬 때 이미 발행한 번호가 바뀌고, 코드가 매기려면 마스터에 써야 한다(그 경로는
+    `create_dn.py` 하나뿐). 코드는 읽고 검증하고 **넣을 번호를 권하기만** 한다
+  - **INV 번호는 DN 번호를 따른다** (2026-11-11 사용자 결정): `DNO-2026-0215` → `INV-2026-0215`, Customer PO가
+    여럿인 선적은 시트에 나온 순서대로 `-1`, `-2`… (`DNO-2026-0191` → `INV-2026-0191-1` = 8124708,
+    `-2` = 8125704). 권장 번호도 이 규칙으로 낸다(`suggest_invoice_numbers`) — '가장 큰 번호 + 1'로 권하면
+    어긋난다(0191만 번호가 있을 때 `DNO-2026-0215`에 0192를 권했다)
+  - **INV가 빈 DN은 예전 그대로** (Invoice No = DN_ID, 복수 RCK PO는 발주번호별 분리) — 이미 DN 번호로 나간 지난
+    건을 다시 뽑아도 번호가 바뀌지 않는다. 이 경로로 나갈 때는 **늘 알린다**(단일 PO 포함, 복수 PO면 '같은
+    번호로 N장') — 알림에 **읽은 파일의 저장 시각**과 권장 번호를 싣는다. 도구는 저장된 파일을 읽으므로 Excel에
+    번호를 넣고 저장하기 전에 돌리면 번호가 없는 것으로 읽힌다 (2026-11-11 실사용: 14:18 생성·14:21 저장 →
+    "DNO로 나오네". 코드 문제가 아니라 순서 문제인데, 알림이 없으면 구분이 안 된다)
+  - **만들지 않는 경우**: 한 DN(또는 발주)에 INV가 일부 라인에만 있을 때(빈 라인이 청구에서 빠진다), 한 INV에
+    거래처나 통화가 둘일 때(손으로 넣다 보니 같은 번호가 남의 행에 들어간다 — 거래명세표의 '한 DN에 두 거래처'와
+    같은 사고), INV가 있는 라인을 DN 번호로 내려 할 때(같은 청구가 번호 둘로 — 서비스가 막는다)
+  - **별칭에 `RCK Inv no.`·`NOAH Inv no.`를 넣지 말 것** — 같은 시트의 다른 컬럼이다. 앞쪽은 1~3월에만 쓰인 다른
+    체계의 값(`KR26-AD04` …)이고 뒤쪽은 공장 → RCK 인보이스 번호라, 별칭으로 풀리면 지난 건을 다시 뽑을 때 그 값이
+    Invoice No로 찍힌다 (`tests/test_fi_invoice_no.py`가 감시)
+  - **FI에는 DN 번호를 `Delivery Note No.`로 따로 싣는다** (템플릿 A9/C9). CI·PL·COO는 선적 단위 서류라 계속
+    DN 번호로 나가므로, 업체가 청구서와 선적서류를 이을 단서가 이 칸뿐이다. 양식은 템플릿이 소유하고 생성기는
+    값 쓰기 전에 라벨을 확인한다(구 양식 혼입 차단)
+  - **한 INV에 Customer PO가 여럿이면 한 장에 다 실리고 경고한다** — 헤더에 PO 전부와 PO 일자를 같은 순서로
+    싣는다(C7·C8, `layout_merged_lines`가 줄바꿈 + 행 높이. '셀에 맞춤'으로 줄이면 PO 5개가 4pt 남짓으로 찍힌다 —
+    `DNO-2026-0020` 실측). 다만 **품목 표에는 PO 열이 없어 어느 줄이 어느 PO인지 문서만으로는 알 수 없다**
+  - **복수 PO 선적은 Customer PO별로 번호를 나눠 넣는다** (2026-11-11 사용자 결정 — 한 장에 묶지 않는다).
+    그래서 위 경고는 '나누는 것을 잊었다'는 신호다. 단위는 RCK PO가 아니라 **Customer PO** — 업체 AP가 아는
+    번호이고, 한 발주를 SO 여러 개로 받은 건(`WGDBS2601233`)이 한 장이 된다. 번호는 접미사(`-1`, `-2`)로 나눈다.
+    **지난 선적은 `INV_ID`를 비워 두고 새 건부터 넣는다** (사용자가 처음엔 전 행을 DN당 하나로 채웠다가 비우고
+    `DNO-2026-0191`부터 시작했다) — 비어 있는 지난 건은 예전처럼 DN 번호로 나온다
 - **거래명세표에 `SO_국내.Remarks`(호선명·현장명)를 모든 거래처에 표기한다 — 내부 메모는 `SO_국내.Comment`**
   (2026-11-03 사용자 결정). 원래는 Remarks에 내부 메모가 섞여 있어 조선 기자재 거래처 등 지정 6곳만
   표기했는데(`TS_PO_REMARK_CUSTOMERS`, 2026-08-25~11-03), 사용자가 내부용 `Comment` 컬럼을 따로 만들어

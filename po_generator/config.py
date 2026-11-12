@@ -412,6 +412,12 @@ COLUMN_ALIASES: Final[dict[str, tuple[str, ...]]] = {
     'bill_to_3': ('Bill to 3', 'bill to 3'),
     'payment_terms': ('Payment terms', 'Payment Terms', 'payment terms', '결제조건'),
     'rck_po': ('RCK PO', 'RCK PO No', 'rck_po'),
+    # FI의 Invoice No — `DN_해외`에서 같은 번호를 넣은 행 전부가 인보이스 한 장이다
+    # (2026-11-11: DN 번호를 그대로 쓰면 복수 PO DN에서 같은 번호로 여러 장이 나간다).
+    # 주의: 같은 시트의 'RCK Inv no.'·'NOAH Inv no.'는 넣지 않는다 — 앞쪽은 1~3월에만 쓰인
+    # 다른 체계의 값(KR26-AD04 …)이고 뒤쪽은 공장 → RCK 인보이스 번호다. 별칭으로 풀리면
+    # 지난 건을 다시 뽑을 때 그 값이 Invoice No로 찍힌다.
+    'invoice_no': ('INV_ID', 'INV no.', 'INV No.', 'INV No', 'INV'),
     # Order Confirmation 필드
     'exw_noah': ('EXW NOAH', 'EXW Noah', 'exw_noah', 'EXW date'),
     'shipping_method': ('Shipping method', 'Shipping Method', 'shipping_method', '배송방법'),

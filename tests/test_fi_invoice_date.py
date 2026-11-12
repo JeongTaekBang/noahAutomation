@@ -91,7 +91,7 @@ def make_service(tmp_path, monkeypatch):
 
     captured: dict = {}
 
-    def fake_create(template_path, output_path, order_data, items_df, invoice_date):
+    def fake_create(template_path, output_path, order_data, items_df, invoice_date, refs):
         captured['invoice_date'] = invoice_date
         output_path.write_bytes(b'dummy')
 

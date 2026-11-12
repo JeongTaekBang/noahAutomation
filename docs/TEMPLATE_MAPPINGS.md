@@ -266,9 +266,14 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 
 | 셀 | 필드명 | 설명 | 데이터 소스 |
 |----|--------|------|-------------|
-| C7 | Customer PO | 고객 PO 번호 (C7:E7 병합) | SO_해외.Customer PO |
-| H7 | Invoice No | 인보이스 번호 = DN_ID (H7:I7 병합) | DN_해외.DN_ID |
-| C8 | PO Date | 고객 PO 일자 (C8:E8 병합) | SO_해외.PO receipt date |
+| C7 | Customer PO | 고객 PO 번호 (C7:E7 병합) — 실린 라인의 것 전부, 여럿이면 `, `로 잇고 경고 | SO_해외.Customer PO |
+| H7 | Invoice No | 인보이스 번호 = **INV 번호** (H7:I7 병합). INV가 빈 라인은 예전처럼 DN_ID | DN_해외.INV_ID (`COLUMN_ALIASES['invoice_no']`) — `fi_invoice.build_fi_references()` |
+| C8 | PO Date | 고객 PO 일자 (C8:E8 병합) — Customer PO와 같은 순서로 하나씩 (빈 것은 `-`) | SO_해외.PO receipt date |
+| A9 | (라벨) | `Delivery Note No.:` (A9:B9 병합) — **템플릿 고정 텍스트**. 생성기가 값 쓰기 전에 확인한다 | - |
+| C9 | Delivery Note No. | 실린 라인의 DN 번호 전부 (C9:E9 병합) — CI·PL·COO는 이 번호로 나간다 | DN_해외.DN_ID |
+
+C7~C9는 값이 길면(한 인보이스에 PO·DN 여럿) `layout_merged_lines()`가 줄을 바꾸고 행을 키운다 — 병합 칸은 넘친
+글자를 잘라낸다. 한 줄에 들어가면 행 높이는 그대로다.
 | H8 | Invoice Date | 인보이스 발행일 = 선적일 (H8:I8 병합) | DN_해외.선적일 (`ship_date` — `resolve_invoice_date()`: 라인마다 다르면 가장 늦은 날, 공란이면 오늘 + 경고). **`dispatch_date`가 아니다** — 그 별칭은 `출고일`로 풀린다 |
 | H9 | Payment Terms | 결제 조건 (H9:I9 병합) | Customer_해외.Payment terms |
 | H10 | Delivery Terms | 인코텀즈 (H10:I10 병합) | SO_해외.Incoterms (DN merge 시 SO 우선) |
@@ -277,9 +282,18 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | A14 | Customer Address 3 | 청구처 주소 3행 | Customer_해외.Bill to 3 |
 | G12 | Delivery Address | 배송 주소 | DN_해외.Delivery Address |
 
-### 발주번호(RCK PO) 자동 분리
+### 인보이스 단위 = INV 번호
 
-DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지하여 발주번호별로 별도 FI를 생성합니다.
+`DN_해외`의 INV 컬럼에 같은 번호를 넣은 행 전부가 인보이스 한 장입니다 (`fi_invoice.py`). `create_fi.py`에
+INV 번호·DN_ID·발주번호(`--po`) 어느 것을 넣어도 같은 번호는 같은 문서가 나옵니다.
+- 파일명: `FI_{INV 번호}_{RCK_PO}[_{Customer_PO}]_{고객명}_{날짜}.xlsx` (RCK PO가 여럿이면 `+`, Customer PO는 하나일 때만)
+- 한 DN에 INV가 일부 라인에만 있거나, 한 INV에 거래처·통화가 둘이면 만들지 않습니다
+- INV가 빈 DN은 아래 예전 방식 그대로입니다 (Invoice No = DN_ID)
+
+### 발주번호(RCK PO) 자동 분리 — INV 번호가 없는 DN
+
+DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지하여 발주번호별로 별도 FI를 생성합니다
+(전부 같은 Invoice No로 나가므로 경고를 띄웁니다).
 - 단일 RCK PO → 1개 FI (`FI_{DN_ID}_{RCK_PO}_{고객명}_{날짜}.xlsx`)
 - 복수 RCK PO → PO별 FI 생성 (`FI_{DN_ID}_{RCK_PO}_{Customer_PO}_{고객명}_{날짜}.xlsx`)
 - 발주번호 기준(`--po`) → 복수 DN 통합 1개 FI (`FI_{Customer_PO}_{RCK_PO}_{고객명}_{날짜}.xlsx` — RCK PO가 여럿이면 `+`로 연결)

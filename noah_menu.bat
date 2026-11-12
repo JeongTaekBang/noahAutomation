@@ -314,8 +314,8 @@ echo ----------------------------------------
 echo   Final Invoice 생성 (대금 청구)
 echo ----------------------------------------
 echo.
-echo   [1] DN_ID 기준 생성
-echo   [2] 발주번호 기준 생성 (복수 DN 통합)
+echo   [1] INV 번호 / DN_ID 기준 생성
+echo   [2] 발주번호 기준 생성
 echo   [0] 메뉴로 돌아가기
 echo.
 
@@ -330,14 +330,19 @@ goto create_fi
 
 :fi_by_dn
 echo.
-echo   DN_ID 입력 (예: DNO-2026-0001)
+echo   INV 번호 또는 DN_ID 입력 (예: INV-2026-0001, DNO-2026-0001)
+echo   - INV 번호: 그 인보이스 한 장 (DN_해외에서 같은 INV 번호를 넣은 행 전부)
+echo   - DN_ID   : 그 DN의 인보이스 전부 (INV 번호가 없으면 DN_ID가 Invoice No)
+echo   - INV 번호는 DN 번호를 따릅니다: DNO-2026-0215 = INV-2026-0215, PO가 여럿이면 -1, -2
+echo   (빈 입력 시 DN_ID 목록 표시)
 echo.
 
 :fi_dn_input
-set /p FI_DN_ID="DN_ID 입력: "
+set /p FI_DN_ID="INV 번호 / DN_ID 입력: "
 
 if "%FI_DN_ID%"=="" (
-    echo [오류] DN_ID를 입력하세요.
+    "%PYTHON_PATH%" "%~dp0create_fi.py"
+    echo.
     goto fi_dn_input
 )
 
@@ -356,6 +361,7 @@ goto back
 :fi_by_po
 echo.
 echo   발주번호 입력 (예: 26KPO00144)
+echo   - INV 번호가 있으면 그 발주가 실린 인보이스, 없으면 복수 DN 통합 1장
 echo   (빈 입력 시 사용 가능한 PO 목록 표시)
 echo.
 

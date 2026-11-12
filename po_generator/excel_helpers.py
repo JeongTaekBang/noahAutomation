@@ -806,6 +806,42 @@ def layout_address_rows(
     )
 
 
+def layout_merged_lines(ws: xw.Sheet, start_row: int, texts: list[str], cols: str) -> None:
+    """행마다 하나씩 있는 한 줄 병합 칸: 줄바꿈 켜기 + 행 높이 확보
+
+    주소 블록(`layout_address_rows`)의 왼쪽 절반과 같은 일을, 오른쪽 블록 없이 한다.
+    FI 헤더의 Customer PO·DN 번호 칸(C:E 병합)이 이 경우다 — 한 인보이스에 PO나 DN이
+    여럿 실리면 값이 길어지는데, 병합 칸은 넘친 글자를 옆으로 흘리지 않고 잘라낸다.
+    '셀에 맞춤'으로 줄이면 PO 5개가 4pt 남짓으로 찍힌다 (2026-11-11 실측
+    `DNO-2026-0020`) — 그래서 줄을 바꾸고 행을 키운다.
+
+    값은 여기서 쓰지 않는다. 전부 한 줄에 들어가면 행 높이가 그대로라 모양이 안 변한다.
+
+    Args:
+        ws: xlwings Sheet
+        start_row: 첫 행
+        texts: 각 행에 쓴 텍스트 (빈 문자열 허용) — 행 수를 정한다
+        cols: 병합이 걸친 열들 (예: 'CDE')
+    """
+    if not texts:
+        return
+    end_row = start_row + len(texts) - 1
+    rows = range(start_row, end_row + 1)
+
+    # 현재 높이는 측정 전에 읽는다 — 측정이 autofit으로 행 높이를 흐트러뜨린다
+    current = [float(ws.range(f'{r}:{r}').api.RowHeight) for r in rows]
+    ws.range(f'{cols[0]}{start_row}:{cols[-1]}{end_row}').api.WrapText = True
+
+    needs = _measure_wrapped_heights(ws, start_row, end_row, texts, cols)
+    heights = address_row_heights(current, needs, 0.0)
+    for row, height in zip(rows, heights):
+        ws.range(f'{row}:{row}').api.RowHeight = height
+    logger.debug(
+        f"병합 줄 높이: Row {start_row}-{end_row} "
+        f"{[round(c, 1) for c in current]} -> {[round(h, 1) for h in heights]}"
+    )
+
+
 def layout_item_rows(
     ws: xw.Sheet,
     start_row: int,

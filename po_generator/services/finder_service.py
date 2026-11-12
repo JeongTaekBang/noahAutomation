@@ -15,6 +15,7 @@ from typing import Any
 import pandas as pd
 
 from po_generator.config import NOAH_SO_PO_DN_FILE, SO_DOMESTIC_SHEET
+from po_generator.fi_invoice import invoice_numbers
 from po_generator.utils import (
     load_noah_po_lists,
     load_dn_data,
@@ -266,6 +267,28 @@ class FinderService:
 
         # 마스터 셀의 앞뒤 공백으로 인한 무매칭 방지 위해 양쪽 trim
         matched = df[df[cpo_col].astype(str).str.strip() == str(customer_po).strip()]
+        if matched.empty:
+            return None
+
+        return OrderData.from_result(matched)
+
+    def find_dn_export_by_invoice(self, invoice_no: str) -> OrderData | None:
+        """INV 번호로 DN 해외 데이터 검색 — 그 번호가 적힌 행 전부 (DN을 가리지 않는다)
+
+        INV 번호가 인보이스 단위다 (`fi_invoice`). 대소문자·앞뒤 공백은 가리지 않는다.
+
+        Args:
+            invoice_no: INV 번호 (예: INV-2026-0001)
+
+        Returns:
+            OrderData 또는 None (INV 컬럼이 없거나 그 번호가 없을 때)
+        """
+        key = str(invoice_no).strip().upper()
+        if not key:
+            return None  # 빈 키는 INV가 빈 행 전부와 맞는다
+
+        df = self.load_dn_export_data()
+        matched = df[invoice_numbers(df).str.upper() == key]
         if matched.empty:
             return None
 

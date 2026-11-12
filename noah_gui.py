@@ -81,7 +81,7 @@ DOC_TYPES: tuple[dict[str, object], ...] = (
     },
     {
         'key': 'fi', 'label': 'Final Invoice (FI)', 'script': 'create_fi.py',
-        'id_label': 'DN_ID', 'hint': '예: DNO-2026-0001',
+        'id_label': 'INV 번호 / DN_ID', 'hint': '예: INV-2026-0001, DNO-2026-0001',
         'out_attr': 'FI_OUTPUT_DIR', 'options': ('fi_mode',), 'multi': True,
     },
     {
@@ -665,10 +665,11 @@ class MainWindow(ttk.Frame):
             elif opt == 'fi_mode':
                 var = tk.StringVar(value='dn')
                 ttk.Radiobutton(self.options_frame, variable=var, value='dn',
-                                text="DN_ID 기준", command=self._on_fi_mode).pack(anchor='w')
+                                text="INV 번호 / DN_ID 기준 — INV 번호는 그 한 장, DN_ID는 그 DN의 인보이스 전부",
+                                command=self._on_fi_mode).pack(anchor='w')
                 ttk.Radiobutton(
                     self.options_frame, variable=var, value='po',
-                    text="발주번호 기준 (복수 DN 통합) — 비워두면 발주번호 목록 표시",
+                    text="발주번호 기준 — 비워두면 발주번호 목록 표시",
                     command=self._on_fi_mode).pack(anchor='w')
                 self.option_vars['fi_mode'] = var
             elif opt == 'ds_mode':

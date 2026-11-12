@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 import shutil
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 import xlwings as xw
 
 from po_generator.config import FI_TEMPLATE_FILE
+from po_generator.fi_invoice import FiReferences
 from po_generator.utils import get_value, resolve_column, to_text
 from po_generator.excel_helpers import (
     XlConstants,
@@ -30,6 +31,7 @@ from po_generator.excel_helpers import (
     insert_copied_rows,
     layout_address_rows,
     layout_item_rows,
+    layout_merged_lines,
 )
 
 logger = logging.getLogger(__name__)
@@ -38,8 +40,13 @@ logger = logging.getLogger(__name__)
 # === 셀 매핑 (Final Invoice - 새 템플릿) ===
 # Header
 CELL_PO_NO = 'C7'               # Customer PO (C7:E7 병합)
-CELL_INVOICE_NO = 'H7'          # Invoice No = DN_ID (H7:I7 병합)
+CELL_INVOICE_NO = 'H7'          # Invoice No = INV 번호, 없으면 DN_ID (H7:I7 병합) — FiReferences
 CELL_PO_DATE = 'C8'             # Customer PO Date (C8:E8 병합)
+CELL_DN_REF_LABEL = 'A9'        # 'Delivery Note No.:' (A9:B9 병합) — 템플릿 고정 텍스트
+CELL_DN_REF = 'C9'              # 실린 라인의 DN 번호 (C9:E9 병합) — CI·PL과 잇는 단서
+DN_REF_LABEL = 'Delivery Note No.'
+REF_START_ROW = 7               # 왼쪽 번호 세 줄(Customer PO / PO Date / DN 번호)의 첫 행
+REF_MERGED_COLS = 'CDE'         # 그 값 칸의 병합 (행마다 C:E)
 CELL_INVOICE_DATE = 'H8'        # Invoice Date = 선적일 (H8:I8 병합) — resolve_invoice_date()
 CELL_PAYMENT_TERMS = 'H9'       # Payment Terms (H9:I9 병합)
 CELL_DELIVERY_TERMS = 'H10'     # Delivery Terms = Incoterms (H10:I10 병합)
@@ -109,6 +116,7 @@ def create_fi_xlwings(
     items_df: pd.DataFrame | None = None,
     *,
     invoice_date: str,
+    refs: FiReferences,
 ) -> None:
     """xlwings로 Final Invoice 생성
 
@@ -119,6 +127,7 @@ def create_fi_xlwings(
         items_df: 다중 아이템인 경우 전체 아이템 DataFrame
         invoice_date: H8에 쓸 날짜 — 호출부가 `resolve_invoice_date()`로 정한다
             (경고를 결과에 실으려면 판단이 호출부에 있어야 한다)
+        refs: Invoice No·Customer PO·DN 번호 — 호출부가 `build_fi_references()`로 정한다
     """
     # 템플릿 준비 (임시 폴더로 복사)
     temp_template, temp_output = prepare_template(template_path, "fi")
@@ -131,7 +140,7 @@ def create_fi_xlwings(
             ws = wb.sheets[0]
 
             # 1. 헤더 정보 채우기
-            _fill_header(ws, order_data, invoice_date)
+            _fill_header(ws, order_data, invoice_date, refs)
 
             # 2. 아이템 데이터 채우기
             inserted_rows = _fill_items(ws, order_data, items_df)
@@ -149,29 +158,52 @@ def create_fi_xlwings(
     logger.info(f"Final Invoice 저장 완료: {output_path}")
 
 
-def _fill_header(ws: xw.Sheet, order_data: pd.Series, invoice_date: str) -> None:
+def _assert_dn_ref_template(ws: xw.Sheet) -> None:
+    """템플릿에 DN 번호 칸이 있는지 확인 (값 쓰기 전)
+
+    양식은 템플릿 파일이 소유한다. 그 칸이 없는 구 양식이 섞여 들어오면 DN 번호가
+    라벨 없이 C9에 찍힌다 — COM 읽기 한 번으로 막는다 (`assert_hs_template`과 같은 취지).
+
+    Raises:
+        ValueError: A9에 'Delivery Note No.' 라벨이 없을 때
+    """
+    actual = ws.range(CELL_DN_REF_LABEL).value
+    if DN_REF_LABEL.lower() not in str(actual or '').lower():
+        raise ValueError(
+            f"템플릿에 '{DN_REF_LABEL}' 칸이 없습니다 ({CELL_DN_REF_LABEL} = {actual!r}) — "
+            f"구 양식으로 되돌아간 것이 아닌지 확인하세요"
+        )
+
+
+def _fill_header(
+    ws: xw.Sheet,
+    order_data: pd.Series,
+    invoice_date: str,
+    refs: FiReferences,
+) -> None:
     """헤더 정보 채우기
 
     Args:
         ws: xlwings Sheet 객체
         order_data: 주문 데이터
         invoice_date: Invoice Date (선적일 — `resolve_invoice_date()`)
+        refs: Invoice No·Customer PO·DN 번호 (`build_fi_references()`)
     """
-    # Customer PO → C7
-    customer_po = get_value(order_data, 'customer_po', '')
-    ws.range(CELL_PO_NO).value = customer_po
+    _assert_dn_ref_template(ws)
 
-    # Invoice No (DN_ID) → H7
-    dn_id = get_value(order_data, 'dn_id', '')
-    ws.range(CELL_INVOICE_NO).value = dn_id
+    # 왼쪽 번호 세 줄: Customer PO → C7, PO Date → C8, Delivery Note No. → C9
+    # (CI·PL·COO는 DN 번호로 나가므로 그 번호를 여기 싣는다)
+    ws.range(CELL_PO_NO).value = refs.customer_po
+    ws.range(CELL_PO_DATE).value = refs.customer_po_date
+    ws.range(CELL_DN_REF).value = refs.dn_ids
+    # 한 인보이스에 PO·DN이 여럿이면 값이 길다 — 병합 칸은 잘라내므로 줄바꿈 + 행 높이 확보
+    layout_merged_lines(
+        ws, REF_START_ROW,
+        [refs.customer_po, refs.customer_po_date, refs.dn_ids], REF_MERGED_COLS,
+    )
 
-    # PO Date → C8
-    po_date = get_value(order_data, 'po_receipt_date', '')
-    if po_date and pd.notna(po_date):
-        if isinstance(po_date, datetime):
-            ws.range(CELL_PO_DATE).value = po_date.strftime("%Y-%m-%d")
-        else:
-            ws.range(CELL_PO_DATE).value = str(po_date)
+    # Invoice No (INV 번호, 없으면 DN_ID) → H7
+    ws.range(CELL_INVOICE_NO).value = refs.invoice_no
 
     # Invoice Date (선적일) → H8
     ws.range(CELL_INVOICE_DATE).value = invoice_date
@@ -202,7 +234,7 @@ def _fill_header(ws: xw.Sheet, order_data: pd.Series, invoice_date: str) -> None
     # 주소 칸은 병합 셀이라 길면 경계에서 잘린다 — 줄바꿈 + 행 높이 확보
     layout_address_rows(ws, ADDR_START_ROW, bill_tos, delivery_addr)
 
-    logger.debug(f"헤더 채우기 완료: DN_ID={dn_id}, Customer={bill_tos[0]}")
+    logger.debug(f"헤더 채우기 완료: Invoice No={refs.invoice_no}, Customer={bill_tos[0]}")
 
 
 def _restore_item_borders(ws: xw.Sheet, num_items: int) -> None:
