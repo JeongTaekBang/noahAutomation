@@ -23,6 +23,10 @@ bat 메뉴에서 `[R]` 선택 후 월 코드 입력으로도 실행 가능.
 | 공장 출고 | `po_reconciliation/2026/P03/2026리스트_RCK_P03.xlsx` → Delivery 시트 | RCK ODER (ND-xxxx 또는 P######) | 계산서금액 | 공장 전체 출고 내역 |
 | 내부 PO | `NOAH_SO_PO_DN.xlsx` → PO_국내/PO_해외 시트 | PO_ID ↔ AX PO | Total ICO | 담당자가 관리하는 오더만 |
 
+공장 출고리스트는 P11(2026-11)부터 헤더가 한글이다 (`RCK ODER` = `발주번호`, `계산서금액` = `납품된 항목 금액`,
+`Customer` = `발주처`). 읽을 때 예전 이름으로 맞추므로(`po_generator/delivery_list.py`) 이 문서와 결과 파일은
+예전 이름을 그대로 쓴다.
+
 ### 파일 구조
 
 ```

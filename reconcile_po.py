@@ -24,6 +24,7 @@ import pandas as pd
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 from po_generator.config import NOAH_SO_PO_DN_FILE, BASE_DIR
+from po_generator.delivery_list import read_delivery_sheet
 from po_generator.logging_config import setup_logging
 from po_generator.recon_paths import resolve_period_dir
 
@@ -107,8 +108,14 @@ def load_internal_po() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def load_delivery(delivery_file: Path) -> pd.DataFrame:
-    """공장 출고 리스트 Delivery 시트 읽기"""
-    df = pd.read_excel(delivery_file, sheet_name='Delivery')
+    """공장 출고 리스트 Delivery 시트 읽기
+
+    헤더는 `delivery_list`가 예전 이름으로 맞춰 준다 (P11~ 한글 헤더: 발주번호 → RCK ODER,
+    납품된 항목 금액 → 계산서금액, 발주처 → Customer) — 아래 코드와 결과 파일은 한 이름만 쓴다.
+    """
+    df = read_delivery_sheet(
+        delivery_file,
+        required=('RCK ODER', '계산서금액', 'Type', 'Customer', 'SECTOR', 'SO_ID'))
     df = df[df['RCK ODER'].notna()].copy()
     df['RCK ODER'] = df['RCK ODER'].astype(str).str.strip()
     logger.debug("출고 리스트 로드: %d건 (%s)", len(df), delivery_file.name)

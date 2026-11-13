@@ -57,19 +57,22 @@ from typing import Callable
 import pandas as pd
 
 from po_generator.config import EXCLUDED_SO_STATUSES
+# 출고리스트 Delivery 시트의 열 이름 — 양식이 바뀌어도(P11~ 한글 헤더) `delivery_list`가
+# 읽을 때 이 이름으로 맞춰 준다. 이 모듈의 설명·메시지에 나오는 `납품완료`·`계산서금액`·
+# `RCK ODER`·`JOB NO`는 새 양식의 `납품 일자`·`납품된 항목 금액`·`발주번호`·`수주번호`다
+from po_generator.delivery_list import (
+    COL_CUSTOMER,
+    COL_INVOICE_AMOUNT,
+    COL_JOB_NO,
+    COL_RCK_ORDER,
+    COL_SHIP_DATE,
+    COL_SO_ID,
+    read_delivery_sheet,
+)
 from po_generator.recon_paths import resolve_period_dir
 from po_generator.utils import resolve_column
 
 logger = logging.getLogger(__name__)
-
-# 출고리스트 Delivery 시트
-DELIVERY_SHEET = 'Delivery'
-COL_SO_ID = 'SO_ID'
-COL_SHIP_DATE = '납품완료'
-COL_INVOICE_AMOUNT = '계산서금액'
-COL_CUSTOMER = 'Customer'
-COL_RCK_ORDER = 'RCK ODER'
-COL_JOB_NO = 'JOB NO'       # 공장 발주번호 = PO_국내 `NOAH O.C No.` (+ 회차 접미사 `-1R`)
 
 # 금액 비교 허용 오차 (원) — reconcile_po.py와 같은 기준
 AMOUNT_TOLERANCE = 1.0
@@ -158,10 +161,9 @@ def load_source_frames(workbook: Path,
 
 def load_delivery(delivery_file: Path) -> pd.DataFrame:
     """출고리스트 Delivery 시트에서 SO_ID가 있는 행만 (N/A = 서비스 출고라 DN 대상 아님)"""
-    df = pd.read_excel(delivery_file, sheet_name=DELIVERY_SHEET)
-    if COL_SO_ID not in df.columns:
-        raise ValueError(
-            f"출고리스트에 '{COL_SO_ID}' 컬럼이 없습니다: {delivery_file.name}")
+    df = read_delivery_sheet(
+        delivery_file,
+        required=(COL_SO_ID, COL_SHIP_DATE, COL_INVOICE_AMOUNT))
     df = df[df[COL_SO_ID].notna()].copy()
     df[COL_SO_ID] = df[COL_SO_ID].astype(str).str.strip()
     df = df[df[COL_SO_ID] != ''].copy()
