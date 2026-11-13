@@ -1297,8 +1297,7 @@ def _shipment_stage(dn_rows, changed_at: str, closed_at: dict[str, str]) -> tupl
     if not before:
         first = min(str(r["shipped"])[:10] for r in dn_rows)
         return 0, f"변경 뒤 출고({first})"
-    months = sorted({m for r in before
-                     if (m := str(r.get("month") or "")) and len(m) == 7 and m[:4].isdigit() and m[4] == "-"})
+    months = sorted({m for r in before if (m := _as_month(r.get("month")))})
     after_close = [m for m in months
                    if m in closed_at and changed_at > str(closed_at[m]).replace("T", " ")]
     if after_close:
@@ -5900,6 +5899,525 @@ def _timeline_event_summary(row, live_ids=None, max_inline: int = 4):
     return body, detail
 
 
+# ── 주문 흐름 — 수주(Input)부터 매출(Output)까지 ─────────────────────────────
+# 번호 하나로 "이 주문이 지금 어디까지 왔나"를 그린다. 시트에는 날짜가 있고(접수일·발주일·출고일…),
+# 동기화 로그에는 "언제 그 상태가 됐나"가 있다(언제 등록됐고 언제 Confirmed가 됐나) — 둘을 한 화면에 놓는다.
+# DB를 읽는 것은 `load_order_facts` 하나고, 판정(`_order_journey`·`_journey_points`·`_journey_lines`)은
+# 순수 함수다. 출고는 DN 수량 누계로, 매출 인식 여부·월은 `v_dn_revenue`가 정한 대로 읽는다.
+_ORDER_SHEETS = {
+    "국내": {"so": "so_domestic", "po": "po_domestic", "dn": "dn_domestic", "recognized_on": "세금계산서 발행일"},
+    "해외": {"so": "so_export", "po": "po_export", "dn": "dn_export", "recognized_on": "선적일"},
+}
+_BUSINESS_LANE = "업무 날짜"
+_JOURNEY_LANES = {"SO": "수주 (SO)", "PO": "발주 (PO)", "DN": "출고 (DN)"}
+_JOURNEY_POINT_COLUMNS = ["lane", "when", "kind", "label", "count", "hover"]
+_JOURNEY_LINE_COLUMNS = ["Line", "품목", "수주 수량", "발주 상태", "EXW 예정", "출고 수량", "출고일", "매출월", "진행"]
+_QTY_EPS = 0.001
+
+
+def _as_date(v) -> str | None:
+    """시트의 날짜 값 → 'YYYY-MM-DD'. 날짜가 아니거나 엑셀의 빈 날짜(1899·1900년)면 None"""
+    text = str(v or "").strip()[:10]
+    if len(text) != 10 or text[4] != "-" or text[7] != "-" or not (text[:4] + text[5:7] + text[8:]).isdigit():
+        return None
+    return text if text[:4] > "1900" else None
+
+
+def _as_month(v) -> str | None:
+    """뷰의 매출월 → 'YYYY-MM', 그 모양이 아니면 None (해외는 `SUBSTR(선적일, 1, 7)`이라 ''이 올 수 있다)"""
+    text = str(v or "").strip()
+    return text if len(text) == 7 and text[4] == "-" and (text[:4] + text[5:]).isdigit() else None
+
+
+def _is_confirmed(status) -> bool:
+    """PO Status가 공장 확정 이후인가 — Confirmed 또는 Invoiced Pxx"""
+    text = str(status or "").strip()
+    return text == "Confirmed" or text.startswith("Invoiced")
+
+
+@st.cache_data(ttl=300)
+def load_order_facts(so_id: str) -> dict | None:
+    """주문 하나의 지금 모습 — SO·PO·DN 라인 + 매출 인식월 + 마감월. 지금 시트에 없는 주문이면 None.
+
+    DB 값은 전부 TEXT라 여기서 정리해 넘긴다: 날짜는 'YYYY-MM-DD'(빈 날짜는 None), 수량·금액은 숫자,
+    라인 번호는 정수('2.0' → 2). 매출 인식월(`month`)은 `v_dn_revenue`가 정한 값이고, `recognized_on`은
+    화면에 보여 줄 날짜일 뿐이다 — 국내 세금계산서 발행일 / 해외 선적일이 날짜일 때만.
+
+    반환: {so_id, market, so[], po[], dn[], closed{마감월: 마감 시각}}
+    """
+    conn = _conn()
+    if not conn:
+        return None
+    try:
+        so_rows = []
+        for market, names in _ORDER_SHEETS.items():
+            try:
+                so_rows = conn.execute(
+                    "SELECT [Line item], [Customer name], [Customer PO], [Item name], [Item qty], "
+                    "[Sales amount], Currency, [PO receipt date], Period, [Requested delivery date], "
+                    f"[EXW NOAH], Status FROM {names['so']} WHERE SO_ID = ?", (so_id,)).fetchall()
+            except sqlite3.OperationalError:
+                continue
+            if so_rows:
+                break
+        if not so_rows:
+            return None
+        po_rows = conn.execute(
+            "SELECT PO_ID, [Line item], [Item name], [Item qty], Status, [공장 발주 날짜], [공장 EXW date] "
+            f"FROM {names['po']} WHERE SO_ID = ?", (so_id,)).fetchall()
+        dn_rows = conn.execute(
+            "SELECT DN_ID, [Line item], Qty, 출고일, 매출월 FROM v_dn_revenue "
+            "WHERE SO_ID = ? AND dn_market = ?", (so_id, market)).fetchall()
+        recognized_on: dict[tuple, str] = {}
+        for dn_id, line, value in conn.execute(
+                f"SELECT DN_ID, [Line item], [{names['recognized_on']}] FROM {names['dn']} WHERE SO_ID = ?",
+                (so_id,)):
+            day = _as_date(value)
+            if day:
+                key = (dn_id, _line_number(line))
+                recognized_on[key] = max(recognized_on.get(key, ""), day)
+        try:
+            closed = dict(conn.execute("SELECT period, closed_at FROM ob_snapshot_meta WHERE is_active = 1"))
+        except sqlite3.OperationalError:
+            closed = {}   # 마감한 적 없는 DB
+    except sqlite3.Error as e:
+        logger.warning("주문 흐름 로드 실패 (%s): %s", so_id, e)
+        _record_load_error("Order Journey", e)
+        return None
+    finally:
+        conn.close()
+
+    def _text(v) -> str:
+        return "" if v is None else str(v).strip()
+
+    return {
+        "so_id": so_id, "market": market, "closed": closed,
+        "so": [{"line": _line_number(line), "customer": _text(customer), "customer_po": _text(cpo),
+                "item": _text(item), "qty": _to_number(qty), "amount": _to_number(amount),
+                "currency": _text(currency), "receipt": _as_date(receipt), "period": _text(period),
+                "requested": _as_date(requested), "exw": _as_date(exw), "status": _text(status)}
+               for line, customer, cpo, item, qty, amount, currency, receipt, period, requested, exw, status
+               in so_rows],
+        "po": [{"po_id": _text(po_id), "line": _line_number(line), "item": _text(item),
+                "qty": _to_number(qty), "status": _text(status), "ordered": _as_date(ordered),
+                "exw": _as_date(exw)}
+               for po_id, line, item, qty, status, ordered, exw in po_rows],
+        "dn": [{"dn_id": _text(dn_id), "line": _line_number(line), "qty": _to_number(qty) or 0.0,
+                "shipped": _as_date(shipped), "month": _as_month(month),
+                "recognized_on": recognized_on.get((dn_id, _line_number(line)))}
+               for dn_id, line, qty, shipped, month in dn_rows],
+    }
+
+
+def _active_so_lines(facts: dict) -> list[dict]:
+    """취소·보류가 아닌 SO 라인 — 출고·매출 진행을 세는 분모"""
+    return [line for line in facts["so"] if line["status"] not in EXCLUDED_SO_STATUSES]
+
+
+def _amount_text(lines: list[dict]) -> str:
+    """통화별 합계 — '1,176,000 KRW'. 통화가 섞이면 통화마다"""
+    totals: dict[str, float] = {}
+    for line in lines:
+        totals[line["currency"] or "KRW"] = totals.get(line["currency"] or "KRW", 0.0) + (line["amount"] or 0.0)
+    return " + ".join(
+        f"{total:,.0f} {currency}" if float(total).is_integer() else f"{total:,.2f} {currency}"
+        for currency, total in sorted(totals.items()))
+
+
+def _order_summary(facts: dict) -> dict:
+    """화면 머리말 — 누구의 어떤 주문인가. 취소·보류 라인은 금액에서 뺀다"""
+    lines = facts["so"]
+    active = _active_so_lines(facts)
+    first = (active or lines or [{}])[0]
+    return {
+        "customer": first.get("customer", ""), "customer_po": first.get("customer_po", ""),
+        "lines": len(lines), "cancelled_lines": len(lines) - len(active),
+        "all_cancelled": bool(lines) and not active,
+        "amount": _amount_text(active),
+    }
+
+
+def _events_for_order(log_df: pd.DataFrame, facts: dict) -> pd.DataFrame:
+    """동기화 로그에서 이 주문의 행만 (오래된 것부터).
+
+    PK에 SO 번호가 있는 것은 SO(첫 자리)와 DN(둘째 자리)뿐이다. PO의 PK는 (PO 번호, 라인, 순번)이라
+    발주 하나가 SO 여러 개를 묶으면 남의 라인이 섞인다 — 그래서 이 주문의 PO 라인과 대조한다.
+    """
+    if log_df.empty:
+        return log_df
+    so_id = facts["so_id"]
+    po_keys = {(p["po_id"], p["line"]) for p in facts["po"]}
+
+    def _mine(sheet: str, pk_json) -> bool:
+        tokens = _pk_tokens(pk_json)
+        if not tokens:
+            return False
+        if sheet.startswith("SO_"):
+            return tokens[0] == so_id
+        if sheet.startswith("PO_"):
+            return len(tokens) > 1 and (tokens[0], _line_number(tokens[1])) in po_keys
+        if sheet.startswith("DN_"):
+            return len(tokens) > 1 and tokens[1] == so_id
+        return False
+
+    mask = [_mine(str(sheet), pk) for sheet, pk in zip(log_df["sheet_name"], log_df["pk_json"])]
+    return log_df[mask].sort_values("id")
+
+
+def _event_records(events: pd.DataFrame) -> list[dict]:
+    """로그 행 → dict 목록 + 파싱한 변경 내용(`changes`)과 시트 종류(`doc` = SO/PO/DN)"""
+    if events.empty:
+        return []
+    records = []
+    for row in events.sort_values("id").to_dict("records"):
+        raw = row.get("changes_json") if row.get("change_type") != "삭제" else row.get("row_snapshot_json")
+        try:
+            changes = json.loads(raw) if raw else {}
+        except Exception:
+            changes = {}
+        row["changes"] = changes if isinstance(changes, dict) else {}
+        row["doc"] = str(row.get("sheet_name") or "")[:2]
+        records.append(row)
+    return records
+
+
+def _order_journey(facts: dict, events: pd.DataFrame, today) -> list[dict]:
+    """주문이 지나는 6단계 — `[{key, title, tag, state, date, detail}]`, state는 done / partial / waiting.
+
+    수주 접수 → 수주 등록(Input) → 공장 발주 → 발주 확정 → 출고 → 매출 인식(Output).
+    **Output은 출고가 아니라 매출 인식이다** (Order Book과 같은 정의) — 국내는 세금계산서를 끊어야,
+    해외는 선적해야 잡힌다. 출고·인식은 라인별 수량으로 센다(한 라인의 초과분이 다른 라인을 메우지 않게).
+    취소·보류 라인은 세지 않는다.
+    """
+    records = _event_records(events)
+    so_lines = _active_so_lines(facts)
+    po_lines = [p for p in facts["po"] if p["status"] != "Cancelled"]
+    dn_rows = facts["dn"]
+    domestic = facts["market"] == "국내"
+
+    def _stage(key, title, state, day=None, detail="", tag=""):
+        # tag = Order Book에서 이 단계가 무엇인가 (Input / Output). 제목은 좁은 카드에 한 줄로 들어가게 짧게 둔다
+        return {"key": key, "title": title, "tag": tag, "state": state, "date": day, "detail": detail}
+
+    def _first_day(doc: str, change_type: str | None = None) -> str | None:
+        times = [str(r["sync_time"]) for r in records
+                 if r["doc"] == doc and (change_type is None or r["change_type"] == change_type)]
+        return min(times)[:10] if times else None
+
+    def _ids(values) -> str:
+        ids = sorted(set(values))
+        return ids[0] + (f" 외 {len(ids) - 1}" if len(ids) > 1 else "") if ids else ""
+
+    # 1) 수주 접수 — 고객 PO를 받은 날 (시트)
+    receipts = sorted(day for line in facts["so"] if (day := line["receipt"]))
+    customer_po = _order_summary(facts)["customer_po"]
+    received = (_stage("received", "수주 접수", "done", receipts[0], f"고객 PO {customer_po}".strip())
+                if receipts else _stage("received", "수주 접수", "waiting", None, "접수일 미입력"))
+
+    # 2) 수주 등록 = Input — DB에 처음 잡힌 동기화 (로그). Period가 Order Book의 Input 월이다
+    periods = sorted({line["period"] for line in facts["so"] if line["period"]})
+    period_text = (periods[0] + (" 외" if len(periods) > 1 else "")) if periods else "미입력"
+    booked = _stage("booked", "수주 등록", "done", _first_day("SO", "신규"),
+                    f"Period {period_text}", tag="Input")
+
+    # 3) 공장 발주 — 발주일 (시트), 비어 있으면 로그에 처음 잡힌 날
+    if po_lines:
+        ordered_days = sorted(day for p in po_lines if (day := p["ordered"]))
+        ordered = _stage("ordered", "공장 발주", "done",
+                         ordered_days[0] if ordered_days else _first_day("PO"),
+                         _ids(p["po_id"] for p in po_lines))
+    else:
+        ordered = _stage("ordered", "공장 발주", "waiting", None, "PO 미등록")
+
+    # 4) 발주 확정 — 지금 Status(시트) + 언제 Confirmed가 됐나(로그)
+    if po_lines:
+        confirmed_keys = {(p["po_id"], p["line"]) for p in po_lines if _is_confirmed(p["status"])}
+        n_confirmed = sum(1 for p in po_lines if _is_confirmed(p["status"]))
+        first_confirm: dict[tuple, str] = {}
+        for r in records:
+            if r["doc"] != "PO":
+                continue
+            tokens = _pk_tokens(r["pk_json"])
+            key = (tokens[0], _line_number(tokens[1])) if len(tokens) > 1 else None
+            status = r["changes"].get("Status")
+            if r["change_type"] == "신규":
+                became = _is_confirmed(status)
+            else:
+                became = (isinstance(status, dict) and _is_confirmed(status.get("new"))
+                          and not _is_confirmed(status.get("old")))
+            if key and became:
+                first_confirm.setdefault(key, str(r["sync_time"]))
+        times = [first_confirm[k] for k in confirmed_keys if k in first_confirm]
+        state = "done" if n_confirmed == len(po_lines) else ("partial" if n_confirmed else "waiting")
+        confirmed = _stage("confirmed", "발주 확정", state, max(times)[:10] if times else None,
+                           f"확정 {n_confirmed}/{len(po_lines)}")
+    else:
+        confirmed = _stage("confirmed", "발주 확정", "waiting", None, "발주 전")
+
+    # 5) 출고 · 6) 매출 인식 — 라인별 DN 수량 누계
+    total = shipped_qty = recognized_qty = 0.0
+    for line in so_lines:
+        qty = line["qty"] or 0.0
+        if qty <= 0:
+            continue
+        rows = [r for r in dn_rows if r["line"] == line["line"]]
+        total += qty
+        shipped_qty += min(qty, sum(r["qty"] for r in rows))
+        recognized_qty += min(qty, sum(r["qty"] for r in rows if r["month"]))
+
+    def _progress(done_qty: float) -> str:
+        if total > 0 and done_qty >= total - _QTY_EPS:
+            return "done"
+        return "partial" if done_qty > _QTY_EPS else "waiting"
+
+    ship_state = _progress(shipped_qty)
+    if ship_state == "waiting":
+        planned = sorted(day for p in po_lines if (day := p["exw"])) or \
+                  sorted(day for line in so_lines if (day := line["exw"]))
+        shipped = _stage("shipped", "출고", "waiting", None,
+                         f"EXW 예정 {planned[-1]}" if planned else "예정일 없음")
+    else:
+        ship_days = sorted(day for r in dn_rows if (day := r["shipped"]))
+        detail = f"{_ids(r['dn_id'] for r in dn_rows)} · {shipped_qty:g}/{total:g}"
+        shipped = _stage("shipped", "출고", ship_state, ship_days[-1] if ship_days else None,
+                         detail if ship_days else detail + " · 출고일 미입력")
+
+    out_state = _progress(recognized_qty)
+    if out_state == "waiting":
+        reason = "출고 전" if ship_state == "waiting" else ("세금계산서 미발행" if domestic else "선적 전")
+        recognized = _stage("recognized", "매출 인식", "waiting", None, reason, tag="Output")
+    else:
+        months = sorted({r["month"] for r in dn_rows if r["month"]})
+        days = sorted(day for r in dn_rows if r["month"] and (day := r["recognized_on"]))
+        parts = []
+        if out_state == "partial":
+            parts.append(f"{recognized_qty:g}/{total:g}")
+        parts.append(", ".join(months))
+        if months and all(m in facts["closed"] for m in months):
+            parts.append("마감")
+        recognized = _stage("recognized", "매출 인식", out_state, days[-1] if days else None,
+                            " · ".join(parts), tag="Output")
+
+    return [received, booked, ordered, confirmed, shipped, recognized]
+
+
+def _journey_gaps(stages: list[dict], today) -> str:
+    """단계 사이에 걸린 날 — '접수 → 발주 2일 · 접수 → 출고 12일 · 출고 후 1일째 매출 미인식'"""
+    by_key = {s["key"]: s for s in stages}
+
+    def _days(start: str, end) -> int:
+        end_day = end if hasattr(end, "year") and not isinstance(end, str) else datetime.strptime(end, "%Y-%m-%d").date()
+        return (end_day - datetime.strptime(start, "%Y-%m-%d").date()).days
+
+    received, ordered = by_key["received"]["date"], by_key["ordered"]["date"]
+    shipped, recognized = by_key["shipped"], by_key["recognized"]
+    parts = []
+    if received and ordered:
+        parts.append(f"접수 → 발주 {_days(received, ordered)}일")
+    if shipped["date"]:
+        if received and shipped["state"] == "done":
+            parts.append(f"접수 → 출고 {_days(received, shipped['date'])}일")
+        if recognized["state"] == "done" and recognized["date"]:
+            parts.append(f"출고 → 매출 인식 {_days(shipped['date'], recognized['date'])}일")
+        elif recognized["state"] == "waiting":   # 일부만 인식된 주문에는 '미인식'이라고 하지 않는다
+            parts.append(f"출고 후 {_days(shipped['date'], today)}일째 매출 미인식")
+    elif received and shipped["state"] == "waiting":
+        parts.append(f"접수 후 {_days(received, today)}일째 미출고")
+    return " · ".join(parts)
+
+
+def _journey_points(facts: dict, events: pd.DataFrame) -> pd.DataFrame:
+    """타임라인 차트의 점 — 업무 날짜(시트 값)와 동기화 이벤트(로그)를 한 시간축에.
+
+    업무 날짜는 같은 날이면 점 하나로 묶어 이름을 잇는다(글자가 겹치지 않게).
+    로그는 (동기화, 시트 종류, 유형)마다 점 하나 + 건수, `hover`에 무엇이 바뀌었는지.
+    """
+    domestic = facts["market"] == "국내"
+    po_lines = [p for p in facts["po"] if p["status"] != "Cancelled"]
+    labelled = [
+        ("접수", (line["receipt"] for line in facts["so"])),
+        ("발주", (p["ordered"] for p in po_lines)),
+        ("EXW 예정", (p["exw"] for p in po_lines) if po_lines else (line["exw"] for line in facts["so"])),
+        ("요청납기", (line["requested"] for line in facts["so"])),
+        ("출고", (r["shipped"] for r in facts["dn"])),
+        ("세금계산서" if domestic else "선적", (r["recognized_on"] for r in facts["dn"] if r["month"])),
+    ]
+    by_day: dict[str, list[str]] = {}
+    for label, days in labelled:
+        for day in sorted({d for d in days if d}):
+            by_day.setdefault(day, []).append(label)
+    rows = [{"lane": _BUSINESS_LANE, "when": pd.Timestamp(day), "kind": _BUSINESS_LANE,
+             "label": "·".join(labels), "count": len(labels),
+             "hover": f"{day}<br>" + "<br>".join(labels)}
+            for day, labels in sorted(by_day.items())]
+
+    groups: dict[tuple, list[dict]] = {}
+    for r in _event_records(events):
+        lane = _JOURNEY_LANES.get(r["doc"])
+        when = pd.to_datetime(r["sync_time"], errors="coerce")
+        if lane is None or pd.isna(when):
+            continue
+        groups.setdefault((when, lane, r["change_type"]), []).append(r)
+    for (when, lane, kind), members in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1], kv[0][2])):
+        lines = [f"{when:%Y-%m-%d %H:%M} · {lane} · {kind} {len(members)}건"]
+        if kind == "수정":
+            sheet = str(members[0].get("sheet_name") or "")
+            tally: dict[tuple, int] = {}
+            for r in members:
+                for col, ch in r["changes"].items():
+                    old, new = (ch.get("old"), ch.get("new")) if isinstance(ch, dict) else (None, None)
+                    tally[(col, old, new)] = tally.get((col, old, new), 0) + 1
+            # 사람이 고친 열 먼저, 그 안에서는 건수 많은 순
+            ordered = sorted(tally.items(),
+                             key=lambda kv: (not _is_major_change(sheet, kv[0][0], kv[0][1], kv[0][2]), -kv[1]))
+            for (col, old, new), n in ordered[:6]:
+                shown_old = "(비어있음)" if _is_blank(old) else str(old).replace(" 00:00:00", "")
+                shown_new = "(비어있음)" if _is_blank(new) else str(new).replace(" 00:00:00", "")
+                lines.append(f"{col}: {shown_old} → {shown_new} ({n}건)")
+            if len(ordered) > 6:
+                lines.append(f"외 {len(ordered) - 6}가지")
+        else:
+            names = sorted({str(v) for r in members
+                            if not _is_blank(v := r["changes"].get("Item name") or r["changes"].get("Item"))})
+            if names:
+                lines.append(", ".join(names[:4]) + (f" 외 {len(names) - 4}" if len(names) > 4 else ""))
+        rows.append({"lane": lane, "when": when, "kind": kind, "label": str(len(members)),
+                     "count": len(members), "hover": "<br>".join(lines)})
+    return pd.DataFrame(rows, columns=_JOURNEY_POINT_COLUMNS)
+
+
+def _journey_lines(facts: dict) -> pd.DataFrame:
+    """라인별 진행 — 부분 출고·부분 인식 주문에서 어느 라인이 남았는지.
+
+    '발주 상태'는 같은 라인 번호의 PO 행에서 온다. PO는 부속을 한 라인에 합쳐 적기도 해서
+    SO 라인과 1:1이 아니다 — 짝이 없으면 '-'.
+    """
+    rows = []
+    for line in sorted(facts["so"], key=lambda r: (r["line"] is None, r["line"] or 0)):
+        po = [p for p in facts["po"] if p["line"] == line["line"]]
+        dn = [r for r in facts["dn"] if r["line"] == line["line"]]
+        qty = line["qty"] or 0.0
+        shipped = sum(r["qty"] for r in dn)
+        recognized = sum(r["qty"] for r in dn if r["month"])
+        if line["status"] in EXCLUDED_SO_STATUSES:
+            progress = line["status"]
+        elif qty > 0 and recognized >= qty - _QTY_EPS:
+            progress = "매출 인식"
+        elif qty > 0 and shipped >= qty - _QTY_EPS:
+            progress = "출고 완료"
+        else:
+            progress = "부분 출고" if shipped > _QTY_EPS else "미출고"
+        ship_days = sorted(day for r in dn if (day := r["shipped"]))
+        exw_days = sorted(day for p in po if (day := p["exw"]))
+        rows.append({
+            "Line": line["line"], "품목": line["item"], "수주 수량": line["qty"],
+            "발주 상태": ", ".join(sorted({p["status"] for p in po if p["status"]})) or "-",
+            "EXW 예정": (exw_days[-1] if exw_days else line["exw"]) or "",
+            "출고 수량": shipped, "출고일": ship_days[-1] if ship_days else "",
+            "매출월": ", ".join(sorted({r["month"] for r in dn if r["month"]})),
+            "진행": progress,
+        })
+    return pd.DataFrame(rows, columns=_JOURNEY_LINE_COLUMNS)
+
+
+_STAGE_STATE = {"done": ("✅", "완료"), "partial": ("🟡", "진행 중"), "waiting": ("⏳", "대기")}
+_JOURNEY_MARKERS = {   # 종류 → (기호, 크기, 색, 글자 위치, 글자색)
+    _BUSINESS_LANE: ("diamond", 13, "#888780", "top center", None),
+    "신규": ("circle", 24, C_ENDING, "middle center", "white"),
+    "수정": ("circle-open", 22, C_INPUT, "middle center", None),
+    "삭제": ("x", 13, C_DANGER, "top center", None),
+    "재적재": ("square-open", 13, C_PURPLE, "top center", None),
+}
+
+
+def _journey_figure(points: pd.DataFrame, today=None) -> go.Figure:
+    """주문 흐름 타임라인 — 맨 윗줄이 업무 날짜, 아래 세 줄이 SO/PO/DN의 동기화 이벤트"""
+    fig = go.Figure()
+    for kind, (symbol, size, color, position, text_color) in _JOURNEY_MARKERS.items():
+        sub = points[points["kind"] == kind].sort_values("when")
+        if sub.empty:
+            continue
+        if kind == _BUSINESS_LANE:
+            position = ["top center" if i % 2 == 0 else "bottom center" for i in range(len(sub))]
+        marker = dict(symbol=symbol, size=size, color=color)
+        if symbol.endswith("-open"):
+            marker["line"] = dict(width=2.5, color=color)
+        fig.add_trace(go.Scatter(
+            x=sub["when"], y=sub["lane"], mode="markers+text", name=kind, marker=marker,
+            text=sub["label"], textposition=position,
+            textfont=dict(size=11, color=text_color) if text_color else dict(size=11),
+            hovertext=sub["hover"], hoverinfo="text", cliponaxis=False,
+        ))
+    lanes = [_JOURNEY_LANES["DN"], _JOURNEY_LANES["PO"], _JOURNEY_LANES["SO"], _BUSINESS_LANE]   # 아래 → 위
+    fig.update_yaxes(categoryorder="array", categoryarray=lanes, title=None, showgrid=True,
+                     range=[-0.6, len(lanes) - 0.3])
+    fig.update_xaxes(title=None, tickformat="%m/%d", showgrid=False)
+    if today is not None:
+        fig.add_shape(type="line", x0=today, x1=today, xref="x", yref="paper", y0=0, y1=1,
+                      line=dict(dash="dot", width=1, color="#888780"))
+        fig.add_annotation(x=today, xref="x", yref="paper", y=1.06, text="오늘", showarrow=False,
+                           font=dict(size=11, color="#888780"))
+    fig.update_layout(height=320, margin=dict(t=36, b=10, l=10, r=10),
+                      legend=dict(orientation="h", yanchor="bottom", y=-0.28, x=0))
+    return fig
+
+
+def _render_order_journey(related: list[str], log_df: pd.DataFrame) -> None:
+    """주문 흐름 — 단계 표시줄 + 타임라인 차트 + 라인별 진행. 타임라인 카드 위에 놓인다."""
+    live = load_live_doc_ids()
+    so_ids = [i for i in related
+              if i in live.get("SO_국내", frozenset()) or i in live.get("SO_해외", frozenset())]
+    st.subheader("주문 흐름")
+    if not so_ids:
+        st.caption("지금 시트에 없는 주문이라 흐름은 그릴 수 없습니다 — 아래 이력만 볼 수 있습니다.")
+        return
+    so_id = so_ids[0]
+    if len(so_ids) > 1:
+        so_id = st.selectbox(
+            f"주문 (SO) — 검색한 번호에 {len(so_ids)}건이 걸렸습니다", so_ids, key="journey_so_id")
+    facts = load_order_facts(so_id)
+    if facts is None:
+        st.warning(f"`{so_id}`의 주문 정보를 읽지 못했습니다.")
+        return
+
+    today = datetime.now().date()
+    events = _events_for_order(log_df, facts)
+    summary = _order_summary(facts)
+    stages = _order_journey(facts, events, today)
+
+    st.markdown(f"**{so_id}** · {summary['customer'] or '-'} · 고객 PO `{summary['customer_po'] or '-'}` · "
+                f"{summary['lines']}라인 · {summary['amount'] or '-'}")
+    if summary["all_cancelled"]:
+        st.warning("이 주문은 전 라인이 취소·보류 상태입니다 — 아래 단계는 진행되지 않습니다.")
+    elif summary["cancelled_lines"]:
+        st.caption(f"취소·보류 라인 {summary['cancelled_lines']}개는 진행에서 뺐습니다.")
+
+    for col, stage in zip(st.columns(len(stages)), stages):
+        icon, word = _STAGE_STATE[stage["state"]]
+        with col, st.container(border=True):
+            st.caption(stage["tag"] or " ")   # Input / Output — 없는 칸도 한 줄을 차지해 높이를 맞춘다
+            st.markdown(f"{icon} **{stage['title']}**")
+            st.markdown(f"##### {stage['date'] or word}")
+            st.caption(stage["detail"] or " ")
+    gaps = _journey_gaps(stages, today)
+    if gaps:
+        st.caption(gaps)
+
+    points = _journey_points(facts, events)
+    if points.empty:
+        st.caption("차트에 놓을 날짜나 동기화 기록이 없습니다.")
+    else:
+        in_progress = stages[-1]["state"] != "done" and not summary["all_cancelled"]
+        st.plotly_chart(_journey_figure(points, pd.Timestamp(today) if in_progress else None),
+                        width='stretch', key="journey_chart")
+        st.caption("◆ 업무 날짜는 시트에 적힌 날, ● 신규·○ 수정은 그 변경이 동기화에 잡힌 시각입니다 "
+                   "(숫자 = 행 수). 점에 마우스를 올리면 무엇이 바뀌었는지 나옵니다.")
+
+    with st.expander(f"라인별 진행 ({summary['lines']}라인)", expanded=summary["lines"] <= 12):
+        st.dataframe(_journey_lines(facts), width='stretch', hide_index=True)
+    st.divider()
+
+
 def _render_order_timeline() -> None:
     """주문번호 하나에 대한 SO↔PO↔DN 변경 이력 타임라인 카드."""
     st.markdown(
@@ -5924,16 +6442,23 @@ def _render_order_timeline() -> None:
         return
 
     log_df = load_sync_log(days=0)
-    if log_df.empty:
-        st.info("동기화 로그가 비어 있습니다.")
-        return
 
     # PK의 문서 번호 전부를 연관 ID 집합과 대조 — 첫 토큰만 보면 DN의 SO_ID(index 1)나
     # 삭제(prune)된 DN 이력을 놓친다. 라인 번호·행 순번은 빼고 본다(`_pk_doc_ids`).
-    rel = set(related)
-    mask = log_df["pk_json"].apply(lambda j: any(t in rel for t in _pk_doc_ids(j)))
-    events = log_df[mask].copy()
+    if log_df.empty:
+        events = log_df
+    else:
+        rel = set(related)
+        mask = log_df["pk_json"].apply(lambda j: any(t in rel for t in _pk_doc_ids(j)))
+        events = log_df[mask].copy()
 
+    # 주문 흐름 — 수주(Input)부터 매출(Output)까지. 로그가 비어도 시트 값만으로 그린다.
+    # 전체 로그(5만 행+)가 아니라 위에서 고른 것만 넘긴다 — 주문 하나의 행은 연관 ID 안에 다 있다.
+    _render_order_journey(related, events)
+
+    if log_df.empty:
+        st.info("동기화 로그가 비어 있습니다.")
+        return
     if events.empty:
         st.info(
             f"'{order_id}' 관련 동기화 이력 없음 "
@@ -5944,6 +6469,7 @@ def _render_order_timeline() -> None:
     events["sync_time_dt"] = pd.to_datetime(events["sync_time"], errors="coerce")
     events = events.sort_values("sync_time_dt", ascending=False).reset_index(drop=True)
 
+    st.subheader("변경 이력")
     st.markdown(
         "**연관 ID** (" + str(len(related)) + "개): "
         + " · ".join(f"`{rid}`" for rid in sorted(related))

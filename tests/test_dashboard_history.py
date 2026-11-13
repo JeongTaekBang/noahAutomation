@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import date
 
 import pandas as pd
 import pytest
@@ -27,8 +28,10 @@ from po_generator.db_schema import (
 )
 
 SO_COLS = ['SO_ID', 'Line item', 'Customer name', 'Customer PO', 'AX Project number',
-           'Item name', 'Item qty', 'Sales Unit Price', 'Currency', 'Status']
-PO_COLS = ['PO_ID', 'SO_ID', 'Line item', '_row_seq', 'Item name', 'Item qty', 'ICO Unit', 'Status']
+           'Item name', 'Item qty', 'Sales Unit Price', 'Currency', 'Status',
+           'PO receipt date', 'Period', 'Sales amount', 'Requested delivery date', 'EXW NOAH']
+PO_COLS = ['PO_ID', 'SO_ID', 'Line item', '_row_seq', 'Item name', 'Item qty', 'ICO Unit', 'Status',
+           '공장 발주 날짜', '공장 EXW date']
 DN_DOM_COLS = ['DN_ID', 'SO_ID', 'Line item', '_row_seq', 'Qty', 'Total Sales', '출고일',
                '세금계산서 발행일', '선수금 세금계산서 발행일', 'Customer name', 'Item',
                'Customer PO', 'Business registration number']
@@ -114,7 +117,7 @@ def make_db(tmp_path, runs=None, log=(), closed=(), views=True, **tables):
 
 
 CACHED = ('load_so_unauth_changes', 'load_so_ack_history', 'load_sync_log',
-          'load_live_doc_ids', 'resolve_related_ids')
+          'load_live_doc_ids', 'resolve_related_ids', 'load_order_facts')
 
 
 @pytest.fixture
@@ -133,18 +136,23 @@ def use_db(monkeypatch):
     _clear()
 
 
-def log_frame(rows):
-    """`load_sync_log`가 돌려주는 모양의 DataFrame (순수 함수 테스트용)"""
+LOG_COLUMNS = ['id', 'sync_id', 'sync_time', 'actor', 'sheet_name', 'change_type', 'pk', 'pk_json',
+               'changes_json', 'row_snapshot_json']
+
+
+def log_frame(rows, times=None):
+    """`load_sync_log`가 돌려주는 모양의 DataFrame (순수 함수 테스트용). times = {sync_id: 시각}"""
     records = []
     for log_id, sync_id, sheet, ctype, pk, changes, snapshot in rows:
         records.append({
-            'id': log_id, 'sync_id': sync_id, 'sync_time': '2026-11-05 09:00:00', 'actor': '담당자',
+            'id': log_id, 'sync_id': sync_id,
+            'sync_time': (times or {}).get(sync_id, '2026-11-05 09:00:00'), 'actor': '담당자',
             'sheet_name': sheet, 'change_type': ctype, 'pk': ' | '.join(pk),
             'pk_json': json.dumps(pk, ensure_ascii=False),
             'changes_json': json.dumps(changes, ensure_ascii=False) if changes is not None else None,
             'row_snapshot_json': json.dumps(snapshot, ensure_ascii=False) if snapshot is not None else None,
         })
-    return pd.DataFrame(records)
+    return pd.DataFrame(records, columns=LOG_COLUMNS)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -690,3 +698,326 @@ class TestCardSummary:
     def test_key_values_fall_back_when_no_key_field(self):
         assert dashboard._key_values({'Turns': '12', 'ALS': 'Y'}) == [('Turns', '12'), ('ALS', 'Y')]
         assert dashboard._key_values({'Item name': 'NA050', 'Turns': '12', 'Item qty': None}) == [('Item name', 'NA050')]
+
+
+# ═══════════════════════════════════════════════════════════════
+# 주문 흐름 — 수주(Input)부터 매출(Output)까지
+# ═══════════════════════════════════════════════════════════════
+TODAY = date(2026, 11, 13)
+TIMES = {1: '2026-11-05 09:12:36', 2: '2026-11-06 14:20:00', 3: '2026-11-13 10:18:34'}
+
+
+def so_line(line, qty=1, amount=138000, **kw):
+    row = {'line': line, 'customer': '굿이엔지', 'customer_po': 'L26206', 'item': 'NOD-80',
+           'qty': qty, 'amount': amount, 'currency': 'KRW', 'receipt': '2026-10-31',
+           'period': '2026-11', 'requested': '2026-11-13', 'exw': '2026-11-13', 'status': '미출고'}
+    row.update(kw)
+    return row
+
+
+def po_line(line, status='Confirmed', po_id='ND-1118', **kw):
+    row = {'po_id': po_id, 'line': line, 'item': 'NOD-80', 'qty': 1, 'status': status,
+           'ordered': '2026-11-02', 'exw': '2026-11-13'}
+    row.update(kw)
+    return row
+
+
+def dn_line(line, qty, dn_id='DND-2026-1062', shipped='2026-11-12', month=None, recognized_on=None):
+    return {'dn_id': dn_id, 'line': line, 'qty': qty, 'shipped': shipped,
+            'month': month, 'recognized_on': recognized_on}
+
+
+def order(so=(), po=(), dn=(), closed=None, market='국내', so_id='SOD-2026-1118'):
+    return {'so_id': so_id, 'market': market, 'so': list(so), 'po': list(po), 'dn': list(dn),
+            'closed': closed or {}}
+
+
+def real_1118():
+    """실측 `SOD-2026-1118`을 줄인 모양 — 출고까지 끝났고 월합 세금계산서는 아직"""
+    facts = order(
+        so=[so_line(1, 1, 138000), so_line(2, 2, 534000, item='NOD-125'), so_line(3, 1, 504000, item='NOD-160')],
+        po=[po_line(1, 'Invoiced P11'), po_line(2, 'Invoiced P11'), po_line(3, 'Invoiced P11')],
+        dn=[dn_line(1, 1), dn_line(2, 2), dn_line(3, 1)])
+    events = log_frame([
+        added(1, 1, 'SO_국내', ['SOD-2026-1118', '1'], {'Item name': 'NOD-80', 'Item qty': '1'}),
+        added(2, 1, 'SO_국내', ['SOD-2026-1118', '2'], {'Item name': 'NOD-125', 'Item qty': '2'}),
+        added(3, 1, 'SO_국내', ['SOD-2026-1118', '3'], {'Item name': 'NOD-160', 'Item qty': '1'}),
+        added(4, 1, 'PO_국내', ['ND-1118', '1', '1'], {'Status': 'Confirmed'}),
+        added(5, 1, 'PO_국내', ['ND-1118', '2', '1'], {'Status': 'Confirmed'}),
+        added(6, 1, 'PO_국내', ['ND-1118', '3', '1'], {'Status': 'Confirmed'}),
+        edit(7, 2, 'SO_국내', ['SOD-2026-1118', '1'], {'AX Project number': (None, '82-18302.001')}),
+        edit(8, 3, 'PO_국내', ['ND-1118', '1', '1'], {'Status': ('Confirmed', 'Invoiced P11')}),
+        edit(9, 3, 'PO_국내', ['ND-1118', '2', '1'], {'Status': ('Confirmed', 'Invoiced P11')}),
+        edit(10, 3, 'PO_국내', ['ND-1118', '3', '1'], {'Status': ('Confirmed', 'Invoiced P11')}),
+        added(11, 3, 'DN_국내', ['DND-2026-1062', 'SOD-2026-1118', '1', '1'], {'Qty': '1'}),
+        added(12, 3, 'DN_국내', ['DND-2026-1062', 'SOD-2026-1118', '2', '1'], {'Qty': '2'}),
+        added(13, 3, 'DN_국내', ['DND-2026-1062', 'SOD-2026-1118', '3', '1'], {'Qty': '1'}),
+    ], TIMES)
+    return facts, events
+
+
+def journey(facts, events=None):
+    if events is None:
+        events = log_frame([])
+    return {s['key']: s for s in dashboard._order_journey(facts, events, TODAY)}
+
+
+class TestOrderJourney:
+
+    def test_six_stages_in_order(self):
+        facts, events = real_1118()
+        stages = dashboard._order_journey(facts, events, TODAY)
+        assert [s['key'] for s in stages] == ['received', 'booked', 'ordered', 'confirmed', 'shipped', 'recognized']
+        assert all(s['title'] and s['state'] in ('done', 'partial', 'waiting') for s in stages)
+        assert [s['tag'] for s in stages] == ['', 'Input', '', '', '', 'Output'],             'Order Book의 Input은 수주 등록, Output은 출고가 아니라 매출 인식이다'
+        assert max(len(s['title']) for s in stages) <= 5, '제목이 길면 좁은 카드에서 두 줄로 접힌다'
+
+    def test_shipped_but_not_yet_billed(self):
+        """실측 `SOD-2026-1118`: 출고(11/12)는 끝났지만 월합 세금계산서 전이라 Output은 대기다"""
+        stages = journey(*real_1118())
+        done = ('received', 'booked', 'ordered', 'confirmed', 'shipped')
+        assert [stages[k]['state'] for k in done] == ['done'] * 5
+        assert [stages[k]['date'] for k in done] == [
+            '2026-10-31', '2026-11-05', '2026-11-02', '2026-11-05', '2026-11-12']
+        out = stages['recognized']
+        assert (out['state'], out['date']) == ('waiting', None) and '세금계산서 미발행' in out['detail']
+        assert 'L26206' in stages['received']['detail']
+        assert '2026-11' in stages['booked']['detail'] and 'ND-1118' in stages['ordered']['detail']
+        assert 'DND-2026-1062' in stages['shipped']['detail'] and '4/4' in stages['shipped']['detail']
+
+    def test_no_purchase_order_yet(self):
+        stages = journey(order(so=[so_line(1)]))
+        assert stages['ordered']['state'] == 'waiting' and 'PO 미등록' in stages['ordered']['detail']
+        assert stages['confirmed']['state'] == 'waiting'
+        assert stages['shipped']['state'] == 'waiting' and '2026-11-13' in stages['shipped']['detail'], \
+            '미출고면 예정일을 알려 준다'
+        assert '출고 전' in stages['recognized']['detail']
+
+    def test_partial_shipment_counts_quantity(self):
+        facts = order(so=[so_line(1, 10), so_line(2, 5)], po=[po_line(1), po_line(2)], dn=[dn_line(1, 4)])
+        shipped = journey(facts)['shipped']
+        assert shipped['state'] == 'partial' and '4/15' in shipped['detail']
+
+    def test_over_shipment_does_not_hide_an_unshipped_line(self):
+        """라인별로 본다 — 한 라인의 초과 출고가 다른 라인의 미출고를 메우면 안 된다"""
+        facts = order(so=[so_line(1, 2), so_line(2, 2)], po=[po_line(1)], dn=[dn_line(1, 4)])
+        shipped = journey(facts)['shipped']
+        assert shipped['state'] == 'partial' and '2/4' in shipped['detail']
+
+    def test_recognized_in_a_closed_month(self):
+        facts = order(so=[so_line(1, 1)], po=[po_line(1, 'Invoiced P10')],
+                      dn=[dn_line(1, 1, shipped='2026-10-20', month='2026-10', recognized_on='2026-10-31')],
+                      closed={'2026-10': '2026-10-30T13:53:20'})
+        out = journey(facts)['recognized']
+        assert (out['state'], out['date']) == ('done', '2026-10-31')
+        assert '2026-10' in out['detail'] and '마감' in out['detail']
+
+    def test_partly_recognized(self):
+        facts = order(so=[so_line(1, 2)], po=[po_line(1)],
+                      dn=[dn_line(1, 1, dn_id='DND-1', month='2026-11', recognized_on='2026-11-02'),
+                          dn_line(1, 1, dn_id='DND-2')])
+        stages = journey(facts)
+        assert stages['shipped']['state'] == 'done'
+        assert stages['recognized']['state'] == 'partial' and '1/2' in stages['recognized']['detail']
+
+    def test_recognized_without_an_invoice_date_shows_the_month(self):
+        """매출월은 뷰가 정한다 — 세금계산서 'N/A'(무상)·선수금 건은 날짜 칸이 날짜가 아니다"""
+        facts = order(so=[so_line(1, 1)], po=[po_line(1)], dn=[dn_line(1, 1, month='2026-11')])
+        out = journey(facts)['recognized']
+        assert (out['state'], out['date']) == ('done', None) and '2026-11' in out['detail']
+
+    def test_export_waits_for_shipping_not_a_tax_invoice(self):
+        facts = order(market='해외', so_id='SOO-1', so=[so_line(1, 1, currency='EUR')],
+                      po=[po_line(1, po_id='NO-1')], dn=[dn_line(1, 1, dn_id='DNO-1')])
+        assert '선적 전' in journey(facts)['recognized']['detail']
+
+    def test_confirmation_time_comes_from_the_log(self):
+        """시트에는 지금 Status만 있다 — 언제 Confirmed가 됐는지는 로그에만 있다"""
+        facts = order(so=[so_line(1)], po=[po_line(1, 'Confirmed')])
+        events = log_frame([
+            added(1, 1, 'PO_국내', ['ND-1118', '1', '1'], {'Status': 'Sent'}),
+            edit(2, 2, 'PO_국내', ['ND-1118', '1', '1'], {'Status': ('Sent', 'Confirmed')}),
+            edit(3, 3, 'PO_국내', ['ND-1118', '1', '1'], {'Note': ('a', 'b')}),
+        ], TIMES)
+        confirmed = journey(facts, events)['confirmed']
+        assert (confirmed['state'], confirmed['date']) == ('done', '2026-11-06')
+
+    def test_some_lines_still_unconfirmed(self):
+        facts = order(so=[so_line(1), so_line(2)],
+                      po=[po_line(1, 'Confirmed'), po_line(2, 'Sent'), po_line(3, 'Cancelled')])
+        confirmed = journey(facts)['confirmed']
+        assert confirmed['state'] == 'partial' and '1/2' in confirmed['detail'], '취소된 발주 라인은 세지 않는다'
+
+    def test_missing_dates_fall_back_or_say_so(self):
+        facts = order(so=[so_line(1, receipt=None)], po=[po_line(1, ordered=None)])
+        events = log_frame([added(1, 2, 'PO_국내', ['ND-1118', '1', '1'], {'Status': 'Confirmed'})], TIMES)
+        stages = journey(facts, events)
+        assert stages['received']['state'] == 'waiting' and '미입력' in stages['received']['detail']
+        assert stages['ordered']['date'] == '2026-11-06', '발주일이 비어 있으면 로그에 처음 잡힌 날'
+        assert stages['booked']['date'] is None, '이 주문의 SO 로그가 없으면 등록일은 모른다'
+
+    def test_cancelled_lines_are_out_of_the_count(self):
+        facts = order(so=[so_line(1, 3), so_line(2, 7, status='Cancelled')], po=[po_line(1)],
+                      dn=[dn_line(1, 3)])
+        assert journey(facts)['shipped']['state'] == 'done'
+        summary = dashboard._order_summary(facts)
+        assert (summary['lines'], summary['cancelled_lines'], summary['all_cancelled']) == (2, 1, False)
+        assert summary['amount'] == '138,000 KRW', '취소한 라인의 금액은 주문 금액이 아니다'
+
+    def test_fully_cancelled_order_is_flagged(self):
+        facts = order(so=[so_line(1, status='Cancelled'), so_line(2, status='Hold')])
+        assert dashboard._order_summary(facts)['all_cancelled'] is True
+        assert journey(facts)['shipped']['state'] == 'waiting'
+
+    def test_summary_names_the_order(self):
+        summary = dashboard._order_summary(real_1118()[0])
+        assert (summary['customer'], summary['customer_po'], summary['lines']) == ('굿이엔지', 'L26206', 3)
+        assert summary['amount'] == '1,176,000 KRW'
+
+    def test_gaps_between_stages(self):
+        stages = dashboard._order_journey(*real_1118(), TODAY)
+        text = dashboard._journey_gaps(stages, TODAY)
+        assert '접수 → 출고 12일' in text and '출고 후 1일째' in text
+
+    def test_gaps_do_not_call_a_partly_billed_order_unbilled(self):
+        """실측 `SOD-2026-1102`: 3개 중 1개가 나가 계산서까지 끊겼다 — '매출 미인식'이라고 하면 틀린다"""
+        facts = order(so=[so_line(1, 3)], po=[po_line(1)],
+                      dn=[dn_line(1, 1, month='2026-11', recognized_on='2026-11-11')])
+        text = dashboard._journey_gaps(dashboard._order_journey(facts, log_frame([]), TODAY), TODAY)
+        assert '미인식' not in text and '접수 → 발주 2일' in text
+
+
+class TestOrderEvents:
+
+    def test_only_this_orders_rows(self):
+        """PO의 PK에는 SO 번호가 없다 — 한 발주가 SO 여러 개를 묶으면 남의 라인이 섞이지 않게 라인으로 가른다"""
+        facts = order(so=[so_line(1)], po=[po_line(1)], dn=[dn_line(1, 1)])
+        log = log_frame([
+            added(1, 1, 'SO_국내', ['SOD-2026-1118', '1'], {}),
+            added(2, 1, 'SO_국내', ['SOD-2026-9999', '1'], {}),
+            added(3, 1, 'PO_국내', ['ND-1118', '1', '1'], {}),
+            added(4, 1, 'PO_국내', ['ND-1118', '2', '1'], {}),            # 같은 발주의 남의 라인
+            added(5, 1, 'DN_국내', ['DND-2026-1062', 'SOD-2026-1118', '1', '1'], {}),
+            added(6, 1, 'DN_국내', ['DND-2026-1062', 'SOD-2026-9999', '1', '1'], {}),   # 같은 DN의 남의 주문
+            added(7, 1, 'PMT_국내', ['SOD-2026-1118'], {}),
+        ])
+        assert dashboard._events_for_order(log, facts)['id'].tolist() == [1, 3, 5]
+        assert dashboard._events_for_order(log.iloc[0:0], facts).empty
+
+
+class TestJourneyChart:
+
+    def test_business_dates_and_log_events_share_one_axis(self):
+        points = dashboard._journey_points(*real_1118())
+        business = points[points['lane'] == '업무 날짜'].set_index('label')
+        assert business.loc['접수', 'when'] == pd.Timestamp('2026-10-31')
+        assert business.loc['발주', 'when'] == pd.Timestamp('2026-11-02')
+        assert business.loc['출고', 'when'] == pd.Timestamp('2026-11-12')
+        assert pd.Timestamp('2026-11-13') in set(business['when']), 'EXW 예정·요청납기'
+        assert set(business['kind']) == {'업무 날짜'}
+
+    def test_same_day_business_dates_share_a_label(self):
+        """같은 날의 점이 겹쳐 글자가 뭉개지지 않게 한 점으로"""
+        points = dashboard._journey_points(*real_1118())
+        same_day = points[(points['lane'] == '업무 날짜') & (points['when'] == pd.Timestamp('2026-11-13'))]
+        assert len(same_day) == 1 and same_day['label'].iloc[0] == 'EXW 예정·요청납기'
+
+    def test_one_point_per_sync_sheet_and_type(self):
+        points = dashboard._journey_points(*real_1118())
+        log = points[points['lane'] != '업무 날짜']
+        got = {(r.lane, r.kind, str(r.when)[:16], int(r.count)) for r in log.itertuples()}
+        assert got == {
+            ('수주 (SO)', '신규', '2026-11-05 09:12', 3), ('수주 (SO)', '수정', '2026-11-06 14:20', 1),
+            ('발주 (PO)', '신규', '2026-11-05 09:12', 3), ('발주 (PO)', '수정', '2026-11-13 10:18', 3),
+            ('출고 (DN)', '신규', '2026-11-13 10:18', 3)}
+
+    def test_hover_says_what_changed(self):
+        points = dashboard._journey_points(*real_1118())
+        hover = points[(points['lane'] == '발주 (PO)') & (points['kind'] == '수정')]['hover'].iloc[0]
+        assert 'Status' in hover and 'Confirmed → Invoiced P11' in hover and '3건' in hover
+
+    def test_recognition_date_is_a_business_date(self):
+        facts = order(so=[so_line(1, 1)], po=[po_line(1)],
+                      dn=[dn_line(1, 1, month='2026-11', recognized_on='2026-11-30')])
+        points = dashboard._journey_points(facts, log_frame([]))
+        assert '세금계산서' in set(points['label'])
+        facts['market'] = '해외'
+        assert '선적' in set(dashboard._journey_points(facts, log_frame([]))['label'])
+
+    def test_nothing_to_plot(self):
+        points = dashboard._journey_points(order(so=[so_line(1, receipt=None, requested=None, exw=None)]),
+                                           log_frame([]))
+        assert points.empty and {'lane', 'when', 'kind', 'label', 'count', 'hover'} <= set(points.columns)
+
+
+class TestJourneyLines:
+
+    def test_each_line_shows_how_far_it_got(self):
+        facts = order(
+            so=[so_line(1, 2, item='NOD-80'), so_line(2, 5, item='NOD-125'), so_line(3, 1, item='NOD-160'),
+                so_line(4, 1, item='취소분', status='Cancelled')],
+            po=[po_line(1, 'Invoiced P11'), po_line(2, 'Confirmed')],
+            dn=[dn_line(1, 2, month='2026-11', recognized_on='2026-11-12'), dn_line(2, 3)])
+        table = dashboard._journey_lines(facts).set_index('Line')
+        assert table.loc[1, '진행'] == '매출 인식' and table.loc[1, '매출월'] == '2026-11'
+        assert table.loc[2, '진행'] == '부분 출고' and table.loc[2, '출고 수량'] == 3
+        assert table.loc[3, '진행'] == '미출고' and table.loc[3, '발주 상태'] == '-'
+        assert table.loc[4, '진행'] == 'Cancelled'
+        assert table.loc[2, '발주 상태'] == 'Confirmed' and table.loc[2, 'EXW 예정'] == '2026-11-13'
+
+
+class TestOrderFacts:
+
+    @pytest.fixture
+    def db(self, tmp_path, use_db):
+        return use_db(make_db(
+            tmp_path,
+            so_domestic=[
+                so('SOD-2026-1118', 1, qty=1, price=138000, **{
+                    'Customer name': '굿이엔지', 'Customer PO': 'L26206', 'Item name': 'NOD-80',
+                    'PO receipt date': '2026-10-31 00:00:00', 'Period': '2026-11', 'Sales amount': '138000',
+                    'Requested delivery date': '2026-11-13 00:00:00', 'EXW NOAH': '2026-11-13 00:00:00'}),
+                so('SOD-2026-1118', '2.0', qty=2, price=267000, **{
+                    'Customer name': '굿이엔지', 'Customer PO': 'L26206', 'Item name': 'NOD-125',
+                    'PO receipt date': '1899-12-30 00:00:00', 'Period': '2026-11', 'Sales amount': '534000'})],
+            so_export=[so('SOO-2026-0001', 1, qty=1, price=90, Currency='EUR', **{'Sales amount': '90'})],
+            po_domestic=[po('ND-1118', 'SOD-2026-1118', 1, Status='Invoiced P11',
+                            **{'공장 발주 날짜': '2026-11-02 00:00:00', '공장 EXW date': '2026-11-13 00:00:00'}),
+                         po('ND-9999', 'SOD-2026-9999', 1)],
+            dn_domestic=[dn('DND-2026-1062', 'SOD-2026-1118', 1, 1, 138000, shipped='2026-11-12 00:00:00'),
+                         dn('DND-2026-1070', 'SOD-2026-1118', 2, 2, 534000, shipped='2026-11-12 00:00:00',
+                            invoice='2026-11-30 00:00:00')],
+            dn_export=[{'DN_ID': 'DNO-1', 'SO_ID': 'SOO-2026-0001', 'Line item': '1', '_row_seq': '1',
+                        'Qty': '1', 'Currency': 'EUR', 'Total Sales': '90', 'Total Sales KRW': '135000',
+                        '출고일': '2026-11-01', '선적일': '2026-11-05'}],
+            closed=['2026-10']))
+
+    def test_values_come_out_clean(self, db):
+        """실DB는 전부 TEXT다 — 날짜의 ' 00:00:00', 라인의 '2.0', 엑셀의 빈 날짜(1899-12-30)를 여기서 정리한다"""
+        facts = dashboard.load_order_facts('SOD-2026-1118')
+        assert (facts['market'], facts['so_id']) == ('국내', 'SOD-2026-1118')
+        first, second = sorted(facts['so'], key=lambda r: r['line'])
+        assert (first['line'], first['qty'], first['amount'], first['receipt'], first['exw']) == (
+            1, 1.0, 138000.0, '2026-10-31', '2026-11-13')
+        assert (second['line'], second['receipt'], second['requested']) == (2, None, None)
+        assert [(p['po_id'], p['line'], p['status'], p['ordered'], p['exw']) for p in facts['po']] == [
+            ('ND-1118', 1, 'Invoiced P11', '2026-11-02', '2026-11-13')], '남의 주문의 발주는 안 딸려온다'
+        by_dn = {d['dn_id']: d for d in facts['dn']}
+        assert (by_dn['DND-2026-1062']['month'], by_dn['DND-2026-1062']['recognized_on']) == (None, None)
+        assert (by_dn['DND-2026-1070']['month'], by_dn['DND-2026-1070']['recognized_on'],
+                by_dn['DND-2026-1070']['shipped']) == ('2026-11', '2026-11-30', '2026-11-12')
+        assert facts['closed'] == {'2026-10': '2026-10-28T18:00:00'}
+
+    def test_export_order_reads_the_export_sheets(self, db):
+        facts = dashboard.load_order_facts('SOO-2026-0001')
+        assert facts['market'] == '해외' and facts['so'][0]['currency'] == 'EUR'
+        assert (facts['dn'][0]['month'], facts['dn'][0]['recognized_on']) == ('2026-11', '2026-11-05')
+
+    def test_order_not_in_the_sheets(self, db):
+        """지워진 주문 — 흐름은 못 그리고 아래 이력 카드만 남는다"""
+        assert dashboard.load_order_facts('SOD-2026-0933') is None
+
+    def test_journey_from_the_database(self, db):
+        facts = dashboard.load_order_facts('SOD-2026-1118')
+        stages = {s['key']: s for s in dashboard._order_journey(facts, log_frame([]), TODAY)}
+        assert stages['shipped']['state'] == 'done' and stages['recognized']['state'] == 'partial'
