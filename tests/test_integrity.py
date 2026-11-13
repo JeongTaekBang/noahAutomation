@@ -2,7 +2,7 @@
 데이터 정합성 검사 — 0이어야 하는 것들
 =====================================
 
-검사 6종은 `po_generator/integrity.py` 한 곳에 있고, 대시보드(SO/DN 불일치 카드)와
+검사는 `po_generator/integrity.py` 한 곳에 있고, 대시보드('정합성' 페이지 · SO/DN 불일치 카드)와
 CLI(`check_data.py`)가 같은 함수를 부른다. 여기서 지키고 싶은 것은 둘이다:
 
 1. **정상 업무가 걸리지 않는다** — 부분 출고, 반올림 노이즈, 하이픈 표기 차이, 빈 사업자번호,
@@ -195,6 +195,92 @@ class TestDashboardSharesFormula:
         """산식 사본 금지 — `v_dn_revenue`를 한 곳에 모은 것과 같은 이유"""
         source = Path(dashboard.__file__).read_text(encoding='utf-8')
         assert 'WITH so_lines AS' not in source
+
+    @staticmethod
+    def _page_checks(monkeypatch, path):
+        """'정합성' 페이지 검사 탭의 로더를 임시 DB로"""
+        monkeypatch.setattr(dashboard, '_conn', lambda: sqlite3.connect(str(path)))
+        dashboard.load_integrity_checks.clear()
+        try:
+            return dashboard.load_integrity_checks()
+        finally:
+            dashboard.load_integrity_checks.clear()
+
+    def test_integrity_page_runs_every_registered_check(self, tmp_path, monkeypatch):
+        """페이지는 `CHECKS`를 그대로 돈다 — 검사를 더하면 화면에도 나온다 (CLI와 건수가 같다)"""
+        path = tmp_path / 'noah_data.db'
+        _mk_db(path, so_dom=[so('SOD-1', 1)], po_dom=[po('ND-1', 'SOD-1', 1)],
+               dn_dom=[dn('DND-1', 'SOD-1', 1, 3, 360)]).close()
+        got = self._page_checks(monkeypatch, path)
+        assert [c['title'] for c in got] == [c.title for c in integrity.CHECKS]
+        assert [c['why'] for c in got] == [c.why for c in integrity.CHECKS]
+        status = {c['key']: (c['status'], c['count']) for c in got}
+        assert status.pop('price_mismatch') == ('문제', 1)
+        assert set(status.values()) == {('정상', 0)}
+        mismatch = next(c for c in got if c['key'] == 'price_mismatch')
+        assert mismatch['rows']['SO_ID'].tolist() == ['SOD-1']
+
+    def test_integrity_page_shows_a_dead_check_as_failed(self, tmp_path, monkeypatch):
+        """조회가 죽은 검사는 화면에서도 '0건 정상'이 아니다"""
+        path = tmp_path / 'noah_data.db'
+        conn = _mk_db(path, so_dom=[so('SOD-1', 1)], po_dom=[po('ND-1', 'SOD-1', 1)])
+        conn.execute('DROP TABLE fx')
+        conn.commit()
+        conn.close()
+        fx = next(c for c in self._page_checks(monkeypatch, path) if c['key'] == 'fx_missing')
+        assert fx['status'] == '실패' and fx['error'] and fx['rows'] is None
+
+    def test_integrity_page_without_db(self, monkeypatch):
+        """DB를 못 열면 빈 목록 — 화면은 이것을 '모두 정상'으로 읽지 않는다"""
+        monkeypatch.setattr(dashboard, '_conn', lambda: None)
+        dashboard.load_integrity_checks.clear()
+        try:
+            assert dashboard.load_integrity_checks() == []
+        finally:
+            dashboard.load_integrity_checks.clear()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 데이터 기준 — DB가 Excel보다 낡았는가 (CLI와 대시보드가 같은 판정)
+# ═══════════════════════════════════════════════════════════════
+class TestFreshness:
+
+    SYNCED = datetime(2026, 10, 13, 10, 0)
+
+    def test_last_sync_is_the_latest_table(self):
+        conn = _mk_db()
+        update_sync_metadata(conn, 'so_domestic', '2026-10-13T10:00:00', 1)
+        update_sync_metadata(conn, 'dn_domestic', '2026-10-13T10:00:07', 1)
+        update_sync_metadata(conn, 'fx', '(알 수 없음)', 1)  # 깨진 값은 건너뛴다
+        assert integrity.last_sync_time(conn) == datetime(2026, 10, 13, 10, 0, 7)
+
+    def test_no_sync_record(self):
+        assert integrity.last_sync_time(_mk_db()) is None
+
+    @pytest.fixture
+    def excel(self, tmp_path):
+        path = tmp_path / 'NOAH_SO_PO_DN.xlsx'
+        path.write_bytes(b'')
+        return path
+
+    def test_excel_saved_after_sync(self, excel):
+        os.utime(excel, (self.SYNCED.timestamp() + 900,) * 2)
+        assert integrity.excel_edited_after(self.SYNCED, excel) == datetime(2026, 10, 13, 10, 15)
+
+    def test_excel_older_than_sync(self, excel):
+        os.utime(excel, (self.SYNCED.timestamp() - 900,) * 2)
+        assert integrity.excel_edited_after(self.SYNCED, excel) is None
+
+    def test_unknown_is_not_a_warning(self, excel, tmp_path):
+        """동기화 기록이 없거나 Excel이 그 PC에 없으면(배포판) 모른다 — 경고하지 않는다"""
+        assert integrity.excel_edited_after(None, excel) is None
+        assert integrity.excel_edited_after(self.SYNCED, tmp_path / '없는파일.xlsx') is None
+
+    def test_cli_and_dashboard_read_the_same_functions(self):
+        """판정이 두 곳에 있으면 한쪽만 고쳐진다 — CLI는 자기 경로만 넘긴다"""
+        assert check_data.last_sync_time is integrity.last_sync_time
+        assert dashboard.last_sync_time is integrity.last_sync_time
+        assert dashboard.excel_edited_after is integrity.excel_edited_after
 
 
 # ═══════════════════════════════════════════════════════════════

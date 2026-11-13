@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sqlite3
+from dataclasses import asdict, fields
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -21,11 +22,14 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-from po_generator.config import DB_FILE
+from po_generator.config import DB_FILE, EXCLUDED_SO_STATUSES, NOAH_SO_PO_DN_FILE
 from po_generator.db_schema import (
-    ensure_so_change_ack_table, get_sync_metadata, SYNC_LOG_CHANGE_TYPES,
+    ensure_so_change_ack_table, get_sync_metadata, SYNC_LOG_CHANGE_TYPES, SYNC_SHEETS,
 )
-from po_generator.integrity import so_dn_line_anomalies
+from po_generator.integrity import (
+    excel_edited_after, last_sync_time, run_checks, so_dn_line_anomalies,
+)
+from po_generator.snapshot import DriftRow, post_close_drift
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +96,7 @@ def _sanitize_date(series) -> pd.Series:
 # DB 연결 — OneDrive 원본이 아니라 로컬 스냅샷을 읽는다
 # ═══════════════════════════════════════════════════════════════
 @st.cache_resource(show_spinner="데이터를 불러오는 중...")
-def _db_snapshot(mtime: float, size: int) -> str:
+def _db_snapshot(db_path: str, mtime: float, size: int) -> str:
     """noah_data.db의 일관된 사본을 로컬 임시폴더에 만들고 그 경로를 준다.
 
     원본을 직접 열지 않는 이유 — DB는 OneDrive 폴더에 있고 `journal_mode=wal`이다.
@@ -107,22 +111,28 @@ def _db_snapshot(mtime: float, size: int) -> str:
     그래서 SQLite 백업 API로 **한 시점의 일관된 사본**을 뜨고 그 사본만 연다.
     원본에 거는 잠금은 복사하는 1초 남짓뿐이고, 그 뒤로는 아무것도 잡지 않는다.
 
-    캐시 키가 (mtime, size)라서 원본이 갱신되면 자동으로 다시 뜬다 —
+    캐시 키가 (경로, mtime, size)라서 원본이 갱신되면 자동으로 다시 뜬다 —
     사용자가 새로고침을 누르는 것에 기대지 않는다.
+
+    **사본 파일 이름에 원본 경로를 넣는다.** 이름이 하나로 고정돼 있으면 다른 DB를 여는 프로세스
+    (테스트, 배포판 빌드 검증, 다른 폴더의 대시보드)가 같은 임시 파일을 덮어쓰고, 이미 떠 있는
+    대시보드는 캐시된 경로를 그대로 열어 **남의 DB를 읽는다** — 원본이 갱신될 때까지. 실제로
+    2026-11-13에 테스트가 임시 DB로 이 함수를 타면서 떠 있던 대시보드가 "no such table"이 됐다.
     """
-    import shutil
+    import hashlib
     import tempfile
     from pathlib import Path
 
     dest_dir = Path(tempfile.gettempdir()) / "noah_dashboard"
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest, tmp = dest_dir / "noah_data.db", dest_dir / "noah_data.db.tmp"
+    tag = hashlib.sha1(db_path.encode("utf-8")).hexdigest()[:10]
+    dest, tmp = dest_dir / f"noah_data_{tag}.db", dest_dir / f"noah_data_{tag}.db.tmp"
     tmp.unlink(missing_ok=True)
 
     # 읽기 전용(mode=ro)으로 열지 않는 이유: WAL DB를 읽으려면 -shm이 필요한데
     # 읽기 전용 연결은 그것을 만들지 못해 SQLITE_READONLY_CANTINIT으로 실패할 수 있다.
     # 일반 연결로 열되 backup()은 읽기만 하므로 원본 내용은 바뀌지 않는다.
-    src = sqlite3.connect(str(DB_FILE))
+    src = sqlite3.connect(db_path)
     try:
         dst = sqlite3.connect(str(tmp))
         try:
@@ -142,7 +152,7 @@ def _conn():
         return None
     stat = DB_FILE.stat()
     try:
-        return sqlite3.connect(_db_snapshot(stat.st_mtime, stat.st_size))
+        return sqlite3.connect(_db_snapshot(str(DB_FILE), stat.st_mtime, stat.st_size))
     except (sqlite3.Error, OSError) as e:
         # 사본을 못 만들면 원본으로라도 보여준다 — 화면이 통째로 죽는 것보다 낫다.
         # (위 1)2) 위험은 남으므로 로그에 흔적을 남긴다)
@@ -204,6 +214,14 @@ def _show_data_freshness(latest: str) -> None:
     else:
         st.sidebar.error(
             f"데이터 기준: {stamp}\n\n{days:.0f}일 전 — OneDrive 동기화 상태를 확인하세요."
+        )
+
+    # 동기화가 오늘 것이어도 그 뒤에 Excel을 고쳤으면 화면은 낡았다 — "등록했는데 안 보인다"의
+    # 대부분이 이 경우다. 판정은 CLI 정합성 검사와 같은 함수.
+    edited = excel_edited_after(synced, NOAH_SO_PO_DN_FILE)
+    if edited is not None:
+        st.sidebar.caption(
+            f"Excel은 그 뒤 {edited:%m-%d %H:%M}에 수정됨 — DB Sync 전까지 화면에 없습니다."
         )
 
 
@@ -637,6 +655,54 @@ def load_so_dn_anomalies() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=300)
+def load_integrity_checks() -> list[dict]:
+    """정합성 검사 전부 — '정합성' 페이지 검사 탭의 원본.
+
+    검사 목록·산식은 `integrity.CHECKS`가 소유한다. 여기서는 돌리기만 하므로 검사를 더하면
+    화면에도 나오고, CLI(`check_data.py`)와 건수가 같다.
+    DB를 못 열면 빈 목록 — 화면은 이것을 '모두 정상'으로 읽으면 안 된다.
+    """
+    conn = _conn()
+    if not conn:
+        return []
+    try:
+        results = run_checks(conn)   # 검사 하나가 죽어도 나머지는 돈다 (그 검사는 status='실패')
+    finally:
+        conn.close()
+    return [
+        {"key": r.check.key, "title": r.check.title, "why": r.check.why,
+         "status": r.status, "count": r.count, "rows": r.rows, "error": r.error}
+        for r in results
+    ]
+
+
+@st.cache_data(ttl=300)
+def load_post_close_drift() -> dict | None:
+    """마지막 마감 이후 달라진 것 — '정합성' 페이지 마감 후 변동 탭의 원본.
+
+    계산은 `snapshot.post_close_drift`에 있다 (마감 엔진과 같은 SQL·키·문턱).
+    반환: None = 마감 기록 없음 / {"error"} = 조회 실패 / {period, closed_at, rows, moved_only}.
+    실패를 None으로 뭉개지 않는다 — '달라진 것 없음'으로 읽힌다.
+    """
+    conn = _conn()
+    if not conn:
+        return None
+    try:
+        drift = post_close_drift(conn)
+    except Exception as e:
+        logger.warning("마감 후 변동 로드 실패: %s", e)
+        return {"error": f"{type(e).__name__}: {e}"}
+    finally:
+        conn.close()
+    if drift is None:
+        return None
+    rows = pd.DataFrame([asdict(r) for r in drift.rows],
+                        columns=[f.name for f in fields(DriftRow)])
+    return {"period": drift.period, "closed_at": drift.closed_at,
+            "rows": rows, "moved_only": drift.moved_only}
+
+
+@st.cache_data(ttl=300)
 def load_dn_lines_by_so_line() -> pd.DataFrame:
     """SO 라인별 DN 라인 detail — 단가 불일치 expander 용."""
     conn = _conn()
@@ -844,12 +910,18 @@ def load_snapshot_meta() -> pd.DataFrame:
 
 @st.cache_data(ttl=300)
 def resolve_related_ids(input_id: str) -> list[str]:
-    """입력 ID(SO/PO/DN 중 하나)와 연관된 모든 ID 집합 반환.
+    """입력(SO/PO/DN 번호, 또는 Customer PO·AX Project 번호)과 연관된 문서 ID 전부.
 
     po_domestic/po_export로 SO_ID ↔ PO_ID 매핑, dn_domestic/dn_export로
     SO_ID ↔ DN_ID 매핑을 따라가며 관련 ID를 확장. 수렴할 때까지 반복하되
     안전 상한 6회 (한 PO가 여러 SO를 묶고 그 SO들이 또 다른 DN으로 퍼지는
     다단 매핑에서 2회로는 미수렴 가능 — break로 조기 종료).
+
+    Customer PO·AX Project 번호는 SO 시트에서 **정확 일치**(대소문자·앞뒤 공백 무시)로 찾는다 —
+    고객이 부르는 번호로 이력을 찾으려는 것이고, 부분 일치는 짧은 입력이 수백 건에 걸린다.
+    그렇게 찾았으면 입력 문자열은 결과에 넣지 않는다(문서 번호가 아니다). 2026-11 실측으로
+    Customer PO와 문서 번호가 겹치는 경우는 없다.
+    어디에도 없는 입력은 그대로 돌려준다 — 지워진 주문은 지금 시트에 없어도 로그에는 남아 있다.
     """
     input_id = input_id.strip()
     if not input_id:
@@ -858,38 +930,47 @@ def resolve_related_ids(input_id: str) -> list[str]:
     if not conn:
         return [input_id]
     try:
-        ids: set[str] = {input_id}
+        aliased: set[str] = set()   # Customer PO·AX Project 번호로 찾은 SO
+        for table in ("so_domestic", "so_export"):
+            try:
+                for (so_id,) in conn.execute(
+                    f"SELECT DISTINCT SO_ID FROM {table} "
+                    "WHERE UPPER(TRIM([Customer PO])) = UPPER(?) "
+                    "   OR UPPER(TRIM([AX Project number])) = UPPER(?)",
+                    (input_id, input_id),
+                ):
+                    if so_id:
+                        aliased.add(so_id)
+            except sqlite3.OperationalError:
+                pass
+
+        ids: set[str] = {input_id} | aliased
+        seen: set[str] = set(aliased)   # 표에서 실제로 본 문서 번호
+        links = (("po_domestic", "SO_ID", "PO_ID"), ("po_export", "SO_ID", "PO_ID"),
+                 ("dn_domestic", "DN_ID", "SO_ID"), ("dn_export", "DN_ID", "SO_ID"))
         for _ in range(6):
             before = len(ids)
-            placeholders = ",".join("?" for _ in ids)
-            params = tuple(ids)
-
-            for table in ("po_domestic", "po_export"):
+            current = sorted(ids)
+            for table, a, b in links:
                 try:
-                    for so, po in conn.execute(
-                        f"SELECT SO_ID, PO_ID FROM {table} "
-                        f"WHERE SO_ID IN ({placeholders}) OR PO_ID IN ({placeholders})",
-                        params + params,
-                    ).fetchall():
-                        if so: ids.add(so)
-                        if po: ids.add(po)
-                except sqlite3.OperationalError:
-                    pass
-
-            for table in ("dn_domestic", "dn_export"):
-                try:
-                    for dn_id, so_id in conn.execute(
-                        f"SELECT DN_ID, SO_ID FROM {table} "
-                        f"WHERE DN_ID IN ({placeholders}) OR SO_ID IN ({placeholders})",
-                        params + params,
-                    ).fetchall():
-                        if dn_id: ids.add(dn_id)
-                        if so_id: ids.add(so_id)
+                    for chunk in _chunked(current):   # Customer PO 하나에 SO가 100개를 넘기도 한다
+                        marks = ",".join("?" * len(chunk))
+                        for pair in conn.execute(
+                            f"SELECT {a}, {b} FROM {table} "
+                            f"WHERE {a} IN ({marks}) OR {b} IN ({marks})",
+                            chunk + chunk,
+                        ).fetchall():
+                            for value in pair:
+                                if value:
+                                    ids.add(value)
+                                    seen.add(value)
                 except sqlite3.OperationalError:
                     pass
 
             if len(ids) == before:
                 break
+        if aliased and input_id not in seen:
+            ids.discard(input_id)
     except Exception as e:
         logger.warning("주문 통합 검색 실패: %s", e)
         _record_load_error("Order ID Resolver", e)
@@ -898,6 +979,51 @@ def resolve_related_ids(input_id: str) -> list[str]:
         conn.close()
     # 빈 값 제거 + 정렬 (UI 표시 일관성)
     return sorted(i for i in ids if i)
+
+
+@st.cache_data(ttl=300)
+def load_live_doc_ids() -> dict[str, frozenset]:
+    """시트별로 **지금** DB에 있는 문서 번호 — 삭제 이벤트가 문서째인지 행만인지 가르는 데 쓴다.
+
+    시트 → 테이블 → 문서 번호 열(PK 첫 열)은 `SYNC_SHEETS`가 안다. 테이블이 없는 시트는 건너뛴다.
+    """
+    conn = _conn()
+    if not conn:
+        return {}
+    live: dict[str, frozenset] = {}
+    try:
+        for cfg in SYNC_SHEETS:
+            try:
+                live[cfg.sheet_name] = frozenset(
+                    str(row[0]) for row in conn.execute(
+                        f"SELECT DISTINCT [{cfg.pk_columns[0]}] FROM {cfg.table_name}")
+                    if row[0] is not None)
+            except sqlite3.OperationalError:
+                continue
+    finally:
+        conn.close()
+    return live
+
+
+def _delete_kind(sheet: str, pk_json, live_ids) -> str:
+    """삭제 이벤트의 종류 — '문서째 삭제' / '행 삭제' / (가를 수 없으면) '삭제'.
+
+    **지금 상태로** 가른다: 그 시트에 그 문서 번호가 남아 있으면 행만 지운 것(라인 정리·재키잉),
+    없으면 문서가 통째로 사라진 것이다. 같은 번호로 다시 등록했으면 '행 삭제'로 보인다.
+    """
+    tokens = _pk_tokens(pk_json)
+    if not live_ids or sheet not in live_ids or not tokens:
+        return "삭제"
+    return "행 삭제" if tokens[0] in live_ids[sheet] else "문서째 삭제"
+
+
+def _pk_doc_ids(pk_json) -> list[str]:
+    """PK에서 문서 번호만 — 라인 번호·행 순번(숫자 토큰)은 뺀다.
+
+    주문 검색은 PK의 모든 자리와 대조한다(`_pk_tokens` 참조). 그런데 PK에는 `Line item`·`_row_seq`도
+    들어 있어, 숫자를 입력하면 모든 문서의 그 번호 라인에 걸린다. 문서 번호는 숫자만으로 된 것이 없다.
+    """
+    return [t for t in _pk_tokens(pk_json) if _to_number(t) is None]
 
 
 def _pk_tokens(pk_json) -> list[str]:
@@ -1004,10 +1130,15 @@ def _is_blank(v) -> bool:
 
 @st.cache_data(ttl=60)
 def load_so_unauth_changes() -> pd.DataFrame:
-    """Customer PO 변경 없이 수량/단가가 바뀐 미확인 SO 변경 로드.
+    """Customer PO 변경 없이 수량/단가가 바뀐 미확인 SO 변경 — 로그 1건(라인)당 1행 + 맥락.
 
-    반환 컬럼: sync_log_id, sync_id, sync_time, actor, sheet_name, pk, changes
-        changes: list[(field, old, new)] — 감시 필드만 필터됨
+    반환 컬럼 (`_SO_CHANGE_COLUMNS`):
+        sync_log_id, sync_id, sync_time, actor, sheet_name, pk, SO_ID, line,
+        changes — [(필드, 이전, 이후)] 감시 필드만,
+        customer, customer_po, currency — 지금 SO 시트 값,
+        so_state — '' / Cancelled·Hold / 'SO 라인 없음',
+        impact — 그 변경으로 달라진 금액 (모르면 NaN),
+        stage_rank, stage — 변경 시점에 물건이 어디까지 가 있었나 (`_shipment_stage`)
     """
     conn = _conn()
     if not conn:
@@ -1039,42 +1170,17 @@ def load_so_unauth_changes() -> pd.DataFrame:
     finally:
         conn.close()
 
-    if df.empty:
-        return df
-
     rows = []
     for _, r in df.iterrows():
         try:
             changes = json.loads(r["changes_json"]) if r["changes_json"] else {}
         except Exception:
             continue
-        if not isinstance(changes, dict):
-            continue
-        # Customer PO 가 함께 바뀐 경우는 "허가된 변경"으로 간주 → 제외
-        if _SO_AUTHORIZE_FIELD in changes:
-            continue
-        watched = []
-        for field in _SO_WATCHED_FIELDS:
-            ch = changes.get(field)
-            if not isinstance(ch, dict):
-                continue
-            old, new = ch.get("old"), ch.get("new")
-            if old == new:
-                continue
-            # 빈값 ↔ 값 (None/"" → 값 또는 그 반대): 최초 입력/삭제로 보고 제외
-            if _is_blank(old) or _is_blank(new):
-                continue
-            watched.append((field, old, new))
+        watched = _watched_changes(changes)
         if not watched:
             continue
-        # PK json → SO_ID 추출 (SO 시트 PK = (SO_ID, Line item))
-        so_id = None
-        try:
-            pk_list = json.loads(r["pk_json"]) if r["pk_json"] else []
-            if pk_list:
-                so_id = str(pk_list[0])
-        except Exception:
-            pass
+        # SO 시트 PK = (SO_ID, Line item)
+        tokens = _pk_tokens(r["pk_json"])
         rows.append({
             "sync_log_id": int(r["sync_log_id"]),
             "sync_id": int(r["sync_id"]),
@@ -1082,30 +1188,280 @@ def load_so_unauth_changes() -> pd.DataFrame:
             "actor": r.get("actor") or "",
             "sheet_name": r["sheet_name"],
             "pk": r["pk"],
-            "SO_ID": so_id,
+            "SO_ID": tokens[0] if tokens else "",
+            "line": _line_number(tokens[1]) if len(tokens) > 1 else None,
             "changes": watched,
         })
-    return pd.DataFrame(rows)
+    if not rows:
+        return pd.DataFrame(columns=_SO_CHANGE_COLUMNS)
+
+    # 맥락(지금 SO 값·금액 영향·출고 단계)은 같은 사본에서 한 번에 읽는다 — 로더를 나누면
+    # 캐시 수명이 달라 카드와 맥락이 서로 다른 시점을 보게 된다.
+    conn = _conn()
+    try:
+        _attach_so_change_context(conn, rows)
+    finally:
+        if conn:
+            conn.close()
+    return pd.DataFrame(rows, columns=_SO_CHANGE_COLUMNS)
 
 
-def _ack_so_change(sync_log_id: int, note: str | None = None) -> bool:
-    """미확인 SO 변경을 ack 처리. 성공 True / 실패 False. 캐시 무효화는 호출자 책임.
+_SO_CHANGE_COLUMNS = [
+    "sync_log_id", "sync_id", "sync_time", "actor", "sheet_name", "pk", "SO_ID", "line", "changes",
+    "customer", "customer_po", "currency", "so_state", "impact", "stage_rank", "stage",
+]
+_SO_TABLE = {"SO_국내": "so_domestic", "SO_해외": "so_export"}
+
+
+def _watched_changes(changes) -> list[tuple[str, object, object]]:
+    """감시 필드(수량·단가)의 값→값 변경만 `[(필드, 이전, 이후)]`.
+
+    Customer PO가 함께 바뀌었으면 빈 목록 — 고객 발주 변경에 따른 것이라 '허가된 변경'으로 본다.
+    빈값 ↔ 값은 최초 입력/삭제라 뺀다.
+    """
+    if not isinstance(changes, dict) or _SO_AUTHORIZE_FIELD in changes:
+        return []
+    watched = []
+    for field in _SO_WATCHED_FIELDS:
+        ch = changes.get(field)
+        if not isinstance(ch, dict):
+            continue
+        old, new = ch.get("old"), ch.get("new")
+        if old == new or _is_blank(old) or _is_blank(new):
+            continue
+        watched.append((field, old, new))
+    return watched
+
+
+def _to_number(v) -> float | None:
+    """로그·시트 값(문자열 '7410000' 등) → 숫자. 빈값·숫자가 아니면 None"""
+    if _is_blank(v):
+        return None
+    try:
+        return float(str(v).replace(",", ""))
+    except ValueError:
+        return None
+
+
+def _line_number(v) -> int | None:
+    """PK·시트의 Line item('1', '1.0', 1) → 정수. 못 읽으면 None"""
+    number = _to_number(v)
+    return None if number is None else int(number)
+
+
+def _amount_impact(watched, so_qty, so_price) -> float | None:
+    """그 변경으로 달라진 금액 = 바뀐 뒤 수량×단가 − 바뀌기 전 수량×단가.
+
+    `so_qty`/`so_price`는 이 변경이 건드리지 않은 쪽의 **그때 값**이다. 하나라도 모르면 None —
+    0으로 메워 숫자를 내지 않는다.
+    """
+    before = {"Item qty": so_qty, "Sales Unit Price": so_price}
+    after = dict(before)
+    for field, old, new in watched:
+        before[field], after[field] = old, new
+    values = [_to_number(v) for v in (before["Item qty"], before["Sales Unit Price"],
+                                      after["Item qty"], after["Sales Unit Price"])]
+    if any(v is None for v in values):
+        return None
+    return values[2] * values[3] - values[0] * values[1]
+
+
+def _value_then(later_changes, field: str, current):
+    """`field`의 그때 값 — 그 뒤 처음으로 그 열을 바꾼 변경의 '이전값', 없으면 지금 값"""
+    for changes in later_changes:
+        ch = changes.get(field) if isinstance(changes, dict) else None
+        if isinstance(ch, dict):
+            return ch.get("old")
+    return current
+
+
+def _shipment_stage(dn_rows, changed_at: str, closed_at: dict[str, str]) -> tuple[int, str]:
+    """그 라인을 고쳤을 때 물건이 어디까지 가 있었나 → (무거운 정도, 표시 문구).
+
+    `dn_rows` = 그 라인의 `v_dn_revenue` 행 `[{dn_id, shipped, month}]` (None = 조회 실패),
+    `changed_at` = 변경이 잡힌 동기화 시각, `closed_at` = {마감월: 마감 시각}.
+
+    **변경 시점 기준**이다. 주문을 고친 뒤 그 값으로 출고한 것은 평소 업무라 '미출고'와 같은 무게다.
+    DN 단가는 SO를 따라가므로(XLOOKUP) 무거운 것은 이미 나간 뒤에 고친 것이다 — 거래명세표·세금계산서와
+    금액이 갈릴 수 있고, 마감이 굳은 뒤라면 다음 마감의 Variance가 된다.
+    매출 인식 여부·월은 뷰가 정한 것을 그대로 쓴다 (인식 규칙을 여기서 다시 쓰지 않는다).
+    """
+    if dn_rows is None:
+        return -1, "출고 여부 확인 불가"
+    if not dn_rows:
+        return 0, "미출고"
+    changed_at = str(changed_at).replace("T", " ")
+    day = changed_at[:10]
+    # 출고일이 빈 DN은 '출고 기록은 있다'로 본다 (가벼운 쪽으로 틀리지 않게)
+    before = [r for r in dn_rows if _is_blank(r.get("shipped")) or str(r["shipped"])[:10] <= day]
+    if not before:
+        first = min(str(r["shipped"])[:10] for r in dn_rows)
+        return 0, f"변경 뒤 출고({first})"
+    months = sorted({m for r in before
+                     if (m := str(r.get("month") or "")) and len(m) == 7 and m[:4].isdigit() and m[4] == "-"})
+    after_close = [m for m in months
+                   if m in closed_at and changed_at > str(closed_at[m]).replace("T", " ")]
+    if after_close:
+        return 3, f"마감 뒤 변경 · 마감된 달({after_close[0]}) 매출"
+    if months:
+        return 2, f"출고 뒤 변경 · 매출 인식({', '.join(months)})"
+    dates = sorted(str(r["shipped"])[:10] for r in before if not _is_blank(r.get("shipped")))
+    return 1, f"출고 뒤 변경({dates[-1] if dates else '출고일 미입력'}) · 매출 미인식"
+
+
+def _chunked(values: list, size: int = 400):
+    """IN (...) 자리표시자가 SQLite 변수 한도를 넘지 않게 끊는다"""
+    for i in range(0, len(values), size):
+        yield values[i:i + size]
+
+
+def _attach_so_change_context(conn, rows: list[dict]) -> None:
+    """미확인 변경 각 라인에 지금 SO 값·금액 영향·출고 단계를 붙인다 (그 자리에서 채운다).
+
+    맥락을 못 읽어도 변경 자체는 목록에 남아야 한다 — 그래서 조회가 실패한 부분만 '모름'으로 둔다.
+    """
+    so_ids = sorted({r["SO_ID"] for r in rows if r["SO_ID"]})
+    known = set(so_ids)
+
+    # 1) 지금 SO 시트 값 — Cancelled/Hold 라인도 읽는다 (`load_so`는 그것을 빼고 단가·통화가 없다)
+    so_now: dict[tuple, dict] = {}   # (시트, SO_ID, 라인)
+    so_any: dict[tuple, dict] = {}   # (시트, SO_ID) — 그 라인이 지워졌을 때 고객명이라도
+    for sheet, table in _SO_TABLE.items():
+        try:
+            for chunk in _chunked(so_ids) if conn else ():
+                marks = ",".join("?" * len(chunk))
+                for so_id, line, cust, cpo, qty, price, cur, status in conn.execute(
+                        f"SELECT SO_ID, [Line item], [Customer name], [Customer PO], [Item qty], "
+                        f"[Sales Unit Price], Currency, Status FROM {table} WHERE SO_ID IN ({marks})",
+                        chunk):
+                    info = {"customer": cust, "customer_po": cpo, "qty": qty, "price": price,
+                            "currency": cur, "status": status}
+                    so_now[(sheet, so_id, _line_number(line))] = info
+                    so_any.setdefault((sheet, so_id), info)
+        except sqlite3.Error as e:
+            logger.warning("미확인 변경 맥락 — %s 조회 실패: %s", table, e)
+
+    # 2) 같은 라인의 뒤 변경들(확인한 것 포함) — 이 변경이 안 건드린 쪽의 '그때 값'을 되돌리려고
+    later: dict[tuple, list] = {}
+    try:
+        first_id = min(r["sync_log_id"] for r in rows)
+        marks = ",".join("?" * len(_SO_SHEETS))
+        for log_id, sheet, pk_json, changes_json in (conn.execute(
+                f"SELECT id, sheet_name, pk_json, changes_json FROM _sync_log "
+                f"WHERE sheet_name IN ({marks}) AND change_type = '수정' AND id > ? ORDER BY id",
+                (*_SO_SHEETS, first_id)) if conn else ()):
+            tokens = _pk_tokens(pk_json)
+            if len(tokens) < 2 or tokens[0] not in known:
+                continue
+            try:
+                changes = json.loads(changes_json) if changes_json else {}
+            except Exception:
+                continue
+            later.setdefault((sheet, tokens[0], _line_number(tokens[1])), []).append((log_id, changes))
+    except sqlite3.Error as e:
+        logger.warning("미확인 변경 맥락 — 뒤 변경 조회 실패: %s", e)
+
+    # 3) 그 라인의 DN — 출고일과 매출 인식월은 뷰(DN 매출의 단일 정의)에서
+    dn_rows: dict[tuple, list] | None = {}
+    try:
+        if not conn:
+            raise sqlite3.OperationalError("연결 없음")
+        for chunk in _chunked(so_ids):
+            marks = ",".join("?" * len(chunk))
+            for so_id, line, dn_id, shipped, month in conn.execute(
+                    f"SELECT SO_ID, [Line item], DN_ID, 출고일, 매출월 FROM v_dn_revenue "
+                    f"WHERE SO_ID IN ({marks})", chunk):
+                dn_rows.setdefault((so_id, _line_number(line)), []).append(
+                    {"dn_id": dn_id, "shipped": shipped, "month": month})
+    except sqlite3.Error as e:
+        logger.warning("미확인 변경 맥락 — DN 조회 실패: %s", e)
+        dn_rows = None
+
+    closed_at: dict[str, str] = {}
+    try:
+        if conn:
+            closed_at = dict(conn.execute(
+                "SELECT period, closed_at FROM ob_snapshot_meta WHERE is_active = 1"))
+    except sqlite3.Error:
+        pass   # 마감한 적 없는 DB
+
+    for r in rows:
+        key = (r["sheet_name"], r["SO_ID"], r["line"])
+        now = so_now.get(key)
+        label = now or so_any.get(key[:2]) or {}
+        r["customer"] = label.get("customer") or ""
+        r["customer_po"] = label.get("customer_po") or ""
+        r["currency"] = label.get("currency") or ""
+        if now is None:
+            r["so_state"] = "SO 라인 없음"
+            qty = price = None
+        else:
+            status = str(now["status"] or "").strip()
+            r["so_state"] = status if status in EXCLUDED_SO_STATUSES else ""
+            qty, price = now["qty"], now["price"]
+        after = [c for log_id, c in later.get(key, ()) if log_id > r["sync_log_id"]]
+        r["impact"] = _amount_impact(r["changes"],
+                                     _value_then(after, "Item qty", qty),
+                                     _value_then(after, "Sales Unit Price", price))
+        lines = None if dn_rows is None else dn_rows.get((r["SO_ID"], r["line"]), [])
+        r["stage_rank"], r["stage"] = _shipment_stage(lines, r["sync_time"], closed_at)
+
+
+def _group_so_changes(df: pd.DataFrame) -> list[dict]:
+    """미확인 변경을 (시트, 주문, 동기화)로 묶는다 — 카드 하나, 확인 버튼 하나.
+
+    동기화가 다르면 다른 사건이라 따로 둔다. 순서는 무거운 단계부터, 그 안에서 최신순.
+    묶음의 금액 영향은 한 라인이라도 모르면 None (아는 것만 더한 숫자는 틀린 숫자다).
+    """
+    groups = []
+    if df.empty:
+        return groups
+    for (sheet, so_id, sync_id), lines in df.groupby(
+            ["sheet_name", "SO_ID", "sync_id"], sort=False, dropna=False):
+        lines = lines.sort_values(["line", "sync_log_id"], na_position="last")
+        heaviest = lines.loc[lines["stage_rank"].idxmax()]
+        first = lines.iloc[0]
+        groups.append({
+            "key": f"{sheet}_{so_id}_{int(sync_id)}",
+            "sheet_name": sheet, "SO_ID": so_id, "sync_id": int(sync_id),
+            "sync_time": first["sync_time"], "actor": first["actor"],
+            "customer": first["customer"], "customer_po": first["customer_po"],
+            "currency": first["currency"],
+            "log_ids": [int(i) for i in lines["sync_log_id"]],
+            "lines": lines,
+            "impact": None if lines["impact"].isna().any() else float(lines["impact"].sum()),
+            "stage_rank": int(heaviest["stage_rank"]), "stage": heaviest["stage"],
+        })
+    return sorted(groups, key=lambda g: (g["stage_rank"], str(g["sync_time"]), g["SO_ID"]),
+                  reverse=True)
+
+
+def _ack_so_changes(sync_log_ids, note: str | None = None) -> bool:
+    """미확인 SO 변경 묶음을 확인 처리 — **전부 아니면 전무**. 캐시 무효화는 호출자 책임.
+
+    한 트랜잭션에 쓴다: 묶음 중 하나라도 못 쓰면(`_sync_log`에 없는 id 등) 전부 취소한다.
+    반만 확인된 카드는 다음 실행에 반만 남아 무엇을 검토했는지 알 수 없게 된다.
+    `note`(사유)는 묶음의 모든 라인에 같이 남는다. 이미 확인한 id는 그대로 둔다(처음 사유 유지).
 
     **대시보드에서 유일하게 DB에 쓰는 경로**라 `_conn()`(스냅샷)이 아니라
     `_write_conn()`(원본)을 쓴다 — 이유는 `_write_conn` 독스트링 참조.
     """
+    ids = [int(i) for i in sync_log_ids]
+    if not ids:
+        return False
     conn = _write_conn()
     if not conn:
         return False
+    note = (note or "").strip() or None
     try:
         conn.execute("PRAGMA foreign_keys=ON")  # _so_change_ack.sync_log_id → _sync_log FK 강제
         ensure_so_change_ack_table(conn)
         acked_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         acked_by = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-        conn.execute(
+        conn.executemany(
             "INSERT OR IGNORE INTO _so_change_ack "
             "(sync_log_id, acked_at, acked_by, note) VALUES (?, ?, ?, ?)",
-            (sync_log_id, acked_at, acked_by, note),
+            [(i, acked_at, acked_by, note) for i in ids],
         )
         conn.commit()
         # WAL을 본체로 합친다 — 이 DB는 OneDrive로 공유되고 남들은 본체만 받는다
@@ -1114,13 +1470,65 @@ def _ack_so_change(sync_log_id: int, note: str | None = None) -> bool:
         try:
             conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error as e:
-            logger.warning("ack 후 WAL 체크포인트 실패 (id=%s): %s", sync_log_id, e)
+            logger.warning("ack 후 WAL 체크포인트 실패 (ids=%s): %s", ids, e)
         return True
     except Exception as e:
-        logger.warning("SO 변경 ack 실패 (id=%s): %s", sync_log_id, e)
+        conn.rollback()
+        logger.warning("SO 변경 ack 실패 (ids=%s): %s", ids, e)
         return False
     finally:
         conn.close()
+
+
+def _ack_so_change(sync_log_id: int, note: str | None = None) -> bool:
+    """한 건 확인 — `_ack_so_changes`의 래퍼"""
+    return _ack_so_changes([sync_log_id], note)
+
+
+_ACK_HISTORY_COLUMNS = ["sync_log_id", "확인 시각", "확인자", "사유", "시장", "주문·라인", "변경", "변경 시각"]
+
+
+@st.cache_data(ttl=60)
+def load_so_ack_history(limit: int = 500) -> pd.DataFrame:
+    """확인 완료한 SO 변경 — 누가·언제·왜 (최신 확인이 위).
+
+    확인 버튼을 누르면 카드에서 사라지므로, 무엇을 어떤 사유로 넘겼는지는 여기서만 다시 볼 수 있다.
+    """
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame(columns=_ACK_HISTORY_COLUMNS)
+    try:
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                        "AND name = '_so_change_ack'").fetchone() is None:
+            return pd.DataFrame(columns=_ACK_HISTORY_COLUMNS)   # 아직 한 번도 확인한 적 없다
+        raw = conn.execute(
+            "SELECT a.sync_log_id, a.acked_at, a.acked_by, a.note, "
+            "       l.sheet_name, l.pk_display, l.changes_json, r.started_at "
+            "FROM _so_change_ack a "
+            "JOIN _sync_log l ON l.id = a.sync_log_id "
+            "JOIN _sync_runs r ON r.sync_id = l.sync_id "
+            "ORDER BY a.acked_at DESC, a.sync_log_id DESC LIMIT ?", (limit,)).fetchall()
+    except Exception as e:
+        logger.warning("SO 변경 확인 이력 로드 실패: %s", e)
+        _record_load_error("SO Change Ack History", e)
+        return pd.DataFrame(columns=_ACK_HISTORY_COLUMNS)
+    finally:
+        conn.close()
+
+    rows = []
+    for log_id, acked_at, acked_by, note, sheet, pk, changes_json, synced in raw:
+        try:
+            changes = json.loads(changes_json) if changes_json else {}
+        except Exception:
+            changes = {}
+        rows.append({
+            "sync_log_id": int(log_id), "확인 시각": acked_at, "확인자": acked_by or "",
+            "사유": note or "", "시장": {"SO_국내": "국내", "SO_해외": "해외"}.get(sheet, sheet),
+            "주문·라인": pk,
+            "변경": " / ".join(f"{f}: {o} → {n}" for f, o, n in _watched_changes(changes)),
+            "변경 시각": synced,
+        })
+    return pd.DataFrame(rows, columns=_ACK_HISTORY_COLUMNS)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1356,7 +1764,7 @@ def main():
     page = st.sidebar.radio("페이지", [
         "오늘의 현황", "수주/출고 현황", "제품 분석",
         "섹터 분석", "고객 분석", "발주 커버리지",
-        "수익성 분석", "Order Book", "동기화 로그",
+        "수익성 분석", "Order Book", "정합성", "동기화 로그",
     ])
     st.sidebar.divider()
     market = st.sidebar.radio("시장 구분", ["전체", "국내", "해외"], horizontal=True)
@@ -1401,6 +1809,7 @@ def main():
         "발주 커버리지": pg_po_coverage,
         "수익성 분석": pg_margin,
         "Order Book": pg_orderbook,
+        "정합성": pg_integrity,
         "동기화 로그": pg_sync_log,
     }[page](**kw)
 
@@ -1514,59 +1923,79 @@ def _render_so_unauth_changes(market: str):
 
     if df.empty:
         st.success("Customer PO 미변경 단가/수량 변동 없음")
-        return
-
-    n = len(df)
-    st.warning(
-        f"미확인 변경 **{n}건** — 고객 PO 변경 없이 수량 또는 단가가 바뀌었습니다. "
-        "각 행을 검토 후 **확인 완료** 처리하세요."
-    )
-
-    # SO 마스터에서 customer_name + customer_po 조회용 룩업
-    so_master = load_so()
-    so_lookup: dict[str, dict] = {}
-    if not so_master.empty:
-        so_lookup = (so_master[["SO_ID", "customer_name", "customer_po"]]
-                     .drop_duplicates(subset=["SO_ID"])
-                     .set_index("SO_ID")
-                     .to_dict("index"))
-
-    market_label = {"SO_국내": "국내", "SO_해외": "해외"}
-    for _, row in df.iterrows():
-        log_id = row["sync_log_id"]
-        mkt = market_label.get(row["sheet_name"], row["sheet_name"])
-        meta = so_lookup.get(row.get("SO_ID") or "", {})
-        cust = meta.get("customer_name") or "-"
-        cust_po = meta.get("customer_po") or "(없음)"
-        change_summary = " / ".join(
-            f"{f}: {'' if o is None else o} → {'' if n_ is None else n_}"
-            for f, o, n_ in row["changes"]
+    else:
+        groups = _group_so_changes(df)
+        st.warning(
+            f"미확인 변경 **{len(df)}건** ({len(groups)}개 주문) — 고객 PO 변경 없이 수량 또는 단가가 "
+            "바뀌었습니다. 검토 후 **확인 완료** 처리하세요."
         )
-        title = f"[{mkt}] {cust}  ·  {row['pk']}  ·  {change_summary}  ·  {row['sync_time']}"
-        with st.expander(title, expanded=False):
-            c1, c2 = st.columns([3, 1])
-            with c1:
-                meta_md = (
-                    f"**업체**: {cust}  ·  **Customer PO**: `{cust_po}`  ·  "
-                    f"**SO**: `{row['pk']}`"
-                )
-                st.markdown(meta_md)
-                detail = pd.DataFrame(
-                    [{"필드": f, "이전값": "" if o is None else str(o),
-                      "변경값": "" if n_ is None else str(n_)}
-                     for f, o, n_ in row["changes"]]
-                )
-                st.dataframe(detail, width='stretch', hide_index=True)
-                st.caption(f"sync_id={row['sync_id']}  ·  변경자: {row['actor'] or '-'}  ·  {row['sync_time']}")
-            with c2:
-                if st.button("✅ 확인 완료", key=f"ack_so_{log_id}", width='stretch'):
-                    if _ack_so_change(log_id):
-                        # ack은 원본에 썼으므로 읽기용 스냅샷도 다시 떠야 반영된다
-                        _db_snapshot.clear()
-                        load_so_unauth_changes.clear()
-                        st.rerun()
-                    else:
-                        st.error("확인 처리 실패 — 잠시 후 다시 시도하세요.")
+        st.caption(
+            "무거운 것부터 — 🔒 마감 뒤 변경 → 🧾 출고 뒤 변경(매출 인식) → 🚚 출고 뒤 변경(매출 미인식) → "
+            "📦 미출고·변경 뒤 출고. DN 단가는 SO를 따라가므로, 출고 뒤에 고치면 이미 나간 "
+            "거래명세표·세금계산서와 금액이 달라질 수 있습니다."
+        )
+        for group in groups:
+            _render_so_change_group(group)
+
+    _render_so_ack_history(market)
+
+
+_STAGE_ICON = {3: "🔒", 2: "🧾", 1: "🚚", 0: "📦", -1: "❔"}
+_SO_MARKET = {"SO_국내": "국내", "SO_해외": "해외"}
+
+
+def _render_so_change_group(group: dict) -> None:
+    """미확인 변경 카드 하나 = 한 주문이 한 동기화에서 바뀐 라인들 + 사유 + 확인 버튼"""
+    mkt = _SO_MARKET.get(group["sheet_name"], group["sheet_name"])
+    cust = group["customer"] or "-"
+    currency = group["currency"] or ""
+    n = len(group["log_ids"])
+    impact = ("금액 영향 확인 불가" if group["impact"] is None
+              else f"금액 영향 {_signed(group['impact'])} {currency}".strip())
+    title = (f"{_STAGE_ICON.get(group['stage_rank'], '')} [{mkt}] {cust}  ·  {group['SO_ID']}  ·  "
+             f"{n}라인  ·  {impact}  ·  {group['stage']}  ·  {group['sync_time']}")
+    with st.expander(title, expanded=False):
+        st.markdown(
+            f"**업체**: {cust}  ·  **Customer PO**: `{group['customer_po'] or '(없음)'}`  ·  "
+            f"**SO**: `{group['SO_ID']}`"
+        )
+        table = pd.DataFrame([{
+            "Line": "" if pd.isna(line.line) else int(line.line),
+            "변경": " / ".join(f"{f}: {o} → {n_}" for f, o, n_ in line.changes),
+            "금액 영향": "확인 불가" if pd.isna(line.impact) else _signed(line.impact),
+            "단계": " · ".join(filter(None, [line.stage, line.so_state])),
+        } for line in group["lines"].itertuples()])
+        st.dataframe(table, width='stretch', hide_index=True)
+        st.caption(f"sync_id={group['sync_id']}  ·  변경자: {group['actor'] or '-'}  ·  {group['sync_time']}")
+
+        # form — 사유를 입력한 직후 버튼을 눌러도 그 값이 같이 제출된다
+        with st.form(f"ack_form_{group['key']}", border=False):
+            note = st.text_input(
+                "사유 (선택)", key=f"ack_note_{group['key']}",
+                placeholder="예: 고객 요청으로 단가 조정 / 수량 오기 정정",
+            )
+            if st.form_submit_button(f"✅ {n}건 확인 완료" if n > 1 else "✅ 확인 완료"):
+                if _ack_so_changes(group["log_ids"], note):
+                    # ack은 원본에 썼으므로 읽기용 스냅샷도 다시 떠야 반영된다
+                    _db_snapshot.clear()
+                    load_so_unauth_changes.clear()
+                    load_so_ack_history.clear()
+                    st.rerun()
+                else:
+                    st.error("확인 처리 실패 — 잠시 후 다시 시도하세요.")
+
+
+def _render_so_ack_history(market: str) -> None:
+    """확인 이력 — 확인한 변경은 카드에서 사라지므로 여기서만 다시 볼 수 있다"""
+    history = load_so_ack_history()
+    if not history.empty and market != "전체":
+        history = history[history["시장"] == market]
+    with st.expander(f"확인 이력 ({len(history):,}건)"):
+        if history.empty:
+            st.caption("아직 확인한 변경이 없습니다.")
+            return
+        st.dataframe(history.drop(columns="sync_log_id"), width='stretch', hide_index=True)
+        st.caption("최신 확인이 위 · 최근 500건까지")
 
 
 def _render_delivery_calendar(so_pending: pd.DataFrame, dn: pd.DataFrame):
@@ -5140,6 +5569,180 @@ def pg_orderbook(market, sectors, customers, **_):
 # ═══════════════════════════════════════════════════════════════
 # Page: 동기화 로그
 # ═══════════════════════════════════════════════════════════════
+# ── '주요 변경' — 사람이 값을 고친 변경만 ───────────────────────────────
+# 동기화 로그의 '수정'은 대부분 사람이 고친 것이 아니다 (2026-11 실측 30일: 4,499건 중 25%는 수식 열만
+# 바뀌었고 35%는 빈칸 채움). 숨기는 것:
+#   · 빈칸 → 값 (최초 입력). **값을 지운 것(값 → 빈칸)은 남긴다** — 드물고(30일 11건), 인식일을 지우면
+#     매출 인식이 취소된다 (90일 실측: 해외 선적일을 지운 15건)
+#   · 자동으로 바뀌는 열 — 아래 목록
+#   · Status — 진행 표시다 (SO는 출고 수량에서 파생, PO는 Confirmed → Invoiced Pxx). 단 취소·보류가
+#     걸린 전환은 남긴다 (잔고를 움직인다 — 90일 93건)
+#
+# 자동 열 = 수식 열. 2026-11-13 워크북 실측이다(openpyxl로 데이터 앞 5행에 수식이 있는 열). 원인이 된
+# 입력 열의 변경은 그 시트에 따로 남는다. 목록이 낡으면(새 수식 열이 생기면) 잡음이 **보이는** 쪽으로 틀린다.
+# DN의 Unit Price·Total Sales(·KRW)는 수식 열이지만 넣지 않았다 — 이미 나간 매출이 달라진 것이고 드물다
+# (90일 2건). 숨기면 수식을 값으로 덮어쓴 경우를 '단가 불일치' 검사의 문턱(1원·0.1%) 아래에서 놓친다.
+_AUTO_COLUMNS_ANY_SHEET = frozenset({"Seq", "_row_seq"})   # 정렬용 보조값 · 내부 행 순번
+_AUTO_COLUMNS: dict[str, frozenset[str]] = {
+    "SO_국내": frozenset({"Status", "EXW NOAH", "Expected delivery date", "Sales amount"}),
+    "SO_해외": frozenset({"Status", "EXW NOAH", "Expected delivery date", "Sales amount",
+                        "Sales amount KRW", "Sector"}),
+    "PO_국내": frozenset({"Status", "Total ICO", "Turns"}),
+    "PO_해외": frozenset({"Status", "Total ICO"}),
+    "DN_국내": frozenset({"AX Project no", "Business registration number", "Customer PO",
+                        "Customer name", "Item", "Order type", "PO_ID", "선수금 세금계산서 발행일"}),
+    "DN_해외": frozenset({"AX Project number", "Currency", "Customer PO", "Customer name",
+                        "Delivery address", "Item", "RCK PO"}),
+}
+_STOP_STATUSES = frozenset(EXCLUDED_SO_STATUSES) | {"Holding"}   # SO는 Hold, PO는 Holding이라 적는다
+
+_SO_SHEET_SET = frozenset({"SO_국내", "SO_해외"})
+_PO_SHEET_SET = frozenset({"PO_국내", "PO_해외"})
+_DN_SHEET_SET = frozenset({"DN_국내", "DN_해외"})
+# 범위 프리셋: 이름 → (시트 집합 또는 None=전부, 열 집합 또는 None=전부). 첫 항목이 기본값.
+_MAJOR_SCOPES: dict[str, tuple[frozenset | None, frozenset | None]] = {
+    "전부": (None, None),
+    "판매 수량·단가": (_SO_SHEET_SET, frozenset({"Item qty", "Sales Unit Price", "Currency"})),
+    "매입 수량·단가": (_PO_SHEET_SET, frozenset({"Item qty", "ICO Unit"})),
+    "납기·일정": (None, frozenset({"Requested delivery date", "공장 EXW date", "선적 예정일", "공장 픽업일"})),
+    "출고·매출 인식": (_DN_SHEET_SET, frozenset({"출고일", "세금계산서 발행일", "선적일", "Qty",
+                                             "Unit Price", "Total Sales", "Total Sales KRW"})),
+    "거래처·주문번호": (None, frozenset({"Customer name", "Customer PO", "Business registration number",
+                                      "AX Project number", "AX PO", "SO_ID", "PO_ID"})),
+    "취소·보류": (_SO_SHEET_SET | _PO_SHEET_SET, frozenset({"Status"})),
+}
+
+# 신규·삭제 행을 몇 줄로 줄일 때 먼저 보여 줄 열 — 무엇을·얼마나·얼마에·언제. 있는 것만, 이 순서로
+_KEY_FIELDS = (
+    "Customer name", "Customer PO", "Item name", "Item", "Item qty", "Qty",
+    "Sales Unit Price", "ICO Unit", "Sales amount", "Total ICO", "Total Sales",
+    "Requested delivery date", "공장 EXW date", "출고일", "선적일", "세금계산서 발행일",
+    "Period", "Status",
+)
+
+
+def _same_value(old, new) -> bool:
+    """표기만 다른 같은 값인가 — 앞뒤 공백, 날짜의 ' 00:00:00', 숫자 표기('1' vs '1.0').
+
+    셀 서식만 바꿔도 로그에는 '수정'으로 남는다 (실측: 한 동기화에서 요청납기 18건이
+    `2026-11-15` → `2026-11-15 00:00:00`).
+    """
+    if old == new:
+        return True
+    before, after = _to_number(old), _to_number(new)
+    if before is not None and after is not None:
+        return before == after
+
+    def _text(v) -> str:
+        text = str(v).strip()
+        return text[:-9] if text.endswith(" 00:00:00") else text
+
+    return not _is_blank(old) and not _is_blank(new) and _text(old) == _text(new)
+
+
+def _is_major_change(sheet: str, col: str, old, new) -> bool:
+    """그 열의 변경이 '사람이 값을 고친 것'인가 — 위 규칙. 타임라인 카드도 같은 판정을 쓴다."""
+    if _same_value(old, new):
+        return False
+    if col == "Status" and col in _AUTO_COLUMNS.get(sheet, ()):
+        # 빈칸 검사보다 먼저 — `None → Cancelled`도 취소다
+        return bool({str(v).strip() for v in (old, new) if not _is_blank(v)} & _STOP_STATUSES)
+    if _is_blank(old):
+        return False
+    return col not in _AUTO_COLUMNS_ANY_SHEET and col not in _AUTO_COLUMNS.get(sheet, ())
+
+
+def _major_changes(log_df: pd.DataFrame, scope: str = "전부") -> pd.DataFrame:
+    """동기화 로그에서 주요 변경만 — 값을 고친 '수정' (+ `scope='전부'`면 '삭제').
+
+    남은 '수정' 행의 `changes_json`은 **남은 열만으로 좁혀서** 돌려준다. 뒤의 요약·추이·히트맵·표가
+    그 결과를 그대로 쓰게 하려는 것이다. 한글 열 이름은 그대로 둔다(`ensure_ascii=False`) —
+    화면의 '컬럼명' 검색이 이 문자열을 부분 일치로 본다. 원본 DataFrame(캐시)은 건드리지 않는다.
+    """
+    sheets, columns = _MAJOR_SCOPES[scope]
+    keep: list[int] = []
+    narrowed: list[str | None] = []
+    for pos, (sheet, ctype, raw) in enumerate(
+            zip(log_df["sheet_name"], log_df["change_type"], log_df["changes_json"])):
+        if ctype == "삭제":
+            if scope == "전부":
+                keep.append(pos)
+                narrowed.append(raw)
+            continue
+        if ctype != "수정" or (sheets is not None and sheet not in sheets):
+            continue
+        try:
+            changes = json.loads(raw) if raw else {}
+        except Exception:
+            continue
+        if not isinstance(changes, dict):
+            continue
+        kept = {
+            col: ch for col, ch in changes.items()
+            if isinstance(ch, dict) and (columns is None or col in columns)
+            and _is_major_change(sheet, col, ch.get("old"), ch.get("new"))
+        }
+        if kept:
+            keep.append(pos)
+            narrowed.append(json.dumps(kept, ensure_ascii=False))
+    out = log_df.iloc[keep].copy()
+    out["changes_json"] = pd.Series(narrowed, index=out.index, dtype=object)
+    return out
+
+
+def _pct_change(old, new) -> float | None:
+    """숫자끼리 바뀐 것이면 변동률(%) — 단가 +152% 같은 것을 위로 올려 보려고. 아니면 None"""
+    before, after = _to_number(old), _to_number(new)
+    if before is None or after is None or before == 0:
+        return None
+    return (after - before) / abs(before) * 100
+
+
+def _key_values(body: dict, limit: int = 5) -> list[tuple[str, str]]:
+    """행 내용에서 먼저 보여 줄 값 `[(열, 값)]` — `_KEY_FIELDS` 순서로 있는 것만, 하나도 없으면 앞에서부터"""
+    def _text(v) -> str:
+        return str(v).replace(" 00:00:00", "")
+
+    picked = [(k, _text(body[k])) for k in _KEY_FIELDS if not _is_blank(body.get(k))][:limit]
+    if picked:
+        return picked
+    return [(k, _text(v)) for k, v in body.items() if not _is_blank(v)][:limit]
+
+
+_MAJOR_DETAIL_COLUMNS = ["동기화시각", "시트", "유형", "PK", "컬럼", "이전값", "변경값", "변동률(%)", "사용자"]
+
+
+def _major_detail(df: pd.DataFrame, live_ids=None) -> pd.DataFrame:
+    """주요 변경 상세 표 — 수정은 바뀐 열마다 한 줄(+변동률), 삭제는 한 줄(문서째/행 + 무엇이었나)"""
+    rows = []
+    for r in df.itertuples():
+        common = {"동기화시각": r.sync_time, "시트": r.sheet_name, "유형": r.change_type,
+                  "PK": r.pk, "사용자": r.actor or ""}
+        if r.change_type == "삭제":
+            try:
+                snap = json.loads(r.row_snapshot_json) if r.row_snapshot_json else {}
+            except Exception:
+                snap = {}
+            rows.append({**common, "컬럼": _delete_kind(r.sheet_name, r.pk_json, live_ids),
+                         "이전값": " · ".join(f"{k}: {v}" for k, v in _key_values(snap)),
+                         "변경값": "", "변동률(%)": None})
+            continue
+        try:
+            changes = json.loads(r.changes_json) if r.changes_json else {}
+        except Exception:
+            continue
+        for col, ch in changes.items():
+            old, new = (ch.get("old"), ch.get("new")) if isinstance(ch, dict) else (None, None)
+            rows.append({**common, "컬럼": col,
+                         "이전값": "" if old is None else str(old),
+                         "변경값": "" if new is None else str(new),
+                         "변동률(%)": _pct_change(old, new)})
+    out = pd.DataFrame(rows, columns=_MAJOR_DETAIL_COLUMNS)
+    # 숫자 열로 둔다 — None이 섞인 object 열이면 화면에 'None'이 찍히고 정렬도 글자순이 된다
+    out["변동률(%)"] = pd.to_numeric(out["변동률(%)"], errors="coerce").astype(float)
+    return out
+
+
 def _explode_changes(df: pd.DataFrame) -> pd.DataFrame:
     """record 단위 _sync_log 행 → 컬럼별 표시 행으로 펼침.
 
@@ -5198,14 +5801,20 @@ def _explode_changes(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out)
 
 
-def _changes_summary(row) -> str:
-    """record 1행에 대한 변경 요약 텍스트 (테이블 컴팩트 뷰용)."""
+def _changes_summary(row, live_ids=None) -> str:
+    """record 1행에 대한 변경 요약 텍스트 (테이블 컴팩트 뷰용).
+
+    `live_ids`(`load_live_doc_ids`)를 주면 삭제를 '문서째 삭제'/'행 삭제'로 가른다.
+    """
     ctype = row["change_type"]
+    if ctype == "재적재":
+        return "재적재 (PK 정의 변경 — 데이터 변경 아님)"
     try:
         if ctype == "삭제":
             snap = json.loads(row["row_snapshot_json"]) if row["row_snapshot_json"] else {}
             n = len(snap)
-            return f"삭제 (스냅샷 {n}컬럼)" if n else "삭제 (스냅샷 없음)"
+            kind = _delete_kind(row["sheet_name"], row.get("pk_json"), live_ids)
+            return f"{kind} (스냅샷 {n}컬럼)" if n else f"{kind} (스냅샷 없음)"
         ch = json.loads(row["changes_json"]) if row["changes_json"] else {}
     except Exception:
         return "(파싱 실패)"
@@ -5220,34 +5829,35 @@ def _changes_summary(row) -> str:
     return f"{head}" + (f" 외 {n-2}개" if n > 2 else "")
 
 
-def _timeline_event_summary(row, max_inline: int = 3) -> tuple[str, str | None]:
-    """타임라인 카드용 변경 요약 → (markdown, 전체 JSON 또는 None).
+def _timeline_event_summary(row, live_ids=None, max_inline: int = 4):
+    """타임라인 카드용 변경 요약 → (markdown, 전체 내용 표 또는 None).
 
-    신규/삭제: 첫 N개 컬럼값, 수정: 'col: old → new' 첫 N개.
+    신규/삭제: 그 행이 무엇이었나 — 핵심 열(`_KEY_FIELDS`: 품목·수량·단가·금액·일자) 먼저.
+               딕셔너리 앞에서부터 자르면 `PO_ID, SO_ID, Order type`처럼 번호만 나온다.
+    수정: 사람이 값을 고친 열(`_is_major_change`) 먼저 — 수식 열·빈칸 채움은 뒤로.
+    삭제는 `live_ids`(`load_live_doc_ids`)가 있으면 문서째인지 행만인지 가른다.
     """
     ctype = row["change_type"]
+    sheet = row["sheet_name"]
 
     def _parse(key: str):
         raw = row.get(key)
         if not raw:
             return {}
         try:
-            return json.loads(raw)
+            parsed = json.loads(raw)
         except Exception:
             return None
+        return parsed if isinstance(parsed, dict) else None
 
-    if ctype == "신규":
-        ch = _parse("changes_json")
-        if ch is None:
-            return "(파싱 실패)", None
-        if not ch:
-            return "✨ **신규 등록** (컬럼 정보 없음)", None
-        items = list(ch.items())
-        head = items[:max_inline]
-        lines = [f"- **{k}**: `{v}`" for k, v in head]
-        more = f"\n- _외 {len(items) - max_inline}개 컬럼_" if len(items) > max_inline else ""
-        body = f"✨ **신규 등록** ({len(items)}개 컬럼)\n" + "\n".join(lines) + more
-        return body, json.dumps(ch, ensure_ascii=False, indent=2)
+    def _more(total: int, shown: int) -> str:
+        return f"\n- _외 {total - shown}개 컬럼_" if total > shown else ""
+
+    def _shown(v) -> str:
+        return "_(비어있음)_" if v in (None, "") else f"`{v}`"
+
+    if ctype == "재적재":
+        return "🔁 **재적재** — PK 정의가 바뀌어 테이블을 다시 실었습니다 (데이터가 바뀐 것이 아닙니다)", None
 
     if ctype == "수정":
         ch = _parse("changes_json")
@@ -5255,48 +5865,57 @@ def _timeline_event_summary(row, max_inline: int = 3) -> tuple[str, str | None]:
             return "(파싱 실패)", None
         if not ch:
             return "✏️ **수정** (변경 내용 없음)", None
-        items = list(ch.items())
-        head = items[:max_inline]
-        lines = []
-        for k, v in head:
-            old = v.get("old") if isinstance(v, dict) else None
-            new = v.get("new") if isinstance(v, dict) else None
-            old_s = "_(비어있음)_" if old in (None, "") else f"`{old}`"
-            new_s = "_(비어있음)_" if new in (None, "") else f"`{new}`"
-            lines.append(f"- **{k}**: {old_s} → {new_s}")
-        more = f"\n- _외 {len(items) - max_inline}개 컬럼_" if len(items) > max_inline else ""
-        body = f"✏️ **수정** ({len(items)}개 컬럼)\n" + "\n".join(lines) + more
-        return body, json.dumps(ch, ensure_ascii=False, indent=2)
 
-    # 삭제
-    snap = _parse("row_snapshot_json")
-    if snap is None:
-        return "🗑️ **삭제** (스냅샷 파싱 실패)", None
-    if not snap:
-        return "🗑️ **삭제** (스냅샷 없음)", None
-    items = list(snap.items())
-    head = items[:max_inline]
-    lines = [f"- **{k}**: `{v}`" for k, v in head]
-    more = f"\n- _외 {len(items) - max_inline}개 컬럼_" if len(items) > max_inline else ""
-    body = f"🗑️ **삭제** (직전 스냅샷 {len(items)}개 컬럼)\n" + "\n".join(lines) + more
-    return body, json.dumps(snap, ensure_ascii=False, indent=2)
+        def _pair(v):
+            return (v.get("old"), v.get("new")) if isinstance(v, dict) else (None, None)
+
+        # 안정 정렬 — 주요 열이 앞으로, 그 안에서는 원래 순서
+        items = sorted(ch.items(), key=lambda kv: not _is_major_change(sheet, kv[0], *_pair(kv[1])))
+        lines = [f"- **{k}**: {_shown(_pair(v)[0])} → {_shown(_pair(v)[1])}" for k, v in items[:max_inline]]
+        body = f"✏️ **수정** ({len(items)}개 컬럼)\n" + "\n".join(lines) + _more(len(items), max_inline)
+        detail = pd.DataFrame(
+            [{"컬럼": k, "이전값": "" if _pair(v)[0] is None else str(_pair(v)[0]),
+              "변경값": "" if _pair(v)[1] is None else str(_pair(v)[1])} for k, v in items],
+            columns=["컬럼", "이전값", "변경값"])
+        return body, detail
+
+    if ctype == "신규":
+        head, empty = "✨ **신규 등록**", "컬럼 정보 없음"
+        data = _parse("changes_json")
+    else:
+        kind = _delete_kind(sheet, row.get("pk_json"), live_ids)
+        note = {"문서째 삭제": " — 지금 이 시트에 그 번호가 없습니다",
+                "행 삭제": " — 문서는 남아 있습니다 (라인 정리·재키잉)"}.get(kind, "")
+        head, empty = f"🗑️ **{kind}**{note}", "스냅샷 없음"
+        data = _parse("row_snapshot_json")
+    if data is None:
+        return f"{head} (파싱 실패)", None
+    if not data:
+        return f"{head} ({empty})", None
+    picked = _key_values(data, max_inline)
+    lines = [f"- **{k}**: `{v}`" for k, v in picked]
+    body = f"{head} ({len(data)}개 컬럼)\n" + "\n".join(lines) + _more(len(data), len(picked))
+    detail = pd.DataFrame([{"컬럼": k, "값": "" if v is None else str(v)} for k, v in data.items()],
+                          columns=["컬럼", "값"])
+    return body, detail
 
 
 def _render_order_timeline() -> None:
     """주문번호 하나에 대한 SO↔PO↔DN 변경 이력 타임라인 카드."""
     st.markdown(
-        "**주문번호 하나**(SO/PO/DN 중)를 입력하면 연관된 모든 시트의 변경 이력을 "
-        "시간순 카드로 보여줍니다."
+        "**번호 하나**(SO/PO/DN 번호, 또는 고객 PO·AX Project 번호)를 입력하면 연관된 모든 시트의 "
+        "변경 이력을 시간순 카드로 보여줍니다."
     )
 
     order_id = st.text_input(
         "주문번호",
-        placeholder="예: ND-0429, SOD-2026-0427, DND-2026-0001, NO-0001",
+        placeholder="예: SOD-2026-0427, ND-0429, DND-2026-0001, 고객 PO 번호, 82-15689.001",
         key="timeline_order_id",
+        help="고객 PO·AX Project 번호는 전체가 일치해야 합니다 (대소문자·앞뒤 공백은 무시).",
     )
 
     if not order_id.strip():
-        st.info("👆 주문번호를 입력하세요.")
+        st.info("👆 번호를 입력하세요.")
         return
 
     related = resolve_related_ids(order_id.strip())
@@ -5309,10 +5928,10 @@ def _render_order_timeline() -> None:
         st.info("동기화 로그가 비어 있습니다.")
         return
 
-    # PK 전체 토큰을 연관 ID 집합과 대조 — 첫 토큰만 보면 DN의 SO_ID(index 1)나
-    # 삭제(prune)된 DN 이력을 놓친다. _pk_tokens가 빈값/깨진 JSON도 안전 처리.
+    # PK의 문서 번호 전부를 연관 ID 집합과 대조 — 첫 토큰만 보면 DN의 SO_ID(index 1)나
+    # 삭제(prune)된 DN 이력을 놓친다. 라인 번호·행 순번은 빼고 본다(`_pk_doc_ids`).
     rel = set(related)
-    mask = log_df["pk_json"].apply(lambda j: any(t in rel for t in _pk_tokens(j)))
+    mask = log_df["pk_json"].apply(lambda j: any(t in rel for t in _pk_doc_ids(j)))
     events = log_df[mask].copy()
 
     if events.empty:
@@ -5371,8 +5990,9 @@ def _render_order_timeline() -> None:
         "SO_국내": "🛒", "SO_해외": "🛒",
         "PO_국내": "🏭", "PO_해외": "🏭",
         "DN_국내": "🚚", "DN_해외": "🚚",
-        "선수금_국내": "💰",
+        "PMT_국내": "💰",
     }
+    live_ids = load_live_doc_ids()   # 삭제가 문서째인지 행만인지
 
     prev_date = None
     for _, r in events.iterrows():
@@ -5398,7 +6018,7 @@ def _render_order_timeline() -> None:
         s_emoji = sheet_emoji.get(sheet, "📄")
         sync_id = r["sync_id"]
 
-        summary, full_json = _timeline_event_summary(r)
+        summary, detail = _timeline_event_summary(r, live_ids)
 
         with st.container(border=True):
             top = st.columns([1, 5])
@@ -5410,21 +6030,37 @@ def _render_order_timeline() -> None:
             with top[1]:
                 st.markdown(f"**{s_emoji} {sheet}** · `{pk}`")
                 st.markdown(summary)
-                if full_json:
-                    with st.expander("전체 JSON 보기"):
-                        st.code(full_json, language="json")
+                if detail is not None:
+                    with st.expander(f"전체 보기 ({len(detail)}개 컬럼)"):
+                        st.dataframe(detail, width='stretch', hide_index=True)
 
 
 def _render_sync_log_explore() -> None:
-    """기존 탐색 뷰 — KPI · 필터 · 세션 요약 · 추이 · 상세 테이블."""
-    range_col, view_col, _pad = st.columns([1, 1, 2])
+    """탐색 뷰 — KPI · 필터 · 세션 요약 · 추이 · 상세 테이블.
+
+    '보기'가 `주요 변경`이면 `_major_changes`로 거른 로그를 아래 화면 전부가 그대로 쓴다.
+    """
+    range_col, show_col, scope_col, view_col = st.columns([1, 1.2, 1.3, 1.8])
     with range_col:
         range_opt = st.selectbox("조회 기간", ["7일", "30일", "90일", "전체"], index=1)
+    with show_col:
+        show = st.radio(
+            "보기", ["전체", "주요 변경"], horizontal=True, index=0, key="sync_log_show",
+            help="주요 변경: 사람이 값을 고친 수정과 삭제만. 최초 입력(빈칸 → 값)·자동으로 바뀌는 열·"
+                 "진행 Status·신규는 뺍니다. 취소·보류가 걸린 Status 변경과 값을 지운 것은 남깁니다.",
+        )
+    major = show == "주요 변경"
+    with scope_col:
+        scope = st.selectbox(
+            "범위", list(_MAJOR_SCOPES), index=0, disabled=not major, key="sync_log_scope",
+            help="주요 변경 가운데 볼 열을 좁힙니다. '매입 수량·단가' = PO의 Item qty·ICO Unit.",
+        )
     with view_col:
         view_mode = st.radio(
             "상세 보기 모드", ["요약 (record 1행)", "펼침 (컬럼 단위)"],
-            horizontal=True, index=0,
-            help="요약: record당 1행, 변경 요약 텍스트. 펼침: 변경된 컬럼마다 1행.",
+            horizontal=True, index=0, disabled=major,
+            help="요약: record당 1행, 변경 요약 텍스트. 펼침: 변경된 컬럼마다 1행. "
+                 "주요 변경 보기에서는 늘 컬럼 단위로 보여줍니다.",
         )
     days_map = {"7일": 7, "30일": 30, "90일": 90, "전체": 0}
     log_df = load_sync_log(days=days_map[range_opt])
@@ -5453,8 +6089,9 @@ def _render_sync_log_explore() -> None:
     with r2c1:
         order_query = st.text_input(
             "🔍 주문 통합 검색",
-            placeholder="SO/PO/DN 번호 중 하나 (예: ND-0429, SOD-2026-0427, DND-2026-0001)",
-            help="입력한 번호와 연관된 SO↔PO↔DN 이력을 함께 표시.",
+            placeholder="SO/PO/DN 번호, 고객 PO, AX Project 번호 (예: SOD-2026-0427, ND-0429)",
+            help="입력한 번호와 연관된 SO↔PO↔DN 이력을 함께 표시. "
+                 "고객 PO·AX Project 번호는 전체가 일치해야 합니다.",
         )
     with r2c2:
         pk_query = st.text_input(
@@ -5470,6 +6107,26 @@ def _render_sync_log_explore() -> None:
         )
 
     filtered = log_df
+    if major:
+        filtered = _major_changes(log_df, scope)
+        n_edit = int((log_df["change_type"] == "수정").sum())
+        n_del = int((log_df["change_type"] == "삭제").sum())
+        st.caption(
+            f"주요 변경 **{len(filtered):,}건** (범위: {scope}) — 조회 기간의 수정 {n_edit:,}건·삭제 {n_del:,}건 중. "
+            "이 보기에는 수정·삭제만 있습니다 (위 KPI는 전체 기준)."
+        )
+        with st.expander("주요 변경에서 숨기는 것"):
+            st.markdown(
+                "- **최초 입력** (빈칸 → 값). 값을 지운 것(값 → 빈칸)은 보입니다.\n"
+                "- **신규 행**\n"
+                "- **Status** — 진행 표시라서. 단 취소·보류"
+                f"({', '.join(sorted(_STOP_STATUSES))})가 걸린 전환은 보입니다.\n"
+                "- **자동으로 바뀌는 열** (수식 열 — 2026-11-13 워크북 기준. 원인이 된 입력 열의 변경은 "
+                "그 시트에 따로 남습니다):\n"
+                + "\n".join(f"  - `{sheet}`: {', '.join(sorted(cols - {'Status'}))}"
+                            for sheet, cols in _AUTO_COLUMNS.items())
+                + f"\n  - 모든 시트: {', '.join(sorted(_AUTO_COLUMNS_ANY_SHEET))}"
+            )
     if sheet_sel:
         filtered = filtered[filtered["sheet_name"].isin(sheet_sel)]
     if type_sel:
@@ -5479,10 +6136,10 @@ def _render_sync_log_explore() -> None:
         related = resolve_related_ids(order_query)
         if related:
             st.caption(f"연관 ID {len(related)}개: `{'`, `'.join(related)}`")
-            # PK 전체 토큰을 연관 ID 집합과 대조 (삭제된 DN의 SO_ID 토큰까지 매칭)
+            # PK의 문서 번호 전부를 연관 ID 집합과 대조 (삭제된 DN의 SO_ID까지 매칭, 라인 번호는 제외)
             rel = set(related)
             mask = filtered["pk_json"].apply(
-                lambda j: any(t in rel for t in _pk_tokens(j))
+                lambda j: any(t in rel for t in _pk_doc_ids(j))
             )
             filtered = filtered[mask]
         else:
@@ -5676,9 +6333,25 @@ def _render_sync_log_explore() -> None:
     st.subheader(f"상세 (필터 결과 {len(filtered):,} record)")
     max_rows = st.slider("표시 record 수", 100, 5000, 500, step=100)
     page = filtered.head(max_rows).copy()
+    live_ids = load_live_doc_ids()   # 삭제가 문서째인지 행만인지
+
+    if major:
+        # 바뀐 컬럼마다 한 줄 + 변동률(숫자일 때) — 열 머리를 눌러 큰 변동부터 볼 수 있다
+        detail = _major_detail(page, live_ids)
+        st.dataframe(
+            detail, width='stretch', hide_index=True,
+            column_config={"변동률(%)": st.column_config.NumberColumn(format="%.1f%%")},
+        )
+        st.download_button(
+            "주요 변경 CSV 다운로드 (컬럼 단위)",
+            data=_major_detail(filtered, live_ids).to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"sync_log_major_{_TODAY.strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+        )
+        return
 
     if view_mode.startswith("요약"):
-        page["변경 요약"] = page.apply(_changes_summary, axis=1)
+        page["변경 요약"] = page.apply(lambda r: _changes_summary(r, live_ids), axis=1)
         compact = page[[
             "sync_time", "sync_id", "actor", "sheet_name", "change_type", "pk", "변경 요약",
         ]].copy()
@@ -5715,6 +6388,221 @@ def pg_sync_log(**_):
         _render_sync_log_explore()
     with tab_timeline:
         _render_order_timeline()
+
+
+# ═══════════════════════════════════════════════════════════════
+# Page: 정합성 — 0이어야 하는 것 + 마감 후 변동
+# ═══════════════════════════════════════════════════════════════
+_STATUS_ICON = {"정상": "✅", "문제": "🔴", "실패": "⚠️"}
+
+# Order Book 잔고에 들어가는 시트 — PO는 잔고와 무관하다
+_LEDGER_SHEETS = ("SO_국내", "SO_해외", "DN_국내", "DN_해외")
+# 신규·삭제 이벤트를 한 줄로 줄일 때 보여 줄 값 (잔고를 움직이는 열). 표시용이지 산식이 아니다
+_LEDGER_FIELDS = ("Period", "Status", "Item qty", "Sales amount", "Sales amount KRW",
+                  "Qty", "Total Sales", "세금계산서 발행일", "선적일")
+
+
+def _sync_freshness() -> tuple[datetime | None, datetime | None]:
+    """(마지막 동기화 시각, Excel이 그 뒤에 수정됐으면 그 시각) — CLI 정합성 검사와 같은 판정"""
+    conn = _conn()
+    if not conn:
+        return None, None
+    try:
+        synced = last_sync_time(conn)
+    finally:
+        conn.close()
+    return synced, excel_edited_after(synced, NOAH_SO_PO_DN_FILE)
+
+
+def _render_integrity_checks() -> None:
+    """검사 탭 — `integrity.CHECKS` 전부. 0건이 정상이다."""
+    synced, edited = _sync_freshness()
+    if synced is not None:
+        st.caption(f"데이터 기준: {synced:%Y-%m-%d %H:%M} (마지막 DB 동기화)")
+    if edited is not None:
+        st.warning(
+            f"Excel이 마지막 동기화 이후 수정됐습니다 ({edited:%Y-%m-%d %H:%M}). "
+            "그 뒤에 고친 내용은 아직 DB에 없습니다 — DB Sync 후 다시 보세요."
+        )
+
+    checks = load_integrity_checks()
+    if not checks:
+        st.error("검사를 실행하지 못했습니다 — DB를 열 수 없습니다.")
+        return
+
+    problems = [c for c in checks if c["status"] == "문제"]
+    failed = [c for c in checks if c["status"] == "실패"]
+    c1, c2, c3 = st.columns(3)
+    c1.metric("검사", f"{len(checks)}개")
+    c2.metric("문제", f"{len(problems)}개")
+    c3.metric("실패", f"{len(failed)}개", help="검사 자체가 못 돈 것 — 0건이 아닙니다")
+    if not problems and not failed:
+        st.success(f"모두 정상 — 0이어야 하는 것 {len(checks)}가지가 전부 0건입니다.")
+
+    summary = pd.DataFrame([{
+        "검사": c["title"],
+        "상태": f"{_STATUS_ICON.get(c['status'], '')} {c['status']}",
+        "건수": "-" if c["error"] else f"{c['count']:,}",
+    } for c in checks])
+    st.dataframe(summary, width='stretch', hide_index=True)
+
+    for c in checks:
+        if c["status"] == "정상":
+            continue
+        if c["error"]:
+            st.subheader(f"⚠️ {c['title']} — 검사 실패")
+            st.caption(c["why"])
+            st.error(f"검사를 돌리지 못했습니다 (0건이 아닙니다): {c['error']}")
+        else:
+            st.subheader(f"🔴 {c['title']} — {c['count']:,}건")
+            st.caption(c["why"])
+            st.dataframe(c["rows"], width='stretch', hide_index=True)
+
+    with st.expander("검사별 설명 — 무엇을 보고, 걸리면 무엇을 고치나"):
+        for c in checks:
+            st.markdown(f"**{c['title']}** — {c['why']}")
+    st.caption(
+        "`check_data.py`(메뉴 [V])와 같은 함수라 건수가 같습니다. "
+        "과다출고·단가 불일치의 DN 라인별 내역은 '오늘의 현황 → SO/DN 불일치'에 있습니다."
+    )
+
+
+def _signed(v: float) -> str:
+    """부호를 붙인 원 단위 금액 — 변동분 표시용 (0은 부호 없이)"""
+    return "0" if abs(v) < 0.5 else f"{v:+,.0f}"
+
+
+def _events_after_close(log_df: pd.DataFrame, closed_at: str, so_id: str) -> pd.DataFrame:
+    """마감 시각 이후 SO/DN 시트 이벤트 중 PK에 `so_id`가 있는 것 (오래된 것부터).
+
+    PK의 모든 자리와 대조한다 — DN은 SO_ID가 둘째 자리다 (`_pk_tokens` 참조).
+    """
+    if log_df.empty:
+        return log_df
+    after = pd.to_datetime(log_df["sync_time"], errors="coerce") > pd.Timestamp(closed_at)
+    ledger = log_df["sheet_name"].isin(_LEDGER_SHEETS)
+    mine = log_df["pk_json"].apply(lambda j: so_id in _pk_doc_ids(j))
+    return log_df[after & ledger & mine].sort_values("id")
+
+
+def _ledger_values(row) -> str:
+    """신규·삭제 이벤트 한 줄 요약 — 잔고를 움직이는 값만 (전체는 동기화 로그 페이지에)"""
+    raw = row["changes_json"] if row["change_type"] == "신규" else row["row_snapshot_json"]
+    try:
+        body = json.loads(raw) if raw else {}
+    except Exception:
+        return "(파싱 실패)"
+    if not isinstance(body, dict) or not body:
+        return "(내용 없음)"
+    parts = [f"{k}: {str(body[k]).replace(' 00:00:00', '')}"
+             for k in _LEDGER_FIELDS if body.get(k) not in (None, "")]
+    return " · ".join(parts)
+
+
+def _render_post_close_drift() -> None:
+    """마감 후 변동 탭 — 금액은 마감 엔진과 같은 식, 이유는 동기화 로그"""
+    drift = load_post_close_drift()
+    if drift is None:
+        st.info("마감 기록이 없습니다 — 월 마감(`close_period.py`) 뒤에 볼 수 있습니다.")
+        return
+    if drift.get("error"):
+        st.error("마감 후 변동을 계산하지 못했습니다 (달라진 것이 없다는 뜻이 아닙니다): "
+                 f"{drift['error']}")
+        return
+
+    period, rows, moved_only = drift["period"], drift["rows"], drift["moved_only"]
+    closed_at = drift["closed_at"]
+    month = f"{int(period[5:7])}월"
+    st.markdown(f"마지막 마감 **{period}** · {pd.Timestamp(closed_at):%Y-%m-%d %H:%M}")
+    st.caption(
+        "마감 스냅샷이 굳은 뒤 원 데이터가 바뀌어 생긴 차이입니다. 다음 마감 때 Variance에 "
+        "**소급 변경분**으로 들어갑니다 — 그 달의 환율 재평가분이 따로 더해지므로 Variance 합계와 "
+        "같지는 않습니다."
+    )
+    moved_note = (f"납기·OS name만 바뀐 주문 {moved_only}건은 금액이 그대로라 뺐습니다."
+                  if moved_only else "")
+    if rows.empty:
+        st.success(" ".join(filter(None, ["마감 뒤 달라진 것이 없습니다.", moved_note])))
+        return
+
+    def _orders(col: str) -> str:
+        return f"{int((rows[col].abs() > 0.5).sum())}개 주문"
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric(f"{month} 수주 변동", _signed(rows["d_input"].sum()),
+              help=f"{_orders('d_input')} — 마감 뒤 등록·수정·취소된 {month} 수주")
+    k2.metric(f"{month} 매출 변동", _signed(rows["d_output"].sum()),
+              help=f"{_orders('d_output')} — 마감 뒤 {month}로 인식된(또는 빠진) 매출")
+    k3.metric("그 밖", _signed(rows["rest"].sum()),
+              help=f"{_orders('rest')} — 이전 달 주문의 변경, 환율 재평가 변화")
+    k4.metric("잔고 변동", _signed(rows["variance"].sum()),
+              help="다음 마감 Variance 중 소급 변경분 (그 달 환율 재평가분은 따로 더해진다)")
+    st.caption(" ".join(filter(None, [
+        f"잔고 변동 = 수주 변동 − 매출 변동 + 그 밖 · 주문 {len(rows)}건.", moved_note])))
+    n_silent = int(((rows["variance"].abs() <= 0.5) & (rows["variance_qty"].abs() <= 0.001)).sum())
+    if n_silent:
+        st.caption(
+            f"잔고 변동이 0인 주문 {n_silent}건은 다음 마감에 아무것도 적히지 않습니다 — "
+            f"스냅샷의 {month} 수주·매출만 지금 값과 다릅니다 (수주와 매출이 같이 들어왔거나, "
+            "FX 시트에서 그 달 환율을 고친 경우)."
+        )
+
+    number_cols = {
+        "snap_ending": "마감 잔고", "live_ending": "지금 잔고", "variance": "잔고 변동",
+        "d_input": f"{month} 수주 변동", "d_output": f"{month} 매출 변동", "rest": "그 밖",
+        "variance_qty": "수량 변동",
+    }
+    view = rows.rename(columns={"market": "시장", "so_id": "SO_ID", "customer": "고객",
+                                **number_cols})
+    view = view[["시장", "SO_ID", "고객", *number_cols.values()]]
+    for col in number_cols.values():
+        view[col] = view[col].round().astype("int64")
+    st.dataframe(
+        view, width='stretch', hide_index=True,
+        column_config={col: st.column_config.NumberColumn(format="localized")
+                       for col in number_cols.values()},
+    )
+
+    # ── 드릴다운: 그 주문에 마감 뒤 무슨 일이 있었나 ──
+    st.subheader("무엇이 바뀌었나")
+    labels = {
+        r.so_id: f"{r.so_id} · {r.customer or '-'} · 잔고 {_signed(r.variance)}"
+        for r in rows.itertuples()
+    }
+    so_id = st.selectbox("주문", list(labels), format_func=labels.get, key="drift_so_id")
+    events = _events_after_close(load_sync_log(days=0), closed_at, so_id)
+    if events.empty:
+        st.info("마감 이후 동기화 로그에 이 주문의 SO/DN 변경이 없습니다. "
+                "환율(FX 시트) 수정이면 '동기화 로그' 페이지에서 FX 시트를 보세요.")
+        return
+
+    edits = events[events["change_type"] == "수정"]
+    others = events[events["change_type"] != "수정"]
+    if not others.empty:
+        compact = others[["sync_time", "sheet_name", "change_type", "pk"]].copy()
+        compact["내용"] = others.apply(_ledger_values, axis=1)
+        compact.columns = ["동기화시각", "시트", "유형", "PK", "내용"]
+        st.caption(f"신규·삭제 {len(compact)}건")
+        st.dataframe(compact, width='stretch', hide_index=True)
+    if not edits.empty:
+        exploded = _explode_changes(edits)[
+            ["동기화시각", "시트", "PK", "컬럼", "이전값", "변경값", "actor"]]
+        exploded.columns = ["동기화시각", "시트", "PK", "컬럼", "이전값", "변경값", "사용자"]
+        st.caption(f"수정 {len(edits)}건 — 바뀐 컬럼마다 한 줄")
+        st.dataframe(exploded, width='stretch', hide_index=True)
+    st.caption("이 주문의 전체 이력은 '동기화 로그 → 주문 타임라인'에서 볼 수 있습니다.")
+
+
+def pg_integrity(**_):
+    st.title("🧭 정합성")
+    st.caption("사이드바의 시장·섹터·고객·기간 필터는 이 페이지에 적용하지 않습니다 — "
+               "걸러서 나온 0건은 정상으로 읽히기 때문입니다.")
+
+    tab_checks, tab_drift = st.tabs(["🔎 검사", "🔒 마감 후 변동"])
+    with tab_checks:
+        _render_integrity_checks()
+    with tab_drift:
+        _render_post_close_drift()
 
 
 if __name__ == "__main__":

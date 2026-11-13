@@ -145,7 +145,7 @@ python close_period.py --status         # 현재 마감 상태
 streamlit run dashboard.py
 ```
 
-8개 페이지로 구성된 비즈니스 KPI 모니터링 대시보드:
+10개 페이지로 구성된 비즈니스 KPI 모니터링 대시보드:
 
 | 페이지 | 내용 |
 |--------|------|
@@ -157,6 +157,8 @@ streamlit run dashboard.py
 | 발주 커버리지 | 발주 대비 수주 커버율 |
 | 수익성 | 마진, 수익률 분석 |
 | Order Book | Executive/Risk/Conversion 3탭, 리드타임 분석 |
+| 정합성 | 0이어야 하는 것 검사(`check_data.py`와 같은 결과), 마감 후 변동 |
+| 동기화 로그 | Excel → DB 변경 이력 탐색, 주문 타임라인 |
 
 ---
 

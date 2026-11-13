@@ -33,9 +33,9 @@ from pathlib import Path
 
 import pandas as pd
 
+from po_generator import integrity
 from po_generator.config import CHECK_OUTPUT_DIR, DB_FILE, NOAH_SO_PO_DN_FILE
-from po_generator.db_schema import get_sync_metadata
-from po_generator.integrity import CheckResult, run_checks
+from po_generator.integrity import CheckResult, last_sync_time, run_checks
 from po_generator.logging_config import setup_logging
 
 # 콘솔에는 검사당 이만큼만 — 나머지는 결과 파일에 있다
@@ -72,29 +72,13 @@ def open_snapshot(db_file: Path) -> sqlite3.Connection:
     return snap
 
 
-def last_sync_time(conn: sqlite3.Connection) -> datetime | None:
-    """마지막 동기화 시각 — 대시보드 사이드바 '데이터 기준'과 같은 값 (테이블별 최신 중 최댓값)"""
-    stamps = []
-    for meta in get_sync_metadata(conn).values():
-        try:
-            stamps.append(datetime.fromisoformat(meta['last_sync']))
-        except (TypeError, ValueError):
-            continue
-    return max(stamps, default=None)
-
-
 def excel_edited_after(synced: datetime | None) -> datetime | None:
     """Excel이 마지막 동기화 뒤에 수정됐으면 그 시각, 아니면 None
 
     DB가 낡으면 이미 고친 문제가 계속 보이거나, 방금 생긴 문제가 안 보인다.
+    판정은 `integrity`에 있다(대시보드 '정합성' 페이지와 공유) — 여기서는 경로만 넘긴다.
     """
-    if synced is None:
-        return None
-    try:
-        edited = datetime.fromtimestamp(NOAH_SO_PO_DN_FILE.stat().st_mtime)
-    except OSError:
-        return None
-    return edited if edited > synced else None
+    return integrity.excel_edited_after(synced, NOAH_SO_PO_DN_FILE)
 
 
 def print_freshness(synced: datetime | None, edited: datetime | None) -> None:
@@ -112,9 +96,7 @@ def print_freshness(synced: datetime | None, edited: datetime | None) -> None:
 # === 콘솔 출력 ==============================================================
 
 def _status(result: CheckResult) -> str:
-    if result.error:
-        return "실패"
-    return "정상" if result.ok else "문제"
+    return result.status
 
 
 def _cell(value) -> str:

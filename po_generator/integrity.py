@@ -26,11 +26,44 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 import pandas as pd
 
 from po_generator.config import EXCLUDED_SO_STATUSES
+from po_generator.db_schema import get_sync_metadata
+
+
+# === 데이터 기준 — DB가 Excel보다 낡았는가 =================================
+#
+# 검사는 DB를 읽으므로 DB가 낡으면 결과도 낡는다 — 이미 고친 문제가 계속 보이거나 방금 생긴
+# 문제가 안 보인다. CLI(`check_data.py`)와 대시보드가 같은 판정을 쓰도록 여기 둔다.
+
+def last_sync_time(conn: sqlite3.Connection) -> datetime | None:
+    """마지막 동기화 시각 — 대시보드 사이드바 '데이터 기준'과 같은 값 (테이블별 최신 중 최댓값)"""
+    stamps = []
+    for meta in get_sync_metadata(conn).values():
+        try:
+            stamps.append(datetime.fromisoformat(meta['last_sync']))
+        except (TypeError, ValueError):
+            continue
+    return max(stamps, default=None)
+
+
+def excel_edited_after(synced: datetime | None, workbook: Path) -> datetime | None:
+    """`workbook`이 마지막 동기화 뒤에 수정됐으면 그 시각, 아니면 None
+
+    모르는 것은 경고하지 않는다 — 동기화 기록이 없거나, 그 PC에 워크북이 없으면(배포판) None.
+    """
+    if synced is None:
+        return None
+    try:
+        edited = datetime.fromtimestamp(Path(workbook).stat().st_mtime)
+    except OSError:
+        return None
+    return edited if edited > synced else None
 
 
 # === SO ↔ DN 라인 (과다출고 / 단가 불일치) ==================================
@@ -439,6 +472,13 @@ class CheckResult:
     @property
     def count(self) -> int:
         return 0 if self.rows is None else len(self.rows)
+
+    @property
+    def status(self) -> str:
+        """정상 / 문제 / 실패 — 콘솔·결과 파일·대시보드가 같은 말을 쓴다"""
+        if self.error:
+            return "실패"
+        return "정상" if self.ok else "문제"
 
 
 def run_checks(conn: sqlite3.Connection,

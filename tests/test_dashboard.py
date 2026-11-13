@@ -774,3 +774,71 @@ class TestAckPersistence:
         """DB 파일이 없으면 실패를 알린다 (빈 DB를 만들어 성공을 가장하지 않음)"""
         monkeypatch.setattr(dashboard, "DB_FILE", tmp_path / "nope.db")
         assert dashboard._ack_so_change(1) is False
+
+
+# ═══════════════════════════════════════════════════════════════
+# 읽기용 스냅샷은 DB마다 따로
+# ═══════════════════════════════════════════════════════════════
+class TestSnapshotIsolation:
+    """다른 DB의 스냅샷이 이 DB의 스냅샷 파일을 덮어쓰면 안 된다.
+
+    사본 이름이 하나로 고정돼 있던 시절(2026-11-13), 테스트가 임시 DB로 `_conn()`을 타자
+    `%TEMP%\noah_dashboard\noah_data.db`가 그 임시 DB로 바뀌었고, 떠 있던 대시보드는 캐시된
+    경로를 그대로 열어 "no such table: so_export"가 됐다 — 원본이 갱신될 때까지 계속.
+    """
+
+    @staticmethod
+    def _tables(path) -> list:
+        conn = sqlite3.connect(str(path))
+        try:
+            return [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+        finally:
+            conn.close()
+
+    def test_two_databases_get_two_snapshot_files(self, tmp_path, monkeypatch):
+        import tempfile
+        temp = tmp_path / "temp"
+        temp.mkdir()
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp))
+        real, other = tmp_path / "noah_data.db", tmp_path / "elsewhere" / "noah_data.db"
+        other.parent.mkdir()
+        for path, table in ((real, "so_domestic"), (other, "only_in_the_other_db")):
+            conn = sqlite3.connect(str(path))
+            conn.execute(f"CREATE TABLE {table} (x)")
+            conn.commit()
+            conn.close()
+
+        dashboard._db_snapshot.clear()
+        try:
+            first = dashboard._db_snapshot(str(real), 1.0, 1)
+            second = dashboard._db_snapshot(str(other), 1.0, 1)   # 파일 이름·시각·크기가 같아도
+            assert first != second
+            assert self._tables(first) == ["so_domestic"], "뒤에 뜬 다른 DB가 덮어쓰면 안 된다"
+            assert self._tables(second) == ["only_in_the_other_db"]
+            assert Path(first).parent == temp / "noah_dashboard"
+        finally:
+            dashboard._db_snapshot.clear()
+
+    def test_conn_reads_the_snapshot_of_its_own_database(self, tmp_path, monkeypatch):
+        import tempfile
+        temp = tmp_path / "temp"
+        temp.mkdir()
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: str(temp))
+        db = tmp_path / "noah_data.db"
+        conn = sqlite3.connect(str(db))
+        conn.execute("CREATE TABLE marker (x)")
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(dashboard, "DB_FILE", db)
+
+        dashboard._db_snapshot.clear()
+        try:
+            conn = dashboard._conn()
+            try:
+                assert conn.execute("SELECT name FROM sqlite_master").fetchall() == [("marker",)]
+            finally:
+                conn.close()
+            assert [p.name for p in (temp / "noah_dashboard").iterdir()] != ["noah_data.db"], \
+                "고정 이름 사본을 다시 만들면 안 된다"
+        finally:
+            dashboard._db_snapshot.clear()

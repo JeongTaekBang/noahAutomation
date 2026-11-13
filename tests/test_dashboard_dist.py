@@ -97,7 +97,7 @@ def test_po_generator_entrypoints_stay_light():
     """
     heavy = {"pandas", "openpyxl", "xlwings", "win32com", "numpy"}
     for rel in ("po_generator/__init__.py", "po_generator/config.py",
-                "po_generator/db_schema.py"):
+                "po_generator/db_schema.py", "po_generator/snapshot.py"):
         found = _toplevel_imports(PROJECT_ROOT / rel) & heavy
         assert not found, (
             f"{rel}가 {found}를 최상위에서 import합니다 — "

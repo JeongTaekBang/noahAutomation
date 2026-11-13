@@ -523,3 +523,138 @@ class SnapshotEngine:
             }
         finally:
             conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 마감 후 변동 — 스냅샷이 굳은 뒤 원 데이터가 바뀐 만큼 (읽기 전용)
+# ═══════════════════════════════════════════════════════════════
+#
+# 대시보드 '정합성 → 마감 후 변동' 탭의 원본. 마지막 마감 스냅샷과 지금 데이터로 다시 계산한
+# 값을 비교한다 — 그 차이는 다음 마감 때 `take_snapshot`이 Variance로 적는다.
+#
+# `take_snapshot`과 **같은 `_ORDER_BOOK_BASE_SQL`·같은 키·같은 문턱**을 쓰지만 코드를 나눠 쓰지는
+# 않는다: 마감 경로는 굳은 값을 쓰는 곳인데 이 기능을 만들 때 스냅샷 테스트가 하나도 없었다.
+# 대신 `tests/test_snapshot_drift.py`가 실제로 다음 달을 마감해 두 값이 원 단위로 같은지 본다.
+#
+# pandas를 쓰지 않는다 — 대시보드 배포판이 이 모듈을 싣는다 (`tests/test_dashboard_dist.py`).
+
+_VARIANCE_QTY_EPS = 0.001   # take_snapshot의 Variance 문턱과 같아야 한다
+_VARIANCE_AMT_EPS = 0.5
+
+
+@dataclass(frozen=True)
+class DriftRow:
+    """주문(SO) 하나가 마지막 마감 뒤 달라진 만큼. `variance = d_input − d_output + rest`"""
+    so_id: str
+    market: str          # 국내 / 해외
+    customer: str
+    snap_ending: float   # 스냅샷이 굳힌 마감월 말 잔고
+    live_ending: float   # 지금 데이터로 다시 계산한 마감월 말 잔고
+    variance: float      # 다음 마감이 Variance에 소급 변경분으로 적을 금액
+    d_input: float       # 마감월 수주(Input)가 달라진 만큼
+    d_output: float      # 마감월 매출(Output)이 달라진 만큼
+    rest: float          # 그 밖 — 이전 달 변경, 환율 재평가 변화
+    variance_qty: float  # 잔고 수량이 달라진 만큼 (다음 마감의 variance_qty)
+
+
+@dataclass(frozen=True)
+class PostCloseDrift:
+    period: str                  # 마지막 마감월 (yyyy-MM)
+    closed_at: str               # 그 마감 시각 (ISO)
+    rows: tuple[DriftRow, ...]   # |variance| 큰 순
+    moved_only: int              # 납기·OS name만 바뀌어 키가 옮겨간 주문 수 (금액·수량 순변동 0 — rows에 없다)
+
+
+def post_close_drift(conn: sqlite3.Connection) -> PostCloseDrift | None:
+    """마지막 마감 이후 달라진 것을 주문별로. 마감 기록이 없으면 None.
+
+    `variance`는 `take_snapshot`과 같은 키(SO_ID, OS name, 납기)·같은 문턱으로 구한 뒤 주문으로
+    합친다. 납기만 바뀐 주문은 옛 키 −X, 새 키 +X라 합치면 0이 되어 빠진다.
+    다음 마감의 Variance **합계와 같지는 않다** — 엔진은 그 달의 환율 재평가분을 같은 컬럼에
+    더해 적는다. 여기 값은 그중 소급 변경분이다.
+
+    분해는 마감월 한 달치만 스냅샷에 남아 있어서 가능한 만큼만 한다: 마감월의 수주·매출이
+    스냅샷과 달라진 만큼(`d_input`, `d_output`)을 떼고 나머지를 `rest`로 둔다. 해외 건을 마감 뒤
+    선적 처리하면 매출은 선적월 환율 재환산액이고 잔고는 수주시점 금액만큼 줄어, 그 차액
+    (환율 재평가분)이 `rest`로 온다.
+
+    `variance`가 0인 주문도 나열한다 — 마감월 숫자는 스냅샷과 다르다. 이런 줄은 다음 마감에
+    아무것도 적히지 않는다: 수주와 매출이 같이 들어온 주문(스냅샷의 그 달 Input·Output만 낡은
+    채 남는다), 마감월 환율을 FX 시트에서 고친 해외 건(`d_output`과 `rest`가 같은 값).
+
+    알려진 한계: 마감월에 0·음수 수량으로 상쇄된 키는 `take_snapshot`의 HAVING에 걸려 스냅샷에
+    없다 — 변경이 없어도 `d_input = d_output ≠ 0`으로 보일 수 있다 (2026-11 실측 0건).
+    """
+    # 한 번도 마감한 적 없는 DB에는 테이블이 없다. OperationalError로 가리면 안 된다 —
+    # DB 잠김도 같은 예외라 '마감 없음'으로 읽힌다.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                    "AND name = 'ob_snapshot_meta'").fetchone() is None:
+        return None
+    last = conn.execute(
+        "SELECT period, closed_at FROM ob_snapshot_meta "
+        "WHERE is_active = 1 ORDER BY period DESC LIMIT 1"
+    ).fetchone()
+    if last is None:
+        return None
+    period, closed_at = last[0], last[1]
+
+    live = conn.execute(_ORDER_BOOK_BASE_SQL + """,
+        target(p) AS (SELECT ?)
+        SELECT og.SO_ID, og.[OS name], og.[Expected delivery date],
+               MIN(og.[Customer name]), MIN(og.구분),
+               SUM(og.Value_Input_qty - og.Value_Output_qty),
+               SUM(og.Value_Input_amount - og.Value_Output_amount + og.Value_FX_amount),
+               SUM(CASE WHEN og.Period = t.p THEN og.Value_Input_amount ELSE 0 END),
+               SUM(CASE WHEN og.Period = t.p THEN og.Value_Output_amount ELSE 0 END)
+        FROM os_grouped og, target t
+        WHERE og.Period <= t.p
+        GROUP BY og.SO_ID, og.[OS name], og.[Expected delivery date]
+    """, (period,)).fetchall()
+    snap = conn.execute("""
+        SELECT SO_ID, [OS name], [Expected delivery date], customer_name, 구분,
+               ending_qty, ending_amount, input_amount, output_amount
+        FROM ob_snapshot
+        WHERE snapshot_period = ?
+    """, (period,)).fetchall()
+
+    # 키 → (잔고 수량, 잔고 금액, 마감월 수주, 마감월 매출)
+    live_by_key = {(r[0], r[1], r[2] or ''): (r[5] or 0, r[6] or 0, r[7] or 0, r[8] or 0) for r in live}
+    snap_by_key = {(r[0], r[1], r[2] or ''): (r[5] or 0, r[6] or 0, r[7] or 0, r[8] or 0) for r in snap}
+    # 표시용 — 지금 데이터에 없으면(마감 뒤 삭제·취소) 스냅샷에 남은 것으로
+    labels: dict[str, tuple[str, str]] = {}
+    for r in snap:
+        labels[r[0]] = (r[3] or '', r[4] or '')
+    for r in live:
+        labels[r[0]] = (r[3] or '', r[4] or '')
+
+    # SO → [스냅샷 잔고, 지금 잔고, variance, d_input, d_output, variance_qty]
+    totals: dict[str, list[float]] = {}
+    key_moved: set[str] = set()
+    zero = (0, 0, 0, 0)
+    for key in live_by_key.keys() | snap_by_key.keys():
+        live_qty, live_amt, live_in, live_out = live_by_key.get(key, zero)
+        snap_qty, snap_amt, snap_in, snap_out = snap_by_key.get(key, zero)
+        total = totals.setdefault(key[0], [0.0] * 6)
+        total[0] += snap_amt
+        total[1] += live_amt
+        if (abs(live_qty - snap_qty) > _VARIANCE_QTY_EPS
+                or abs(live_amt - snap_amt) > _VARIANCE_AMT_EPS):
+            total[2] += live_amt - snap_amt
+            total[5] += live_qty - snap_qty
+            key_moved.add(key[0])
+        total[3] += live_in - snap_in
+        total[4] += live_out - snap_out
+
+    rows = []
+    for so_id, (snap_end, live_end, variance, d_input, d_output, variance_qty) in totals.items():
+        rest = variance - d_input + d_output
+        if (max(abs(variance), abs(d_input), abs(d_output), abs(rest)) <= _VARIANCE_AMT_EPS
+                and abs(variance_qty) <= _VARIANCE_QTY_EPS):
+            continue
+        customer, market = labels.get(so_id, ('', ''))
+        rows.append(DriftRow(so_id, market, customer, snap_end, live_end,
+                             variance, d_input, d_output, rest, variance_qty))
+    rows.sort(key=lambda r: (-abs(r.variance), r.so_id))
+
+    listed = {r.so_id for r in rows}
+    return PostCloseDrift(period, closed_at, tuple(rows), len(key_moved - listed))
