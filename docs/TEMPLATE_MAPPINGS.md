@@ -127,7 +127,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | 항목 | PI | CI |
 |------|----|----|
 | 데이터 소스 | SO_해외 | DN_해외 |
-| Invoice No (G4) | SO_ID | DN_ID |
+| G4 번호 (PI: Invoice No / CI: CI No) | SO_ID | DN_ID |
 | Invoice Date (I4) | 오늘 날짜 | dispatch_date (없으면 today) |
 | ITEM_START_ROW | 18 | **20** (Row 19 = Electric Actuator 카테고리 라벨) |
 | G5 | L/C No | **Incoterms** |
@@ -147,7 +147,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | A11 | Bill to 3 | 청구처 주소 3행 | Customer_해외.Bill to 3 |
 | B14 | From | 출발지 | 고정값 "INCHEON, KOREA" |
 | B15 | Destination | 도착 국가 | bill_to_3 (국가명) |
-| G4 | Invoice No | DN_ID | DN_해외.DN_ID |
+| G4 | CI No | DN_ID (라벨 F4 `CI No:` — 2026-11-16 사용자가 템플릿에서 `Invoice No:`를 바꿨다. PL도 같은 라벨) | DN_해외.DN_ID |
 | G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
 | G16 | PO No (Customer) | 고객 PO 번호 | DN_해외.Customer PO |
 | I4 | Invoice date | **출고일** (없으면 오늘) — FI(선적일)와 다른 건 의도 (2026-11-06 사용자 결정) | DN_해외.출고일 (`dispatch_date`) |
@@ -218,7 +218,7 @@ number로 재정렬하므로 열로 붙여야 코드가 행을 따라간다.
 | A9 | Bill to 1 | 청구처 주소 1행 | Customer_해외.Bill to 1 |
 | A10 | Bill to 2 | 청구처 주소 2행 | Customer_해외.Bill to 2 |
 | A11 | Bill to 3 | 청구처 주소 3행 | Customer_해외.Bill to 3 |
-| G4 | Invoice No | DN_ID | DN_해외.DN_ID |
+| G4 | CI No | DN_ID — CI와 같은 번호 (라벨 F4 `CI No:` — 2026-11-16 사용자가 템플릿에서 `Invoice No:`를 바꿨다) | DN_해외.DN_ID |
 | G5 | Incoterms | 인코텀즈 | SO_해외.Incoterms (DN→SO JOIN) |
 | I4 | Invoice date | **출고일** (없으면 오늘) — FI(선적일)와 다른 건 의도 (2026-11-06 사용자 결정) | DN_해외.출고일 (`dispatch_date`) |
 | I12 | HS CODE | **비움** (라인별 D열로 이동) | — |
@@ -390,7 +390,7 @@ DN_ID 내에 복수 RCK PO가 포함된 경우, `create_fi.py`가 자동 감지�
 | C8 | Date of Issue | 출고일 (없으면 오늘) — CI Invoice Date와 같은 규칙 |
 | C10:C14 | Exporter / Manufacturer | 템플릿 고정 (RCK 3줄 / NOAH 2줄) |
 | C15:C17 | Consignee | Customer_해외.Bill to 1~3 (빈 줄 건너뜀, 다 비면 고객명) |
-| C19 | Commercial Invoice No. | DN_ID (CI Invoice No.와 같다) |
+| C19 | Commercial Invoice No. | DN_ID (CI의 CI No.와 같다) |
 | C20 | Order No. | 표에 실린 SO_ID (중복 없이, 콤마) |
 | C21 | Customer Order No. | 표에 실린 Customer PO (중복 없이, 콤마) |
 | C22 | Means of Transport | `{Shipping Method}, from INCHEON, KOREA` (여럿이면 ` / `) |

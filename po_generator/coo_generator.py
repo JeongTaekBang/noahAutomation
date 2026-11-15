@@ -115,7 +115,7 @@ class CooHeader:
 
 
 def certificate_no(dn_id: str) -> str:
-    """증명서 번호 — DN 하나에 COO 하나라 DN_ID에서 바로 만든다 (CI Invoice No.와 짝)"""
+    """증명서 번호 — DN 하나에 COO 하나라 DN_ID에서 바로 만든다 (CI의 CI No.와 짝)"""
     return f"COO-{dn_id}"
 
 

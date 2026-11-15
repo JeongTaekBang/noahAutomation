@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-11-16: CI·PL 라벨 Invoice No → CI No
+
+사용자가 템플릿 `commercial_invoice.xlsx`·`packing_list.xlsx`의 F4 라벨을 `Invoice No:` → `CI No:`로 직접 바꿨다
+(G4 값은 그대로 DN 번호). 두 파일 모두 바뀐 셀은 그 하나뿐(병합·폭·인쇄영역 동일, HEAD와 셀 단위 대조).
+인보이스 번호는 FI의 INV 번호다. 생성기는 라벨을 읽지 않아 동작 변화는 없고, 이름만 맞췄다 —
+`ci_generator`·`pl_generator`의 `CELL_CI_NO`, `TEMPLATE_MAPPINGS.md` CI·PL G4 행. COO의 `Commercial Invoice No.:`는
+같은 번호를 가리키므로 그대로 둔다. `tests/test_doc_layout.py: TestCiNoLabel`이 두 템플릿의 라벨을 본다.
+
+---
+
 ## 2026-11-13: 주문 흐름 시각화 — 번호 하나로 수주(Input)부터 매출(Output)까지
 
 사용자 요청: "동기화 로그를 좀 비주얼라이즈 할 수 없어. 예를 들면 SOD-2026-1118 검색하면 이게 인풋한 것부터 아웃풋 되는 것까지."

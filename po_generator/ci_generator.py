@@ -44,7 +44,7 @@ CELL_BILL_TO_2 = 'A10'
 CELL_BILL_TO_3 = 'A11'
 CELL_FROM = 'B14'
 CELL_DESTINATION = 'B15'
-CELL_INVOICE_NO = 'G4'
+CELL_CI_NO = 'G4'               # 라벨 F4 'CI No:' (= DN_ID). 인보이스 번호는 FI의 INV 번호
 CELL_INCOTERMS = 'G5'
 CELL_INVOICE_DATE = 'I4'
 CELL_PAYMENT_TERMS = 'I5'
@@ -124,11 +124,11 @@ def _collect_customer_pos(order_data: pd.Series, items_df: pd.DataFrame | None) 
 def _fill_header(ws: xw.Sheet, order_data: pd.Series, items_df: pd.DataFrame | None = None) -> None:
     """헤더 정보 채우기
 
-    CI는 Invoice No = dn_id, Invoice Date = dispatch_date (없으면 today)
+    CI는 CI No = dn_id, Invoice Date = dispatch_date (없으면 today)
     """
-    # Invoice No (dn_id)
+    # CI No (dn_id)
     dn_id = get_value(order_data, 'dn_id', '')
-    ws.range(CELL_INVOICE_NO).value = dn_id
+    ws.range(CELL_CI_NO).value = dn_id
 
     # Invoice Date (dispatch_date, fallback today)
     dispatch_date = get_value(order_data, 'dispatch_date', '')

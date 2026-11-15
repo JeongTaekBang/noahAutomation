@@ -276,6 +276,23 @@ class TestHsTemplateShape:
         )
 
 
+class TestCiNoLabel:
+    """CI·PL의 G4(DN 번호) 라벨은 `CI No:` (2026-11-16 사용자가 두 템플릿에서 바꿨다)
+
+    인보이스 번호는 FI의 INV 번호다. 템플릿이 예전 사본으로 덮여 `Invoice No:`로 돌아가거나
+    한 장만 돌아가면 같은 번호를 두 서류가 다른 이름으로 부른다 — 생성기는 라벨을 읽지
+    않으므로 여기서 본다.
+    """
+
+    @pytest.mark.parametrize('name', TestHsTemplateShape.NAMES)
+    def test_G4_라벨은_CI_No(self, name):
+        path = TestHsTemplateShape.TEMPLATES / name
+        if not path.exists():
+            pytest.skip(f"템플릿 없음: {name}")
+        ws = TestHsTemplateShape._sheet(path)
+        assert ws['F4'].value == 'CI No:', ws['F4'].value
+
+
 class TestAssertHsTemplate:
     """구 양식 혼입 가드 — 값 하나만 읽으므로 스텁으로 충분하다"""
 
