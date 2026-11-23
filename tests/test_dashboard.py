@@ -842,3 +842,136 @@ class TestSnapshotIsolation:
                 "고정 이름 사본을 다시 만들면 안 된다"
         finally:
             dashboard._db_snapshot.clear()
+
+
+# ═══════════════════════════════════════════════════════════════
+# 제품 분석 — PO 모델 breakdown
+# ═══════════════════════════════════════════════════════════════
+class TestPoModels:
+    """제품군(OS name)을 PO의 Model(NA → NA006 …)과 옵션 열(Y)로 한 단계 더 가른다"""
+
+    @staticmethod
+    def po_rows(*rows):
+        cols = ["SO_ID", "line_item", "model", "ALS", "PCU+PIU", "Bush-SQ"]
+        return pd.DataFrame(rows, columns=cols)
+
+    def test_option_flags_are_the_y_columns_of_the_po_form(self):
+        from po_generator.config import OPTION_FIELDS
+        assert "ALS" in dashboard.PO_OPTION_FLAGS
+        assert "HART, Foundation Fieldbus" in dashboard.PO_OPTION_FLAGS
+        # 값 열은 옵션이 아니다 — Model = 모델명, MOV조립·VALVE 가격 = 금액
+        for value_col in ("Model", "MOV조립", "VALVE 가격"):
+            assert value_col in OPTION_FIELDS
+            assert value_col not in dashboard.PO_OPTION_FLAGS
+
+    def test_line_models_union_options_and_first_model(self):
+        """분할발주로 한 SO 라인이 PO 여러 행이면 모델은 처음 적힌 값, 옵션은 합집합"""
+        out = dashboard.po_line_models(self.po_rows(
+            ["SOD-1", 1, "NA006", "Y", None, None],
+            ["SOD-1", 1, "", None, "y", None],
+            ["SOD-1", 2, "　", None, None, "N"],   # 전각 공백만 = 미기재, 'N'은 옵션 아님
+            ["SOD-2", 1, " SA005 ", None, None, "Y"],
+        ))
+        got = {(r.SO_ID, r.line_item): (r.model, r.options) for r in out.itertuples()}
+        assert got == {
+            ("SOD-1", 1): ("NA006", ("ALS", "PCU+PIU")),
+            ("SOD-1", 2): ("", ()),
+            ("SOD-2", 1): ("SA005", ("Bush-SQ",)),
+        }
+
+    def test_options_follow_form_order_not_row_order(self):
+        out = dashboard.po_line_models(self.po_rows(
+            ["SOD-1", 1, "NA006", None, None, "Y"],
+            ["SOD-1", 1, "NA006", "Y", None, None],
+        ))
+        assert out.loc[0, "options"] == ("ALS", "Bush-SQ")
+
+    def test_attach_does_not_fan_out_and_blank_without_po(self, sample_so):
+        pm = dashboard.po_line_models(self.po_rows(
+            ["ND-001", 1, "NA006", "Y", None, None],
+            ["ND-001", 1, "NA006", None, "Y", None],
+            ["NO-001", 1.0, "SA005", None, None, None],   # 라인 번호가 실수로 와도 맞물린다
+        ))
+        sm = dashboard.attach_po_models(sample_so, pm)
+        assert len(sm) == len(sample_so)
+        by_key = sm.set_index(["SO_ID", "line_item"])
+        assert by_key.loc[("ND-001", 1), "model"] == "NA006"
+        assert by_key.loc[("ND-001", 1), "options"] == ("ALS", "PCU+PIU")
+        assert bool(by_key.loc[("ND-001", 1), "has_option"])
+        assert by_key.loc[("NO-001", 1), "model"] == "SA005"
+        assert not bool(by_key.loc[("NO-001", 1), "has_option"])
+        # PO가 없는 라인(부속을 본품 라인에 합쳐 발주) — 모델·옵션 없음
+        assert by_key.loc[("ND-001", 2), "model"] == ""
+        assert by_key.loc[("ND-001", 2), "options"] == ()
+
+    def test_attach_with_empty_po(self, sample_so):
+        sm = dashboard.attach_po_models(sample_so, pd.DataFrame())
+        assert (sm["model"] == "").all()
+        assert not sm["has_option"].any()
+
+    @staticmethod
+    def lines(*rows):
+        return pd.DataFrame(rows, columns=["model", "options", "qty", "amount_krw"]).assign(
+            has_option=lambda d: d["options"].map(bool))
+
+    def test_breakdown_sorts_by_sales_and_unknown_last(self):
+        sm = self.lines(
+            ["NA006", ("ALS",), 2, 1_000_000],
+            ["NA006", (), 2, 600_000],
+            ["NA015", ("ALS", "PCU+PIU"), 1, 900_000],
+            ["", (), 10, 9_000_000],            # 미기재가 가장 커도 끝
+        )
+        bd = dashboard.model_breakdown(sm)
+        assert bd["모델"].tolist() == ["NA006", "NA015", dashboard.NO_MODEL]
+        na006 = bd.iloc[0]
+        assert (na006["라인"], na006["수량"], na006["매출"]) == (2, 4, 1_600_000)
+        assert na006["옵션매출"] == 1_000_000
+        assert na006["평균단가"] == 400_000
+        assert na006["옵션비율"] == 50        # 수량 기준 (4대 중 2대)
+
+    def test_breakdown_zero_qty_is_nan_not_error(self):
+        bd = dashboard.model_breakdown(self.lines(["NA006", ("ALS",), 0, 100]))
+        assert pd.isna(bd.loc[0, "평균단가"]) and pd.isna(bd.loc[0, "옵션비율"])
+
+    def test_option_matrix_shares_by_qty(self):
+        sm = self.lines(
+            ["NA006", ("ALS", "PCU+PIU"), 3, 300],
+            ["NA006", (), 1, 100],
+            ["NA015", ("PCU+PIU",), 2, 1_000],
+            ["", ("ALS",), 5, 5_000],            # 미기재는 행에서 빠진다
+        )
+        mx = dashboard.option_matrix(sm)
+        assert mx.index.tolist() == ["NA015", "NA006"]          # 매출 큰 순
+        assert mx.columns.tolist() == [dashboard.NO_OPTION, "PCU+PIU", "ALS"]  # 옵션은 전체 수량 큰 순
+        assert mx.loc["NA006"].tolist() == [25, 75, 75]
+        assert mx.loc["NA015"].tolist() == [0, 100, 0]
+
+    def test_option_matrix_empty_without_models(self):
+        assert dashboard.option_matrix(self.lines(["", ("ALS",), 1, 1])).empty
+
+    @pytest.mark.parametrize("v, text", [(float("nan"), "-"), (0, ""), (0.4, "<1%"), (75.4, "75%")])
+    def test_share_text(self, v, text):
+        assert dashboard._share_text(v) == text
+
+    def test_load_po_models_from_db(self, tmp_path, monkeypatch):
+        """국내/해외 PO를 읽고 Cancelled는 뺀다 — 테이블마다 옵션 열이 달라도 된다"""
+        path = tmp_path / "po.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute('CREATE TABLE po_domestic (SO_ID, [Line item], Model, Status, ALS, [PCU+PIU])')
+        conn.execute('CREATE TABLE po_export (SO_ID, [Line item], Model, Status, ALS, [-40])')
+        conn.executemany("INSERT INTO po_domestic VALUES (?,?,?,?,?,?)", [
+            ("SOD-1", "1", "NA006", "Open", "Y", "Y"),
+            ("SOD-2", "1", "NA015", "Cancelled", "Y", None),
+        ])
+        conn.execute("INSERT INTO po_export VALUES ('SOO-1', '2.0', 'SR05', 'Confirmed', NULL, 'Y')")
+        conn.commit()
+        conn.close()
+        monkeypatch.setattr(dashboard, "_conn", lambda: sqlite3.connect(str(path)))
+        dashboard.load_po_models.clear()
+        try:
+            pm = dashboard.load_po_models()
+        finally:
+            dashboard.load_po_models.clear()
+        got = {(r.SO_ID, r.line_item): (r.model, r.options) for r in pm.itertuples()}
+        assert got == {("SOD-1", 1): ("NA006", ("ALS", "PCU+PIU")),
+                       ("SOO-1", 2): ("SR05", ("-40",))}

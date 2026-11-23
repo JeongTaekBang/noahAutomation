@@ -22,7 +22,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-from po_generator.config import DB_FILE, EXCLUDED_SO_STATUSES, NOAH_SO_PO_DN_FILE
+from po_generator.config import DB_FILE, EXCLUDED_SO_STATUSES, NOAH_SO_PO_DN_FILE, OPTION_FIELDS
 from po_generator.db_schema import (
     ensure_so_change_ack_table, get_sync_metadata, SYNC_LOG_CHANGE_TYPES, SYNC_SHEETS,
 )
@@ -489,6 +489,36 @@ def load_po_detail() -> pd.DataFrame:
     df["factory_order_date"] = pd.to_datetime(df["factory_order_date"], errors="coerce")
     df["factory_exw"] = pd.to_datetime(df["factory_exw"], errors="coerce")
     return df
+
+
+@st.cache_data(ttl=300)
+def load_po_models() -> pd.DataFrame:
+    """SO 라인별 PO 모델명·옵션 — 제품 분석의 모델 breakdown용 (`po_line_models` 참조).
+
+    `load_po_detail()`은 SO_ID 단위로 접지만 모델은 **라인 단위**라 따로 읽는다.
+    Cancelled 발주는 뺀다. 옵션 열은 테이블에 있는 것만 고른다 (국내/해외 열이 다르다).
+    """
+    conn = _conn()
+    if not conn:
+        return pd.DataFrame()
+    try:
+        frames = []
+        for table in ("po_domestic", "po_export"):
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            flags = "".join(f", [{c}]" for c in PO_OPTION_FLAGS if c in cols)
+            frames.append(pd.read_sql_query(f"""
+                SELECT SO_ID, CAST([Line item] AS INTEGER) AS line_item,
+                       Model AS model{flags}
+                FROM {table}
+                WHERE COALESCE(Status, '') != 'Cancelled'
+            """, conn))
+    except Exception as e:
+        logger.warning("데이터 로드 실패: %s", e)
+        _record_load_error("PO 모델", e)
+        return pd.DataFrame()
+    finally:
+        conn.close()
+    return po_line_models(pd.concat(frames, ignore_index=True))
 
 
 @st.cache_data(ttl=300)
@@ -3538,6 +3568,241 @@ def pg_orders(market, sectors, customers, year, month):
 
 
 # ═══════════════════════════════════════════════════════════════
+# 제품 분석 — PO 모델 breakdown (순수 함수 + 렌더)
+# ═══════════════════════════════════════════════════════════════
+# PO 옵션 열 — 값 'Y'가 그 옵션이 붙었다는 표시다 (PO 양식의 옵션 칸, 가격에 반영된다).
+# config.OPTION_FIELDS에서 Y 플래그가 아닌 열(Model = 모델명, MOV조립·VALVE 가격 = 금액)을 뺀다.
+PO_OPTION_FLAGS = tuple(f for f in OPTION_FIELDS if f not in ("Model", "MOV조립", "VALVE 가격"))
+NO_MODEL = "(모델 미기재)"
+NO_OPTION = "옵션 없음"
+# 옵션 이름에 쉼표가 들어 있어('Modbus, Profibus') 화면에서 이을 때는 쉼표를 쓰지 않는다
+_OPTION_SEP = " / "
+
+
+def po_line_models(rows: pd.DataFrame) -> pd.DataFrame:
+    """PO 행 → SO 라인별 모델명·옵션. 순수 함수.
+
+    입력: SO_ID, line_item, model + 옵션 열(`PO_OPTION_FLAGS` 중 있는 것, 값 'Y').
+    한 SO 라인이 PO 여러 행으로 나뉘어 있으면(옛 분할발주) 모델은 처음 적힌 값, 옵션은
+    합집합이다 — 실측(2026-11-23) 나뉜 18라인 모두 행끼리 모델·옵션이 같았다.
+    반환: SO_ID, line_item, model('' = 미기재), options(`PO_OPTION_FLAGS` 순서의 튜플).
+    """
+    empty = pd.DataFrame(columns=["SO_ID", "line_item", "model", "options"])
+    if rows.empty:
+        return empty
+    df = rows.dropna(subset=["SO_ID", "line_item"]).copy()
+    if df.empty:
+        return empty
+    # 셀에 전각 공백(U+3000)만 든 행이 있다 — str.strip()이 그것까지 지운다
+    df["model"] = df["model"].fillna("").astype(str).str.strip()
+    flags = [f for f in PO_OPTION_FLAGS if f in df.columns]
+    on = pd.DataFrame({
+        f: df[f].fillna("").astype(str).str.strip().str.upper().eq("Y") for f in flags
+    }, index=df.index)
+    keys = [df["SO_ID"], df["line_item"]]
+    model = df.groupby(keys, sort=False)["model"].agg(lambda s: next((v for v in s if v), ""))
+    if flags:
+        has = on.groupby(keys, sort=False).any()
+        options = has.apply(lambda r: tuple(f for f in flags if r[f]), axis=1)
+    else:
+        options = pd.Series([()] * len(model), index=model.index)
+    out = pd.DataFrame({"model": model, "options": options.reindex(model.index)})
+    return out.rename_axis(["SO_ID", "line_item"]).reset_index()
+
+
+def attach_po_models(so: pd.DataFrame, po_models: pd.DataFrame) -> pd.DataFrame:
+    """SO 라인에 PO 모델·옵션을 붙인다. 순수 함수. 키 = (SO_ID, 라인).
+
+    PO가 없거나 Model이 빈 라인은 model '' · options (). PO는 부속을 본품 라인에
+    합쳐 적으므로 부속 SO 라인은 PO 행이 없어 모델이 비는 게 맞다.
+    `po_models`는 (SO_ID, 라인)당 1행이라(`po_line_models`) SO 행이 늘지 않는다.
+    """
+    out = so.copy()
+    if not out.empty and not po_models.empty:
+        right = po_models.assign(
+            _li=pd.to_numeric(po_models["line_item"], errors="coerce"),
+        ).drop(columns="line_item")
+        out["_li"] = pd.to_numeric(out["line_item"], errors="coerce")
+        out = out.merge(right, on=["SO_ID", "_li"], how="left").drop(columns="_li")
+    if "model" not in out.columns:
+        out["model"] = ""
+        out["options"] = None
+    out["model"] = out["model"].fillna("")
+    out["options"] = [v if isinstance(v, tuple) else () for v in out["options"]]
+    out["has_option"] = out["options"].map(bool)
+    return out
+
+
+def _model_label(model: pd.Series) -> pd.Series:
+    return model.where(model != "", NO_MODEL)
+
+
+def model_breakdown(sm: pd.DataFrame) -> pd.DataFrame:
+    """모델별 집계. 순수 함수. `sm` = `attach_po_models` 결과.
+
+    반환: 모델, 라인, 수량, 매출, 옵션매출, 평균단가, 옵션비율(수량 기준 %).
+    매출 큰 순이고 미기재는 모델이 아니므로 늘 맨 끝이다.
+    """
+    cols = ["모델", "라인", "수량", "매출", "옵션매출", "평균단가", "옵션비율"]
+    if sm.empty:
+        return pd.DataFrame(columns=cols)
+    d = pd.DataFrame({
+        "모델": _model_label(sm["model"]),
+        "q": pd.to_numeric(sm["qty"], errors="coerce").fillna(0),
+        "a": pd.to_numeric(sm["amount_krw"], errors="coerce").fillna(0),
+        "opt": sm["has_option"].astype(bool),
+    })
+    d["oq"] = d["q"].where(d["opt"], 0)
+    d["oa"] = d["a"].where(d["opt"], 0)
+    g = d.groupby("모델").agg(
+        라인=("q", "size"), 수량=("q", "sum"), 매출=("a", "sum"),
+        옵션수량=("oq", "sum"), 옵션매출=("oa", "sum"),
+    ).reset_index()
+    qty = g["수량"].where(g["수량"] != 0)
+    g["평균단가"] = g["매출"] / qty
+    g["옵션비율"] = g["옵션수량"] / qty * 100
+    g["_unknown"] = g["모델"] == NO_MODEL
+    g = g.sort_values(["_unknown", "매출", "모델"], ascending=[True, False, True])
+    return g[cols].reset_index(drop=True)
+
+
+def option_matrix(sm: pd.DataFrame) -> pd.DataFrame:
+    """모델 × 옵션 — 모델 수량 중 그 옵션이 붙은 비율(%). 순수 함수.
+
+    행 = 모델(매출 큰 순, 미기재 제외), 열 = 맨 앞 '옵션 없음' + 이 범위에 한 번이라도
+    나온 옵션(전체 수량 비율 큰 순). 수량이 0인 모델은 NaN.
+    옵션은 한 라인에 여럿 붙으므로 '옵션 없음'을 뺀 행 합은 100%를 넘을 수 있다.
+    """
+    d = sm[sm["model"] != ""]
+    if d.empty:
+        return pd.DataFrame()
+    rows = pd.DataFrame({
+        "model": d["model"],
+        "options": [opts or (NO_OPTION,) for opts in d["options"]],
+        "q": pd.to_numeric(d["qty"], errors="coerce").fillna(0),
+        "a": pd.to_numeric(d["amount_krw"], errors="coerce").fillna(0),
+    })
+    total_q = rows.groupby("model")["q"].sum()
+    order = rows.groupby("model")["a"].sum().sort_values(ascending=False, kind="stable").index
+    ex = rows.explode("options")
+    pv = ex.pivot_table(index="model", columns="options", values="q",
+                        aggfunc="sum", fill_value=0)
+    opt_cols = [c for c in pv.columns if c != NO_OPTION]
+    opt_cols = sorted(opt_cols, key=lambda c: (-pv[c].sum(), PO_OPTION_FLAGS.index(c)
+                                              if c in PO_OPTION_FLAGS else len(PO_OPTION_FLAGS)))
+    pv = pv.reindex(columns=[NO_OPTION] + opt_cols, fill_value=0)
+    share = pv.div(total_q.where(total_q != 0), axis=0) * 100
+    share = share.reindex(order)
+    share.index.name = "모델"
+    share.columns.name = None
+    return share
+
+
+def _share_text(v) -> str:
+    """히트맵 칸 글자 — 0은 비워 붙은 옵션만 눈에 띄게, 1% 미만은 '0%'로 지우지 않는다"""
+    if pd.isna(v):
+        return "-"
+    if v <= 0:
+        return ""
+    return "<1%" if v < 1 else f"{v:.0f}%"
+
+
+def _render_model_breakdown(so: pd.DataFrame, default_family: str | None) -> None:
+    """제품군 하나를 골라 PO 모델별(NA → NA006, NA015 …) 매출과 옵션 구성을 보인다."""
+    st.subheader("모델별 상세 (PO 모델 · 옵션 기준)")
+    po_models = load_po_models()
+    if po_models.empty:
+        st.info("PO 모델 데이터 없음")
+        return
+    sm = attach_po_models(so, po_models)
+    fam_sales = (sm[sm["model"] != ""].groupby("os_name")["amount_krw"].sum()
+                 .sort_values(ascending=False))
+    families = [f for f in fam_sales.index if f]
+    if not families:
+        st.info("이 범위의 SO 라인에 PO 모델이 적힌 것이 없습니다")
+        return
+    idx = families.index(default_family) if default_family in families else 0
+    family = st.selectbox(
+        "제품군", families, index=idx,
+        help="위 '제품별 매출' 막대를 클릭하면 그 제품군으로 바뀝니다. "
+             "PO에 Model이 적힌 라인이 하나라도 있는 제품군만 나옵니다.",
+    )
+    sub = sm[sm["os_name"] == family]
+    bd = model_breakdown(sub)
+    known = bd[bd["모델"] != NO_MODEL]
+
+    amt = sub["amount_krw"].fillna(0)
+    total_amt = amt.sum()
+    covered = amt[sub["model"] != ""].sum()
+    q = sub["qty"].fillna(0)
+    total_q = q.sum()
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("모델 수", f"{len(known)}")
+    k2.metric("최고 매출 모델", known["모델"].iloc[0] if len(known) else "-")
+    k3.metric("옵션 포함", f"{q[sub['has_option']].sum() / total_q * 100:.0f}%" if total_q else "-",
+              help="수량 기준 — PO 옵션 열에 Y가 하나라도 있는 라인")
+    k4.metric("PO 모델 기재율", f"{covered / total_amt * 100:.0f}%" if total_amt else "-",
+              help="매출 기준 — 나머지는 PO가 없거나(부속을 본품 라인에 합쳐 발주) "
+                   "PO의 Model 칸이 빈 라인입니다")
+
+    # 모델별 매출 — 옵션 포함/없음으로 나눠 쌓는다
+    long = pd.concat([
+        pd.DataFrame({"모델": bd["모델"], "구분": "옵션 포함", "매출": bd["옵션매출"]}),
+        pd.DataFrame({"모델": bd["모델"], "구분": NO_OPTION, "매출": bd["매출"] - bd["옵션매출"]}),
+    ], ignore_index=True)
+    fig = px.bar(long, y="모델", x="매출", color="구분", orientation="h",
+                 category_orders={"모델": bd["모델"].tolist(), "구분": ["옵션 포함", NO_OPTION]},
+                 color_discrete_map={"옵션 포함": C_INPUT, NO_OPTION: "#b0b0b0"})
+    fig.update_traces(hovertemplate="<b>%{y}</b> · %{fullData.name}<br>₩%{x:,.0f}<extra></extra>")
+    fig.update_layout(height=max(300, 70 + len(bd) * 28), margin=dict(t=40, l=200),
+                      legend=dict(orientation="h", yanchor="bottom", y=1.0, x=0, title=None),
+                      xaxis=dict(tickformat=",.0f"), yaxis=dict(title=None))
+    st.plotly_chart(fig, width='stretch')
+
+    # 모델 × 옵션 — 수량 중 그 옵션이 붙은 비율
+    mx = option_matrix(sub)
+    if not mx.empty:
+        st.markdown("**모델별 옵션 구성** (수량 중 옵션이 붙은 비율)")
+        text = mx.map(_share_text)
+        # 0%는 칸을 비워(투명) 붙은 옵션만 색이 들게 한다
+        fig_mx = go.Figure(data=go.Heatmap(
+            z=mx.where(mx > 0).values, x=mx.columns.tolist(), y=mx.index.tolist(),
+            text=text.values, texttemplate="%{text}",
+            colorscale="Blues", zmin=0, zmax=100, showscale=False,
+            hovertemplate="<b>%{y}</b> × %{x}<br>%{z:.0f}% (수량 기준)<extra></extra>",
+        ))
+        fig_mx.update_layout(height=max(250, 80 + len(mx) * 28),
+                             margin=dict(t=60, b=10, l=200),
+                             xaxis=dict(side="top"), yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig_mx, width='stretch')
+        st.caption("옵션은 한 라인에 여럿 붙으므로 행을 더하면 100%를 넘을 수 있습니다. "
+                   "'옵션 없음' = PO 옵션 열이 전부 빈 라인")
+
+    with st.expander("모델별 표"):
+        tbl = bd.copy()
+        tbl["매출"] = tbl["매출"].apply(fmt_krw)
+        tbl["평균단가"] = tbl["평균단가"].apply(lambda v: "-" if pd.isna(v) else fmt_krw(v))
+        tbl["옵션비율"] = tbl["옵션비율"].apply(lambda v: "-" if pd.isna(v) else f"{v:.0f}%")
+        st.dataframe(tbl.drop(columns="옵션매출").rename(columns={"옵션비율": "옵션 포함(수량)"}),
+                     width='stretch', hide_index=True)
+    with st.expander("라인별 옵션"):
+        # 모델은 위 차트와 같은 순서(매출 큰 순, 미기재 맨 끝)
+        rank = {m: i for i, m in enumerate(bd["모델"])}
+        lines = sub.assign(
+            모델=_model_label(sub["model"]),
+            옵션=[_OPTION_SEP.join(o) if o else NO_OPTION for o in sub["options"]],
+        )
+        lines = lines.assign(_rank=lines["모델"].map(rank)).sort_values(
+            ["_rank", "SO_ID", "line_item"])
+        lines = lines[["SO_ID", "line_item", "period", "customer_name", "item_name",
+                       "모델", "옵션", "qty", "amount_krw"]].rename(columns={
+            "line_item": "라인", "period": "월", "customer_name": "고객",
+            "item_name": "품목", "qty": "수량", "amount_krw": "매출"})
+        st.dataframe(lines, width='stretch', hide_index=True,
+                     column_config={"매출": st.column_config.NumberColumn(format="localized")})
+
+
+# ═══════════════════════════════════════════════════════════════
 # Page 3: 제품 분석
 # ═══════════════════════════════════════════════════════════════
 def pg_product(market, sectors, customers, year, month):
@@ -3602,6 +3867,9 @@ def pg_product(market, sectors, customers, year, month):
         fig_pc.update_layout(height=250, margin=dict(t=30, l=150),
                              yaxis=dict(autorange="reversed"))
         st.plotly_chart(fig_pc, width='stretch')
+
+    # ── 모델별 상세 — PO 모델명으로 한 단계 더 (NA → NA006, NA015 …) + 옵션(Y) ──
+    _render_model_breakdown(so, selected_product)
 
     # 구성비 + 월별 추이
     col1, col2 = st.columns(2)
