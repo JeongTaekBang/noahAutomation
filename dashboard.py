@@ -1045,6 +1045,21 @@ def _pk_tokens(pk_json) -> list[str]:
     return [str(t) for t in arr]
 
 
+def _po_pk(pk_json) -> tuple[str, str | None, int | None] | None:
+    """PO 로그 PK → (PO 번호, SO 번호, 라인). 읽을 수 없으면 None.
+
+    PO의 PK는 2026-11-17에 (PO_ID, Line item, 순번) → (PO_ID, SO_ID, Line item, 순번)으로 바뀌었다
+    (`db_schema.SYNC_SHEETS`). 로그에는 두 형식이 섞여 있다 — 옛 형식은 SO 번호가 없어 None이다.
+    둘째 자리가 숫자면 라인(옛 형식), 아니면 SO 번호(새 형식)로 가른다 — 문서 번호는 숫자만으로 된 것이 없다.
+    """
+    tokens = _pk_tokens(pk_json)
+    if len(tokens) < 2:
+        return None
+    if _to_number(tokens[1]) is None:
+        return tokens[0], tokens[1], _line_number(tokens[2]) if len(tokens) > 2 else None
+    return tokens[0], None, _line_number(tokens[1])
+
+
 @st.cache_data(ttl=60)
 def load_sync_log(days: int = 30) -> pd.DataFrame:
     """_sync_log v2 + _sync_runs 조인 로드. days=0이면 전체.
@@ -6040,8 +6055,9 @@ def _order_summary(facts: dict) -> dict:
 def _events_for_order(log_df: pd.DataFrame, facts: dict) -> pd.DataFrame:
     """동기화 로그에서 이 주문의 행만 (오래된 것부터).
 
-    PK에 SO 번호가 있는 것은 SO(첫 자리)와 DN(둘째 자리)뿐이다. PO의 PK는 (PO 번호, 라인, 순번)이라
-    발주 하나가 SO 여러 개를 묶으면 남의 라인이 섞인다 — 그래서 이 주문의 PO 라인과 대조한다.
+    SO(첫 자리)와 DN(둘째 자리)은 PK의 SO 번호로 고른다. PO는 PK 형식이 둘이다(`_po_pk`) — 새 형식은
+    SO 번호(둘째 자리)로 고르고, SO 번호가 없는 옛 형식(PO 번호, 라인, 순번)은 이 주문의 PO 라인과
+    대조한다. 옛 형식을 PO 번호만으로 고르면 발주 하나가 SO 여러 개를 묶을 때 남의 라인이 섞인다.
     """
     if log_df.empty:
         return log_df
@@ -6055,7 +6071,11 @@ def _events_for_order(log_df: pd.DataFrame, facts: dict) -> pd.DataFrame:
         if sheet.startswith("SO_"):
             return tokens[0] == so_id
         if sheet.startswith("PO_"):
-            return len(tokens) > 1 and (tokens[0], _line_number(tokens[1])) in po_keys
+            key = _po_pk(pk_json)
+            if key is None:
+                return False
+            po_id, po_so, line = key
+            return po_so == so_id if po_so is not None else (po_id, line) in po_keys
         if sheet.startswith("DN_"):
             return len(tokens) > 1 and tokens[1] == so_id
         return False
@@ -6137,8 +6157,8 @@ def _order_journey(facts: dict, events: pd.DataFrame, today) -> list[dict]:
         for r in records:
             if r["doc"] != "PO":
                 continue
-            tokens = _pk_tokens(r["pk_json"])
-            key = (tokens[0], _line_number(tokens[1])) if len(tokens) > 1 else None
+            po_key = _po_pk(r["pk_json"])
+            key = (po_key[0], po_key[2]) if po_key else None
             status = r["changes"].get("Status")
             if r["change_type"] == "신규":
                 became = _is_confirmed(status)

@@ -25,7 +25,7 @@ from po_generator.db_sync import SyncEngine
 from sync_db import _reconcile_rekeys, write_sync_log_to_db
 from po_generator.db_sync import SheetSyncResult, SyncSummary
 
-PO_PK = ('PO_ID', 'Line item', '_row_seq')
+PO_PK = ('PO_ID', 'SO_ID', 'Line item', '_row_seq')
 
 
 def _write_po_sheet(path, line_item):
@@ -68,22 +68,22 @@ def test_filled_keycol_yields_clean_insert(tmp_path):
 
 def test_rekey_value_edit_collapses_to_update():
     """Line item 1→12 편집: 삭제+신규 → 키변경(수정) 1건."""
-    ins = [{'pk': ('TEST-1', '12', '1'),
+    ins = [{'pk': ('TEST-1', 'S1', '12', '1'),
             'values': {'Item name': 'Widget', 'SO_ID': 'S1', '_row_seq': '1'}}]
-    prn = [{'pk': ('TEST-1', '1', '1'),
+    prn = [{'pk': ('TEST-1', 'S1', '1', '1'),
             'snapshot': {'Item name': 'Widget', 'SO_ID': 'S1', 'Line item': '1', '_row_seq': '1'}}]
     rekeys, rem_ins, rem_prn = _reconcile_rekeys(PO_PK, ins, prn)
     assert len(rekeys) == 1
     assert not rem_ins and not rem_prn
-    assert rekeys[0]['pk'] == ('TEST-1', '12', '1')
+    assert rekeys[0]['pk'] == ('TEST-1', 'S1', '12', '1')
     assert rekeys[0]['changes']['Line item'] == {'old': '1', 'new': '12'}
 
 
 def test_rekey_fill_sparse_snapshot_matches_superset():
     """삭제 스냅샷이 신규 값의 부분집합이어도(키 채우며 값 추가) 매칭."""
-    ins = [{'pk': ('TEST-1', '1', '1'),
+    ins = [{'pk': ('TEST-1', 'S1', '1', '1'),
             'values': {'Item name': 'Widget', 'SO_ID': 'S1', 'Line item': '1', 'Status': 'Open'}}]
-    prn = [{'pk': ('TEST-1', '', '1'),
+    prn = [{'pk': ('TEST-1', 'S1', '', '1'),
             'snapshot': {'Item name': 'Widget', 'SO_ID': 'S1'}}]  # Line item/Status 없음
     rekeys, rem_ins, rem_prn = _reconcile_rekeys(PO_PK, ins, prn)
     assert len(rekeys) == 1 and not rem_ins and not rem_prn
@@ -92,16 +92,16 @@ def test_rekey_fill_sparse_snapshot_matches_superset():
 
 def test_guard_different_entity_not_paired():
     """문서ID(PO_ID)가 다르면 절대 묶이지 않음."""
-    ins = [{'pk': ('TEST-1', '12', '1'), 'values': {'Item name': 'Widget'}}]
-    prn = [{'pk': ('TEST-2', '1', '1'), 'snapshot': {'Item name': 'Widget'}}]
+    ins = [{'pk': ('TEST-1', 'S1', '12', '1'), 'values': {'Item name': 'Widget'}}]
+    prn = [{'pk': ('TEST-2', 'S1', '1', '1'), 'snapshot': {'Item name': 'Widget'}}]
     rekeys, rem_ins, rem_prn = _reconcile_rekeys(PO_PK, ins, prn)
     assert not rekeys and len(rem_ins) == 1 and len(rem_prn) == 1
 
 
 def test_guard_different_content_not_paired():
     """비키 컬럼 내용이 다르면 묶이지 않음."""
-    ins = [{'pk': ('TEST-1', '12', '1'), 'values': {'Item name': 'Gadget'}}]
-    prn = [{'pk': ('TEST-1', '1', '1'), 'snapshot': {'Item name': 'Widget'}}]
+    ins = [{'pk': ('TEST-1', 'S1', '12', '1'), 'values': {'Item name': 'Gadget'}}]
+    prn = [{'pk': ('TEST-1', 'S1', '1', '1'), 'snapshot': {'Item name': 'Widget'}}]
     rekeys, rem_ins, rem_prn = _reconcile_rekeys(PO_PK, ins, prn)
     assert not rekeys and len(rem_ins) == 1 and len(rem_prn) == 1
 
@@ -109,10 +109,10 @@ def test_guard_different_content_not_paired():
 def test_guard_ambiguous_match_kept_as_delete():
     """삭제 1건에 신규 후보가 2건이면 모호 → 묶지 않고 삭제로 보존(안전)."""
     ins = [
-        {'pk': ('TEST-1', '12', '1'), 'values': {'Item name': 'Widget'}},
-        {'pk': ('TEST-1', '13', '1'), 'values': {'Item name': 'Widget'}},
+        {'pk': ('TEST-1', 'S1', '12', '1'), 'values': {'Item name': 'Widget'}},
+        {'pk': ('TEST-1', 'S1', '13', '1'), 'values': {'Item name': 'Widget'}},
     ]
-    prn = [{'pk': ('TEST-1', '1', '1'), 'snapshot': {'Item name': 'Widget'}}]
+    prn = [{'pk': ('TEST-1', 'S1', '1', '1'), 'snapshot': {'Item name': 'Widget'}}]
     rekeys, rem_ins, rem_prn = _reconcile_rekeys(PO_PK, ins, prn)
     assert not rekeys
     assert len(rem_ins) == 2 and len(rem_prn) == 1
@@ -121,7 +121,7 @@ def test_guard_ambiguous_match_kept_as_delete():
 def test_empty_inputs_passthrough():
     """입력이 비면 그대로 통과(에러 없음)."""
     assert _reconcile_rekeys(PO_PK, [], []) == ([], [], [])
-    ins = [{'pk': ('A', '1', '1'), 'values': {'x': '1'}}]
+    ins = [{'pk': ('A', 'S1', '1', '1'), 'values': {'x': '1'}}]
     assert _reconcile_rekeys(PO_PK, ins, []) == ([], ins, [])
 
 
@@ -131,9 +131,9 @@ def test_write_log_records_rekey_as_single_update(tmp_path):
     """재키잉이 _sync_log에 '수정' 1행으로만 남고, 삭제/신규는 안 남는다."""
     db = tmp_path / 'log.db'
     res = SheetSyncResult(sheet_name='PO_국내', table_name='po_domestic')
-    res.inserted_details = [{'pk': ('TEST-1', '12', '1'),
+    res.inserted_details = [{'pk': ('TEST-1', 'S1', '12', '1'),
                              'values': {'Item name': 'Widget', 'SO_ID': 'S1', '_row_seq': '1'}}]
-    res.pruned_snapshots = [{'pk': ('TEST-1', '1', '1'),
+    res.pruned_snapshots = [{'pk': ('TEST-1', 'S1', '1', '1'),
                              'snapshot': {'Item name': 'Widget', 'SO_ID': 'S1',
                                           'Line item': '1', '_row_seq': '1'}}]
     summary = SyncSummary(results=[res], started_at='2026-06-26 13:12:00')
@@ -145,7 +145,7 @@ def test_write_log_records_rekey_as_single_update(tmp_path):
     ).fetchall()
     types = [r[0] for r in rows]
     assert types == ['수정'], f"기대=['수정'] 실제={types}"
-    assert 'TEST-1 | 12 | 1' == rows[0][1]
+    assert 'TEST-1 | S1 | 12 | 1' == rows[0][1]
     assert 'Line item' in rows[0][2]
 
 
@@ -202,6 +202,37 @@ def test_dn_second_sync_is_unchanged_not_rekeyed(tmp_path):
     r = SyncEngine(xlsx, db).sync_all(sheet_filter=['DN_국내']).results[0]
     assert (r.inserted, r.updated, r.pruned) == (0, 0, 0)
     assert r.unchanged == 2
+
+
+def _write_po_rows(path, rows):
+    """PO_국내 시트 생성. rows = [(so_id, line_item, qty, status), ...] — 전부 같은 발주 ND-0897"""
+    pd.DataFrame([{
+        'PO_ID': 'ND-0897', 'SO_ID': so, 'Line item': li, 'Item name': 'NLB1-AM0A',
+        'Item qty': qty, 'Total ICO': '43000', 'Status': st,
+    } for so, li, qty, st in rows]).to_excel(path, sheet_name='PO_국내', index=False)
+
+
+def test_po_line_bundling_several_sos_gives_each_its_own_key(tmp_path):
+    """발주 한 라인이 SO 여러 개를 묶어도 SO마다 제 키를 갖는다 (실측 ND-0897 L1 = SO 7개).
+
+    예전 PK (PO_ID, Line item, 순번)에서는 같은 키에 순번 1~7이 붙어, 한 행이 빠지면
+    뒤 행의 순번이 전부 밀렸다 — 연도 분리 때 일부 행만 새 파일로 옮기면 남의 행을 덮는다.
+    같은 SO 라인을 여러 행으로 나눈 옛 분할출고는 여전히 순번으로 가른다.
+    """
+    xlsx, db = tmp_path / 't.xlsx', tmp_path / 't.db'
+    _write_po_rows(xlsx, [('SOD-0888', '1', '2', 'Invoiced P10'), ('SOD-0889', '1', '2', 'Confirmed'),
+                          ('SOD-0890', '1', '2', 'Confirmed'),
+                          ('SOD-0877', '1', '20', 'Invoiced P09'), ('SOD-0877', '1', '20', 'Invoiced P09')])
+    assert SyncEngine(xlsx, db).sync_all(sheet_filter=['PO_국내']).results[0].inserted == 5
+    rows = sqlite3.connect(db).execute(
+        'SELECT SO_ID, _row_seq FROM po_domestic ORDER BY SO_ID, _row_seq').fetchall()
+    assert rows == [('SOD-0877', '1'), ('SOD-0877', '2'), ('SOD-0888', '1'), ('SOD-0889', '1'), ('SOD-0890', '1')]
+
+    # 0888 행이 빠져도(다른 파일로 옮겨 가도) 나머지 행의 키는 그대로다 — 수정·재키잉 없음
+    _write_po_rows(xlsx, [('SOD-0889', '1', '2', 'Confirmed'), ('SOD-0890', '1', '2', 'Confirmed'),
+                          ('SOD-0877', '1', '20', 'Invoiced P09'), ('SOD-0877', '1', '20', 'Invoiced P09')])
+    r = SyncEngine(xlsx, db).sync_all(sheet_filter=['PO_국내']).results[0]
+    assert (r.inserted, r.updated, r.pruned, r.unchanged) == (0, 0, 1, 4)
 
 
 # ── 5. PK 마이그레이션 로그 ───────────────────────────────────────────────

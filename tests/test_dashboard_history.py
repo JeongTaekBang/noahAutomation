@@ -890,7 +890,7 @@ class TestOrderJourney:
 class TestOrderEvents:
 
     def test_only_this_orders_rows(self):
-        """PO의 PK에는 SO 번호가 없다 — 한 발주가 SO 여러 개를 묶으면 남의 라인이 섞이지 않게 라인으로 가른다"""
+        """옛 형식 PO PK에는 SO 번호가 없다 — 한 발주가 SO 여러 개를 묶으면 남의 라인이 섞이지 않게 라인으로 가른다"""
         facts = order(so=[so_line(1)], po=[po_line(1)], dn=[dn_line(1, 1)])
         log = log_frame([
             added(1, 1, 'SO_국내', ['SOD-2026-1118', '1'], {}),
@@ -903,6 +903,35 @@ class TestOrderEvents:
         ])
         assert dashboard._events_for_order(log, facts)['id'].tolist() == [1, 3, 5]
         assert dashboard._events_for_order(log.iloc[0:0], facts).empty
+
+    def test_new_po_key_picks_by_so(self):
+        """2026-11-17부터 PO PK에 SO 번호가 있다 — 발주 한 라인이 SO 여러 개를 묶어도(실측 ND-0897) 제 것만.
+
+        로그에는 옛 형식(PO 번호, 라인, 순번)도 남아 있어 둘 다 읽어야 한다.
+        """
+        facts = order(so_id='SOD-2026-0889', so=[so_line(1)], po=[po_line(1, po_id='ND-0897')])
+        log = log_frame([
+            added(1, 1, 'PO_국내', ['ND-0897', '1', '2'], {}),                      # 옛 형식 — 라인으로 대조
+            added(2, 2, 'PO_국내', ['ND-0897', 'SOD-2026-0888', '1', '1'], {}),     # 같은 발주 라인, 남의 SO
+            added(3, 2, 'PO_국내', ['ND-0897', 'SOD-2026-0889', '1', '1'], {}),
+            added(4, 2, 'PO_국내', ['ND-0897', 'SOD-2026-0889', '2', '1'], {}),     # 이 SO의 다른 라인도 이 주문
+        ])
+        assert dashboard._events_for_order(log, facts)['id'].tolist() == [1, 3, 4]
+
+    def test_po_pk_reads_both_formats(self):
+        assert dashboard._po_pk('["ND-1","1","1"]') == ('ND-1', None, 1)
+        assert dashboard._po_pk('["ND-1","2.0"]') == ('ND-1', None, 2), '순번이 생기기 전 형식'
+        assert dashboard._po_pk('["ND-1","SOD-1","1.0","1"]') == ('ND-1', 'SOD-1', 1)
+        assert dashboard._po_pk('["ND-1"]') is None and dashboard._po_pk('') is None
+
+    def test_confirmation_time_from_new_po_key(self):
+        facts = order(so=[so_line(1)], po=[po_line(1, 'Confirmed')])
+        events = log_frame([
+            added(1, 1, 'PO_국내', ['ND-1118', 'SOD-2026-1118', '1', '1'], {'Status': 'Sent'}),
+            edit(2, 2, 'PO_국내', ['ND-1118', 'SOD-2026-1118', '1', '1'], {'Status': ('Sent', 'Confirmed')}),
+        ], TIMES)
+        confirmed = journey(facts, events)['confirmed']
+        assert (confirmed['state'], confirmed['date']) == ('done', '2026-11-06')
 
 
 class TestJourneyChart:

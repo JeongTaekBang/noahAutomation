@@ -42,15 +42,17 @@ bat 메뉴에서는 `[5] Excel → DB 동기화` 선택.
 |----------|----------|-----|------|
 | `so_domestic` | SO_국내 | `(SO_ID, Line item)` | |
 | `so_export` | SO_해외 | `(SO_ID, Line item)` | |
-| `po_domestic` | PO_국내 | `(PO_ID, Line item, _row_seq)` | 부분 매입 순번 |
-| `po_export` | PO_해외 | `(PO_ID, Line item, _row_seq)` | 부분 매입 순번 |
-| `dn_domestic` | DN_국내 | `(DN_ID, SO_ID, Line item)` | |
-| `dn_export` | DN_해외 | `(DN_ID, SO_ID, Line item)` | |
+| `po_domestic` | PO_국내 | `(PO_ID, SO_ID, Line item, _row_seq)` | 분할 행 순번 |
+| `po_export` | PO_해외 | `(PO_ID, SO_ID, Line item, _row_seq)` | 분할 행 순번 |
+| `dn_domestic` | DN_국내 | `(DN_ID, SO_ID, Line item, _row_seq)` | 분할 행 순번 |
+| `dn_export` | DN_해외 | `(DN_ID, SO_ID, Line item, _row_seq)` | 분할 행 순번 |
 | `pmt_domestic` | PMT_국내 | `(선수금_ID)` | |
 
-### PO 테이블 `_row_seq`
+### PO·DN 테이블 `_row_seq`
 
-부분 매입 시 같은 Line item이 분할되어 중복될 수 있으므로 (예: Line item 1, qty 2 → Line item 1, qty 1 두 행), 같은 `(PO_ID, Line item)` 내에서 Excel 행 순서대로 자동 순번(1,2,3...) 부여. PO_국내/PO_해외 모두 적용.
+같은 문서·같은 라인을 여러 행으로 나눠 적으면 자연키가 겹치므로 (예: Line item 1, qty 2 → Line item 1, qty 1 두 행), 같은 자연키(PO는 `(PO_ID, SO_ID, Line item)`, DN은 `(DN_ID, SO_ID, Line item)`) 안에서 Excel 행 순서대로 자동 순번(1,2,3...)을 부여한다.
+
+PO 키의 `SO_ID`는 2026-11-17에 넣었다. 발주 한 라인이 SO 여러 개를 묶으면(실측 `ND-0897` L1 = SO 7개) 예전 키 `(PO_ID, Line item)`에서는 순번(위치)으로만 갈려, 행 일부가 다른 파일로 옮겨 가면(연도 분리) 순번이 밀렸다. 분할출고 때 SO 라인도 나눠 적는 운영(2026-11~) 뒤로는 새 PO 행의 순번이 늘 1이다 — 순번은 옛 분할 행 때문에 남겨 둔다. 키를 바꾼 첫 동기화는 PO 두 테이블을 백업(`*_bak`)하고 다시 적재하며 변경 이력에는 '재적재' 1건만 남는다.
 
 ### 메타 테이블 `_sync_meta`
 

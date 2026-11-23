@@ -50,21 +50,26 @@ SYNC_SHEETS: list[SheetConfig] = [
         pk_columns=('SO_ID', 'Line item'),
         required_column='SO_ID',
     ),
+    # PO 키에 SO_ID가 있어야 한다 — 발주 한 라인이 SO 여러 개를 묶으면(실측 ND-0897 L1 = SO 7개,
+    # ND-1010) (PO_ID, Line item)이 같아 엑셀 행 순서 순번으로만 갈렸다. 순번은 위치라서 행 일부가
+    # 다른 파일로 옮겨 가면(연도 분리) 밀려 남의 행을 덮는다. SO_ID를 넣으면 그 행들이 각자의 키를 갖는다.
+    # 같은 SO 라인을 PO에 여러 행으로 나눠 적은 옛 분할출고(2026년 18그룹)는 여전히 순번으로 가른다 —
+    # 2026-11 이후로는 분할출고 때 SO 라인도 나눠 적으므로(사용자 운영 규칙) 새 데이터의 순번은 늘 1이다.
     SheetConfig(
         sheet_name=PO_DOMESTIC_SHEET,
         table_name='po_domestic',
-        pk_columns=('PO_ID', 'Line item', '_row_seq'),
+        pk_columns=('PO_ID', 'SO_ID', 'Line item', '_row_seq'),
         required_column='PO_ID',
         needs_row_seq=True,
-        row_seq_group=('PO_ID', 'Line item'),
+        row_seq_group=('PO_ID', 'SO_ID', 'Line item'),
     ),
     SheetConfig(
         sheet_name=PO_EXPORT_SHEET,
         table_name='po_export',
-        pk_columns=('PO_ID', 'Line item', '_row_seq'),
+        pk_columns=('PO_ID', 'SO_ID', 'Line item', '_row_seq'),
         required_column='PO_ID',
         needs_row_seq=True,
-        row_seq_group=('PO_ID', 'Line item'),
+        row_seq_group=('PO_ID', 'SO_ID', 'Line item'),
     ),
     # DN도 (DN_ID, SO_ID, Line item)이 유일하지 않다 — 같은 DN 문서·같은 SO 라인을
     # 두 행으로 나눠 적는 분할출고가 실제로 존재한다(2026-07-30 실측 2쌍). _row_seq 없이는
