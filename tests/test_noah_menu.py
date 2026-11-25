@@ -75,6 +75,27 @@ def test_menu_has_desktop_shortcut():
     assert "noah_menu.bat" in build.SHORTCUTS.values()
 
 
+def test_menu_is_the_default_shortcut():
+    """기본 이름 아이콘은 메뉴다 (2026-11-26 사용자 결정) — GUI는 '(창)'"""
+    build = _load_build_module()
+    assert build.SHORTCUTS["NOAH 문서 생성기.lnk"] == "noah_menu.bat"
+    assert build.SHORTCUTS["NOAH 문서 생성기 (창).lnk"] == "NOAH 문서생성기.vbs"
+
+
+def test_legacy_shortcuts_do_not_overlap_current():
+    """옛 이름은 설치 때 지워진다 — 지금 이름과 겹치면 방금 만들 아이콘을 지우는 셈이다"""
+    build = _load_build_module()
+    assert "NOAH 문서 생성기 (메뉴).lnk" in build.LEGACY_SHORTCUTS
+    assert not set(build.LEGACY_SHORTCUTS) & set(build.SHORTCUTS)
+
+
+def test_menu_shows_build_version():
+    """README '버전 확인'은 메뉴 화면 맨 위를 가리킨다 — 메뉴가 BUILD_INFO를 읽어 보여야 한다"""
+    text = _bat_text(MENU_BAT)
+    assert "BUILD_INFO.txt" in text
+    assert "echo    v%APP_VER%" in text
+
+
 def test_help_smoke_skips_bat():
     """--help 스모크는 파이썬 CLI만 — .bat에 --help를 주면 메뉴가 뜨고 멈춘다"""
     build = _load_build_module()

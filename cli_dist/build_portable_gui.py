@@ -13,9 +13,9 @@ Usage:
       ├── 설치.bat        ← 더블클릭 (LocalAppData로 복사 + 바탕화면 바로가기)
       ├── README.txt
       └── app/            ← 본체
-          ├── NOAH 문서생성기.vbs   ← GUI 실행 (콘솔 없음)
+          ├── noah_menu.bat         ← 문서 메뉴 (국내/해외 8종만, 콘솔) — 기본 바로가기
+          ├── NOAH 문서생성기.vbs   ← GUI 실행 (콘솔 없음) — '(창)' 바로가기
           ├── NOAH 문서생성기.bat   ← GUI 문제 진단용 (콘솔 표시)
-          ├── noah_menu.bat         ← 문서 메뉴 (국내/해외 7종만, 콘솔) — 바로가기 2번
           ├── setup_data_path.py    ← 메뉴 첫 실행 때 데이터 파일을 찾아 ini에 적는다
           ├── 제거.bat              ← 설치 폴더 + 바탕화면 바로가기 삭제
           ├── BUILD_INFO.txt        ← 빌드 버전·구성 (GUI 타이틀·문의 대응용)
@@ -167,12 +167,21 @@ TRIM_DIRS = (
 # 사용자가 압축을 어디에 풀든 그대로 두면 런타임 전체가 동기화된다.
 INSTALL_DIR_NAME = "NOAH_DocGen"  # 경로는 ASCII로 (batch에서 안전)
 
-# 바탕화면 바로가기 {이름: app/ 안의 대상}. GUI와 콘솔 메뉴 — 둘 다 같은 CLI·같은 ini를 쓴다.
+# 바탕화면 바로가기 {이름: app/ 안의 대상}. 콘솔 메뉴와 GUI — 둘 다 같은 CLI·같은 ini를 쓴다.
+# 기본은 메뉴다 (2026-11-26 사용자 결정 — 개발 PC에서 쓰는 create_po.bat과 같은 화면이라
+# 설명이 쉽다). 그래서 꾸밈 없는 이름을 메뉴가 갖고, GUI는 '(창)'을 붙인다.
 # 메뉴 쪽은 .bat이 대상이다 — 바로가기로 실행하면 cmd가 작업 폴더(app/)에서 띄운다.
 SHORTCUTS = {
-    "NOAH 문서 생성기.lnk": "NOAH 문서생성기.vbs",
-    "NOAH 문서 생성기 (메뉴).lnk": "noah_menu.bat",
+    "NOAH 문서 생성기.lnk": "noah_menu.bat",
+    "NOAH 문서 생성기 (창).lnk": "NOAH 문서생성기.vbs",
 }
+
+# 예전 판이 만들던 바로가기 — 설치·제거 때 같이 지운다. 업데이트(설치.bat 재실행)는
+# SHORTCUTS만 다시 만들므로, 이름이 바뀐 옛 아이콘은 지우지 않으면 바탕화면에 남아
+# 같은 메뉴를 가리키는 아이콘이 둘이 된다.
+LEGACY_SHORTCUTS = (
+    "NOAH 문서 생성기 (메뉴).lnk",  # ~2026-11-25: GUI가 기본 이름, 메뉴가 '(메뉴)'
+)
 
 STEP_TOTAL = 7
 step = Stepper(STEP_TOTAL)
@@ -230,6 +239,7 @@ from win32com.shell import shell, shellcon
 
 APP_DIR = Path(__file__).resolve().parent
 SHORTCUTS = {SHORTCUTS!r}  # {{바로가기 이름: app/ 안의 대상}}
+LEGACY_SHORTCUTS = {LEGACY_SHORTCUTS!r}  # 예전 판의 바로가기 — 설치·제거 때 지운다
 
 
 def desktop() -> Path:
@@ -237,7 +247,16 @@ def desktop() -> Path:
     return Path(shell.SHGetFolderPath(0, shellcon.CSIDL_DESKTOPDIRECTORY, None, 0))
 
 
+def _unlink(names) -> None:
+    for name in names:
+        try:
+            (desktop() / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
 def create() -> None:
+    _unlink(LEGACY_SHORTCUTS)
     for name, target in SHORTCUTS.items():
         link = pythoncom.CoCreateInstance(
             shell.CLSID_ShellLink, None, pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink)
@@ -247,11 +266,8 @@ def create() -> None:
 
 
 def remove() -> None:
-    for name in SHORTCUTS:
-        try:
-            (desktop() / name).unlink()
-        except FileNotFoundError:
-            pass
+    _unlink(LEGACY_SHORTCUTS)
+    _unlink(SHORTCUTS)
 
 
 if __name__ == "__main__":
@@ -352,14 +368,14 @@ if %ERRORLEVEL% GEQ 8 (
 "%TARGET%\\python\\python.exe" -B "%TARGET%\\_make_shortcut.py" create
 if %ERRORLEVEL% NEQ 0 (
     echo  [경고] 바탕화면 바로가기를 만들지 못했습니다.
-    echo  설치 폴더의 "NOAH 문서생성기.vbs" 로 직접 실행할 수 있습니다.
+    echo  설치 폴더의 "noah_menu.bat" 으로 직접 실행할 수 있습니다.
 )
 
 echo.
 echo  설치가 끝났습니다.
 echo  바탕화면에 아이콘 2개가 생겼습니다:
-echo    [NOAH 문서 생성기]        창(GUI)
-echo    [NOAH 문서 생성기 (메뉴)]  번호를 골라 쓰는 콘솔 메뉴 (국내/해외 문서)
+echo    [NOAH 문서 생성기]       번호를 골라 쓰는 메뉴 - 국내/해외 문서 8종 (기본)
+echo    [NOAH 문서 생성기 (창)]  창(GUI) - 문서 8종 + 납기현황 회신 + DN 출고기록
 echo.
 pause
 ''')
@@ -370,40 +386,48 @@ pause
 [설치]
   1. 이 폴더의 "설치.bat" 을 더블클릭하세요.
   2. 바탕화면에 아이콘 2개가 생깁니다.
-       [NOAH 문서 생성기]         창(GUI) — 문서 7종 + 납기현황 + DN 출고기록
-       [NOAH 문서 생성기 (메뉴)]  콘솔 메뉴 — [국내]/[해외] 문서 7종만
-     둘 중 편한 쪽을 쓰면 됩니다. 같은 데이터 파일·같은 설정을 씁니다.
+       [NOAH 문서 생성기]        메뉴 — 번호를 골라 문서를 만듭니다 (기본)
+       [NOAH 문서 생성기 (창)]   창(GUI) — 문서 8종 + 납기현황 회신 + DN 출고기록
+     평소에는 메뉴를 쓰면 됩니다. 두 아이콘은 같은 데이터 파일·같은 설정을 씁니다.
   3. 처음 실행하면 한 번 NOAH_SO_PO_DN.xlsx 위치를 정합니다.
-       GUI  — 파일 선택 창
        메뉴 — OneDrive에서 자동으로 찾아 보여주므로 Enter만 누르면 됩니다
               (못 찾으면 경로를 붙여넣으세요. 나중에 바꾸려면 메뉴의 [P])
+       창   — 파일 선택 창
+
+[메뉴 쓰는 법]
+  번호를 넣고 Enter → 묻는 번호(주문번호·DN 번호 등)를 넣고 Enter.
+    [국내]  1 발주서(PO)   2 거래명세표
+    [해외]  3 Proforma Invoice   4 Final Invoice   5 Order Confirmation
+            6 Commercial Invoice   7 Packing List   8 원산지증명서(COO)
+    [P] 데이터 파일 경로 변경   [0] 종료
 
 [준비물]
   - Excel 데스크톱 (문서 생성에 Excel을 사용합니다)
   - NOAH_SO_PO_DN.xlsx 가 OneDrive로 "동기화된" 상태
     ※ 웹 링크(https://...)는 사용할 수 없습니다.
        OneDrive 웹에서 파일을 열고 [내 파일에 바로가기 추가]를 누른 뒤,
-       동기화가 끝나면 프로그램에서 [파일 찾기]로 선택하세요.
+       동기화가 끝나면 메뉴의 [P](창에서는 [파일 찾기])로 다시 지정하세요.
 
 [만들 수 있는 문서]
   발주서(PO) · 거래명세표(TS) · Proforma Invoice(PI)
   Final Invoice(FI) · Order Confirmation(OC)
-  Commercial Invoice(CI) · Packing List(PL)
+  Commercial Invoice(CI) · Packing List(PL) · 원산지증명서(COO)
 
-[납기현황 회신]
+[납기현황 회신 — 창(GUI)에서만]
   거래처가 "언제 나오냐"고 물을 때 보낼 미출고 현황표를 만듭니다.
-  문서 종류에서 [납기현황]을 고르고 사업자등록번호(또는 거래처명 일부)를 넣으세요.
+  [NOAH 문서 생성기 (창)]을 열어 문서 종류에서 [납기현황]을 고르고
+  사업자등록번호(또는 거래처명 일부)를 넣으세요.
   - 사업자번호를 모르면 [거래처 목록]을 골라 [생성] — 미출고가 있는 거래처가 나옵니다.
   - [메일 초안 만들기]를 켜면 본문에 표가 들어간 회신 메일이 열립니다 (보내기는 직접 확인).
 
 [버전 확인]
-  프로그램 창 제목에 버전이 표시됩니다 (예: v{version}).
+  메뉴 화면 맨 위와 창 제목에 버전이 표시됩니다 (예: v{version}).
   문의하실 때 이 버전을 알려주시면 빠르게 확인할 수 있습니다.
 
 [업데이트]
   새 zip을 받아 "설치.bat" 을 다시 실행하면 됩니다.
   지정해 둔 데이터 파일 경로는 그대로 유지됩니다.
-  ※ 프로그램이 켜져 있으면 업데이트가 실패합니다. 닫고 실행하세요.
+  ※ 메뉴나 창이 켜져 있으면 업데이트가 실패할 수 있습니다. 닫고 실행하세요.
 
 [제거]
   설치 폴더(%LOCALAPPDATA%\\{INSTALL_DIR_NAME})의 "제거.bat" 을 실행하세요.

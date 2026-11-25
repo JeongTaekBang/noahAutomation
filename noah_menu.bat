@@ -52,10 +52,16 @@ if not "%~1"=="" (
     goto dispatch
 )
 
+REM 배포판이면 화면 맨 위에 버전을 보인다 (문의 대응 — README '버전 확인').
+REM 개발 PC에는 BUILD_INFO.txt가 없어 아무것도 안 나온다.
+set "APP_VER="
+if exist "%~dp0BUILD_INFO.txt" for /f "usebackq tokens=1,2" %%a in ("%~dp0BUILD_INFO.txt") do if "%%a"=="version:" set "APP_VER=%%b"
+
 :menu
 cls
 echo ========================================
 echo    NOAH 문서 생성기
+if defined APP_VER echo    v%APP_VER%
 echo ========================================
 "%PYTHON_PATH%" "%~dp0setup_data_path.py" --print
 echo.
